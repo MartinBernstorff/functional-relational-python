@@ -40,10 +40,6 @@ from functional_relational_python.support.generated_files import (
 )
 from functional_relational_python.support.identifier import Identifier
 
-type RuntimeAnnotation = object
-"""A field's annotation as Python holds it at run time: a class, `None`, a generic
-alias such as `list[int]`, a union, a `type` alias, or a `Literal` argument."""
-
 
 class ModulePath(pydantic.RootModel[str], frozen=True):
     """A dotted Python module path, e.g. `myapp.views.company`."""
@@ -178,7 +174,7 @@ type CodegenDiagnostic = (
 class UnimportableError(Exception):
     """A class or `type` alias cannot be imported by its module and name."""
 
-    def __init__(self, named: RuntimeAnnotation) -> None:
+    def __init__(self, named: ir.RuntimeAnnotation) -> None:
         self.named = named
         super().__init__(f"{named!r} cannot be imported by its module and name")
 
@@ -193,7 +189,7 @@ class Symbol(pydantic.BaseModel, frozen=True):
     qualname: Annotated[tuple[Identifier, ...], pydantic.Field(min_length=1)]
 
     @staticmethod
-    def of(named: RuntimeAnnotation) -> Result[Symbol, UnimportableError]:
+    def of(named: ir.RuntimeAnnotation) -> Result[Symbol, UnimportableError]:
         """How source imports `named`, a class or `type` alias, by its module and
         qualified name. That fails when `named` is not reachable that way, e.g. for
         a class defined in a function."""
@@ -223,6 +219,14 @@ class Symbol(pydantic.BaseModel, frozen=True):
 
 class TypeExpression(pydantic.RootModel[str], frozen=True):
     """An annotation as it is written in generated source."""
+
+    def optional(self, optionality: Optionality) -> TypeExpression:
+        """Written like `ir.Lookup.annotation`, for a model that only exists as source."""
+        match optionality:
+            case Optionality.REQUIRED:
+                return self
+            case Optionality.OPTIONAL:
+                return TypeExpression(f"{self.root} | None")
 
 
 class ModelField(pydantic.BaseModel, frozen=True):
@@ -264,13 +268,13 @@ class _FieldRenderer:
         self.symbols: set[Symbol] = set()
         self.diagnostics: list[CodegenDiagnostic] = []
 
-    def render(self, annotation: RuntimeAnnotation) -> TypeExpression:
+    def render(self, annotation: ir.RuntimeAnnotation) -> TypeExpression:
         origin = typing.get_origin(annotation)
         if origin is None:
             return self._unparameterised(annotation)
         return self._parameterised(annotation, origin, typing.get_args(annotation))
 
-    def _unparameterised(self, annotation: RuntimeAnnotation) -> TypeExpression:
+    def _unparameterised(self, annotation: ir.RuntimeAnnotation) -> TypeExpression:
         if annotation is None or annotation is types.NoneType:
             return TypeExpression("None")
         if annotation is Ellipsis:
@@ -281,9 +285,9 @@ class _FieldRenderer:
 
     def _parameterised(
         self,
-        annotation: RuntimeAnnotation,
-        origin: RuntimeAnnotation,
-        args: Sequence[RuntimeAnnotation],
+        annotation: ir.RuntimeAnnotation,
+        origin: ir.RuntimeAnnotation,
+        args: Sequence[ir.RuntimeAnnotation],
     ) -> TypeExpression:
         if origin is typing.Union:
             return TypeExpression(" | ".join(self.render(arg).root for arg in args))
@@ -300,7 +304,7 @@ class _FieldRenderer:
         rendered = ", ".join(self.render(arg).root for arg in args)
         return TypeExpression(f"{self.render(origin).root}[{rendered}]")
 
-    def _named(self, annotation: RuntimeAnnotation) -> TypeExpression:
+    def _named(self, annotation: ir.RuntimeAnnotation) -> TypeExpression:
         match Symbol.of(annotation):
             case Ok(symbol):
                 self.symbols.add(symbol)
@@ -315,7 +319,7 @@ class _FieldRenderer:
                 )
                 return TypeExpression(repr(annotation))
 
-    def _unsupported(self, annotation: RuntimeAnnotation) -> TypeExpression:
+    def _unsupported(self, annotation: ir.RuntimeAnnotation) -> TypeExpression:
         self.diagnostics.append(
             UnsupportedAnnotation(
                 view=self.view,
@@ -366,11 +370,7 @@ class _ModelPlanner:
                         qualname=(nested_names.name.identifier(),),
                     )
                     symbols.add(symbol)
-                    rendered = TypeExpression(
-                        symbol.reference().root
-                        if lookup.optionality is Optionality.REQUIRED
-                        else f"{symbol.reference().root} | None"
-                    )
+                    rendered = symbol.reference().optional(field.optionality())
             fields.append(ModelField(name=field.name, type=rendered))
             symbols |= renderer.symbols
             self.defined_here |= {
