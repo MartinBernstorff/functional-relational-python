@@ -65,6 +65,10 @@ class ModulePath(pydantic.RootModel[str], frozen=True):
         """Where the module lives, relative to the directory it is imported from."""
         return RelativePath(PurePosixPath(*self.root.split(".")).with_suffix(".py"))
 
+    def top_level(self) -> Identifier:
+        """The name `import <this module>` binds."""
+        return Identifier(self.root.split(".")[0])
+
     def is_stdlib(self) -> bool:
         return self.root.split(".")[0] in sys.stdlib_module_names
 

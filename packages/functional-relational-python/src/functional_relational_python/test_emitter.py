@@ -11,6 +11,7 @@ from hypothesis import strategies as st
 from safe_result import Err, Ok
 
 from functional_relational_python import compiler, emitter, engine, steps
+from functional_relational_python.codegen import ModulePath
 from functional_relational_python.entity_graph import EntityGraph, FieldName
 from functional_relational_python.id import Id
 from functional_relational_python.views import View, ViewName
@@ -71,8 +72,8 @@ def compile_all(views: Iterable[View]) -> compiler.CompiledViews:
             pytest.fail(f"expected compiled views, got {error}")
 
 
-def this_module(_view: compiler.CompiledView) -> emitter.ModulePath:
-    return emitter.ModulePath(__name__)
+def this_module(_view: compiler.CompiledView) -> ModulePath:
+    return ModulePath(__name__)
 
 
 def emit(views: Iterable[View]) -> emitter.EmittedModule:
@@ -184,9 +185,7 @@ def test_a_view_model_module_named_like_the_parameter_is_a_diagnostic() -> None:
 
     match emitter.PythonEmitter.emit(
         compile_all([view]),
-        lambda _view: emitter.ModulePath(
-            f"{emitter.PythonEmitter.parameter.root}.views"
-        ),
+        lambda _view: ModulePath(f"{emitter.PythonEmitter.parameter.root}.views"),
     ):
         case Ok(emitted):
             pytest.fail(f"expected diagnostics, got {emitted.root}")
@@ -324,7 +323,7 @@ def emitted_module(compiled: compiler.CompiledViews) -> Generator[types.ModuleTy
     sys.modules[view_models.__name__] = view_models
     try:
         match emitter.PythonEmitter.emit(
-            compiled, lambda _view: emitter.ModulePath(view_models.__name__)
+            compiled, lambda _view: ModulePath(view_models.__name__)
         ):
             case Ok(emitted):
                 module = types.ModuleType(f"{__name__}_emitted")
