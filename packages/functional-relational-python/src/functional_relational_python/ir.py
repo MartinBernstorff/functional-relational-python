@@ -7,11 +7,7 @@ and derives its Relation (the fields a View result will have).
 import pydantic
 from pydantic.fields import FieldInfo
 
-
-class FieldName(pydantic.RootModel[str], frozen=True):
-    @staticmethod
-    def fake() -> FieldName:
-        return FieldName("name")
+from functional_relational_python.entity_graph import FieldName
 
 
 class SourceName(pydantic.RootModel[str], frozen=True):

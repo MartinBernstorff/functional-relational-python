@@ -5,7 +5,7 @@ from hypothesis import strategies as st
 from safe_result import Err, Ok
 
 from functional_relational_python import compiler, diagnostics, ir, steps
-from functional_relational_python.entity_graph import EntityGraph
+from functional_relational_python.entity_graph import EntityGraph, FieldName
 from functional_relational_python.views import View, ViewName
 
 
@@ -19,17 +19,22 @@ class Company(pydantic.BaseModel):
     revenue: Text
 
 
-def field_names(view: compiler.CompiledView) -> list[ir.FieldName]:
+def empty_graph() -> EntityGraph:
+    # The Sources here are not Entities; compile does not require them to be.
+    return EntityGraph.build([]).unwrap()
+
+
+def field_names(view: compiler.CompiledView) -> list[FieldName]:
     return [field.name for field in view.relation.fields]
 
 
-def names(*fields: Text) -> list[ir.FieldName]:
-    return [ir.FieldName(field.root) for field in fields]
+def names(*fields: Text) -> list[FieldName]:
+    return [FieldName(field.root) for field in fields]
 
 
 def compile_one(step: steps.Step) -> compiler.CompiledView:
     match compiler.compile_views(
-        EntityGraph.fake(), [View(name=ViewName.fake(), source=Company, step=step)]
+        empty_graph(), [View(name=ViewName.fake(), source=Company, step=step)]
     ):
         case Ok(compiled):
             return compiled.views[0]
@@ -38,7 +43,7 @@ def compile_one(step: steps.Step) -> compiler.CompiledView:
 
 
 def diagnostics_of(views: list[View]) -> tuple[diagnostics.Diagnostic, ...]:
-    match compiler.compile_views(EntityGraph.fake(), views):
+    match compiler.compile_views(empty_graph(), views):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
@@ -46,7 +51,7 @@ def diagnostics_of(views: list[View]) -> tuple[diagnostics.Diagnostic, ...]:
 
 
 def test_omit_removes_the_field_from_the_source() -> None:
-    view = compile_one(steps.omit(ir.FieldName("secret")))
+    view = compile_one(steps.omit(FieldName("secret")))
 
     assert field_names(view) == names(Text("name"), Text("revenue"))
 
@@ -55,15 +60,15 @@ def test_omit_removes_the_field_from_the_source() -> None:
     "step",
     [
         steps.pipeline(
-            steps.omit(ir.FieldName("secret")), steps.omit(ir.FieldName("revenue"))
+            steps.omit(FieldName("secret")), steps.omit(FieldName("revenue"))
         ),
         steps.pipeline(
-            steps.pipeline(steps.omit(ir.FieldName("secret"))),
-            steps.omit(ir.FieldName("revenue")),
+            steps.pipeline(steps.omit(FieldName("secret"))),
+            steps.omit(FieldName("revenue")),
         ),
         steps.pipeline(
-            steps.omit(ir.FieldName("secret")),
-            steps.pipeline(steps.pipeline(), steps.omit(ir.FieldName("revenue"))),
+            steps.omit(FieldName("secret")),
+            steps.pipeline(steps.pipeline(), steps.omit(FieldName("revenue"))),
         ),
     ],
     ids=["flat", "nested-first", "nested-last-with-empty"],
@@ -82,21 +87,21 @@ def test_an_empty_pipeline_keeps_every_field() -> None:
 
 def test_a_user_defined_step_composes_like_a_built_in_one() -> None:
     def without_financials(node: ir.Node) -> ir.Node:
-        return steps.omit(ir.FieldName("revenue"))(node)
+        return steps.omit(FieldName("revenue"))(node)
 
     view = compile_one(
-        steps.pipeline(without_financials, steps.omit(ir.FieldName("secret")))
+        steps.pipeline(without_financials, steps.omit(FieldName("secret")))
     )
 
     assert field_names(view) == names(Text("name"))
 
 
 def test_an_unknown_field_names_the_source_the_field_and_the_valid_names() -> None:
-    unknown = ir.FieldName("revnue")
+    unknown = FieldName("revnue")
     view = View(
         name=ViewName.fake(),
         source=Company,
-        step=steps.pipeline(steps.omit(ir.FieldName("secret")), steps.omit(unknown)),
+        step=steps.pipeline(steps.omit(FieldName("secret")), steps.omit(unknown)),
     )
 
     assert diagnostics_of([view]) == (
@@ -104,7 +109,7 @@ def test_an_unknown_field_names_the_source_the_field_and_the_valid_names() -> No
             view=view.name,
             source=ir.SourceName("Company"),
             field=unknown,
-            valid=(ir.FieldName("name"), ir.FieldName("revenue")),
+            valid=(FieldName("name"), FieldName("revenue")),
         ),
     )
 
@@ -113,9 +118,9 @@ def test_the_unknown_field_message_contains_the_offending_values() -> None:
     message = diagnostics.UnknownField(
         view=ViewName("CompanySummary"),
         source=ir.SourceName("Company"),
-        field=ir.FieldName("revnue"),
-        valid=(ir.FieldName("name"), ir.FieldName("revenue")),
-    ).message()
+        field=FieldName("revnue"),
+        valid=(FieldName("name"), FieldName("revenue")),
+    ).describe()
 
     assert message.root == (
         "CompanySummary: Company has no field 'revnue'. "
@@ -127,7 +132,7 @@ def test_compiled_views_keep_their_explicit_names_in_order() -> None:
     names = [ViewName("CompanyPublic"), ViewName("CompanyInternal")]
 
     match compiler.compile_views(
-        EntityGraph.fake(),
+        empty_graph(),
         [View(name=name, source=Company, step=steps.pipeline()) for name in names],
     ):
         case Ok(compiled):
@@ -137,7 +142,7 @@ def test_compiled_views_keep_their_explicit_names_in_order() -> None:
 
 
 def test_building_a_pipeline_checks_nothing() -> None:
-    unknown = ir.FieldName("does_not_exist")
+    unknown = FieldName("does_not_exist")
     root = ir.FromSource(source=Company)
 
     node = steps.pipeline(steps.omit(unknown))(root)
@@ -159,7 +164,7 @@ class Wide(pydantic.BaseModel):
 
 class ViewsWithDefects(pydantic.BaseModel, frozen=True):
     views: tuple[View, ...]
-    unknown_fields: tuple[ir.FieldName, ...]
+    unknown_fields: tuple[FieldName, ...]
     defective_views: frozenset[ViewName]
 
 
@@ -171,7 +176,7 @@ def views_with_defects(draw: st.DrawFn) -> ViewsWithDefects:
     Source, and valid omits use each field at most once.
     """
     views: list[View] = []
-    unknown_fields: list[ir.FieldName] = []
+    unknown_fields: list[FieldName] = []
     defective_views: set[ViewName] = set()
     for index in range(draw(st.integers(min_value=0, max_value=4))):
         source = draw(st.sampled_from([Company, Wide]))
@@ -179,14 +184,14 @@ def views_with_defects(draw: st.DrawFn) -> ViewsWithDefects:
         unknown = draw(st.lists(unknown_field_name, max_size=3))
         omits = draw(st.permutations([*valid, *unknown]))
         name = ViewName(f"View{index}")
-        unknown_fields.extend(map(ir.FieldName, unknown))
+        unknown_fields.extend(map(FieldName, unknown))
         if unknown:
             defective_views.add(name)
         views.append(
             View(
                 name=name,
                 source=source,
-                step=steps.pipeline(*(steps.omit(ir.FieldName(f)) for f in omits)),
+                step=steps.pipeline(*(steps.omit(FieldName(f)) for f in omits)),
             )
         )
     return ViewsWithDefects(
@@ -200,7 +205,7 @@ def views_with_defects(draw: st.DrawFn) -> ViewsWithDefects:
 def test_n_independent_defects_give_exactly_n_diagnostics(
     case: ViewsWithDefects,
 ) -> None:
-    match compiler.compile_views(EntityGraph.fake(), case.views):
+    match compiler.compile_views(empty_graph(), case.views):
         case Ok(_):
             assert case.unknown_fields == ()
         case Err(error):

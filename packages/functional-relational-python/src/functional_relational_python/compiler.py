@@ -50,7 +50,7 @@ class CompileError(Exception):
     def __init__(self, diagnostics: tuple[diagnostics.Diagnostic, ...]) -> None:
         self.diagnostics = diagnostics
         super().__init__(
-            "\n".join(diagnostic.message().root for diagnostic in diagnostics)
+            "\n".join(diagnostic.describe().root for diagnostic in diagnostics)
         )
 
 

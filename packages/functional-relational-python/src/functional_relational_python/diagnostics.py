@@ -1,11 +1,8 @@
 import pydantic
 
 from functional_relational_python import ir
+from functional_relational_python.entity_graph import DiagnosticMessage, FieldName
 from functional_relational_python.views import ViewName
-
-
-class DiagnosticMessage(pydantic.RootModel[str], frozen=True):
-    pass
 
 
 class UnknownField(pydantic.BaseModel, frozen=True):
@@ -13,10 +10,10 @@ class UnknownField(pydantic.BaseModel, frozen=True):
 
     view: ViewName
     source: ir.SourceName
-    field: ir.FieldName
-    valid: tuple[ir.FieldName, ...]
+    field: FieldName
+    valid: tuple[FieldName, ...]
 
-    def message(self) -> DiagnosticMessage:
+    def describe(self) -> DiagnosticMessage:
         valid = ", ".join(f"'{name.root}'" for name in self.valid)
         return DiagnosticMessage(
             f"{self.view.root}: {self.source.root} has no field "

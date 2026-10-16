@@ -1,0 +1,268 @@
+import itertools
+from collections.abc import Sequence
+
+import pytest
+from pydantic import BaseModel, RootModel
+from safe_result import Err, Ok, Result
+
+from functional_relational_python import entity_graph
+from functional_relational_python.id import Id
+
+
+class DepartmentId(Id[int]):
+    pass
+
+
+class EmployeeId(Id[int]):
+    pass
+
+
+class ProjectId(Id[int]):
+    pass
+
+
+class Department(BaseModel):
+    id: DepartmentId
+
+
+class Employee(BaseModel):
+    id: EmployeeId
+    department_id: DepartmentId
+    mentor: EmployeeId | None
+
+
+class Project(BaseModel):
+    id: ProjectId
+    owner_id: EmployeeId
+    department_id: DepartmentId | None
+
+
+class OtherDepartment(BaseModel):
+    id: DepartmentId
+
+
+class ThirdDepartment(BaseModel):
+    id: DepartmentId
+
+
+class AssignmentId(Id[int]):
+    pass
+
+
+class BudgetId(Id[str]):
+    pass
+
+
+class Name(RootModel[str]):
+    pass
+
+
+class Assignment(BaseModel):
+    id: AssignmentId
+    project_id: ProjectId
+
+
+class Budget(BaseModel):
+    id: BudgetId
+    department_id: DepartmentId
+
+
+class Unidentified(BaseModel):
+    name: Name
+
+
+class NonIdPrimaryKey(BaseModel):
+    id: Name
+
+
+class OptionalId(BaseModel):
+    id: DepartmentId | None
+
+
+def _diagnostics(
+    entities: Sequence[type[BaseModel]],
+) -> frozenset[entity_graph.EntityGraphDiagnostic]:
+    match entity_graph.EntityGraph.build(entities):
+        case Ok(graph):
+            pytest.fail(f"Expected diagnostics, got {graph}")
+        case Err(error):
+            return error.diagnostics
+
+
+def test_references_resolve_to_the_entity_owning_their_id_type() -> None:
+    result = entity_graph.EntityGraph.build([Department, Employee, Project])
+
+    assert isinstance(result, Ok)
+    assert result.value.entities[Project].references == (
+        entity_graph.Reference(
+            field=entity_graph.FieldName("owner_id"),
+            id_type=EmployeeId,
+            target=Employee,
+            optionality=entity_graph.Optionality.REQUIRED,
+        ),
+        entity_graph.Reference(
+            field=entity_graph.FieldName("department_id"),
+            id_type=DepartmentId,
+            target=Department,
+            optionality=entity_graph.Optionality.OPTIONAL,
+        ),
+    )
+
+
+def test_an_entity_may_reference_itself() -> None:
+    result = entity_graph.EntityGraph.build([Department, Employee])
+
+    assert isinstance(result, Ok)
+    assert [
+        reference.target for reference in result.value.entities[Employee].references
+    ] == [Department, Employee]
+
+
+def test_entities_record_their_primary_key_type() -> None:
+    result = entity_graph.EntityGraph.build([Department])
+
+    assert isinstance(result, Ok)
+    assert result.value.entities[Department].id_type is DepartmentId
+
+
+@pytest.mark.parametrize(
+    ("entities", "expected"),
+    [
+        pytest.param(
+            [Department, OtherDepartment],
+            entity_graph.DuplicatePrimaryKey(
+                id_type=DepartmentId,
+                entities=frozenset({Department, OtherDepartment}),
+            ),
+            id="two entities",
+        ),
+        pytest.param(
+            [Department, OtherDepartment, ThirdDepartment],
+            entity_graph.DuplicatePrimaryKey(
+                id_type=DepartmentId,
+                entities=frozenset({Department, OtherDepartment, ThirdDepartment}),
+            ),
+            id="three entities",
+        ),
+    ],
+)
+def test_an_id_type_keying_several_entities_is_a_diagnostic(
+    entities: Sequence[type[BaseModel]],
+    expected: entity_graph.DuplicatePrimaryKey,
+) -> None:
+    assert _diagnostics(entities) == frozenset({expected})
+
+
+@pytest.mark.parametrize(
+    ("entities", "expected"),
+    [
+        pytest.param(
+            [Employee],
+            entity_graph.UnresolvedReference(
+                entity=Employee,
+                field=entity_graph.FieldName("department_id"),
+                id_type=DepartmentId,
+            ),
+            id="required",
+        ),
+        pytest.param(
+            [Department, Project],
+            entity_graph.UnresolvedReference(
+                entity=Project,
+                field=entity_graph.FieldName("owner_id"),
+                id_type=EmployeeId,
+            ),
+            id="required, beside a resolved reference",
+        ),
+        pytest.param(
+            [Employee, Project],
+            entity_graph.UnresolvedReference(
+                entity=Project,
+                field=entity_graph.FieldName("department_id"),
+                id_type=DepartmentId,
+            ),
+            id="optional",
+        ),
+    ],
+)
+def test_a_reference_without_an_entity_is_a_diagnostic(
+    entities: Sequence[type[BaseModel]],
+    expected: entity_graph.UnresolvedReference,
+) -> None:
+    assert expected in _diagnostics(entities)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [Unidentified, NonIdPrimaryKey, OptionalId],
+)
+def test_a_model_without_an_id_primary_key_is_a_diagnostic(
+    model: type[BaseModel],
+) -> None:
+    assert _diagnostics([model]) == frozenset({entity_graph.NotAnEntity(model=model)})
+
+
+def test_every_diagnostic_is_reported_at_once() -> None:
+    assert _diagnostics([Department, OtherDepartment, Unidentified, Assignment]) == {
+        entity_graph.DuplicatePrimaryKey(
+            id_type=DepartmentId,
+            entities=frozenset({Department, OtherDepartment}),
+        ),
+        entity_graph.NotAnEntity(model=Unidentified),
+        entity_graph.UnresolvedReference(
+            entity=Assignment,
+            field=entity_graph.FieldName("project_id"),
+            id_type=ProjectId,
+        ),
+    }
+
+
+def test_a_reference_to_a_duplicated_id_type_is_not_also_unresolved() -> None:
+    diagnostics = _diagnostics([Department, OtherDepartment, Budget])
+
+    assert diagnostics == {
+        entity_graph.DuplicatePrimaryKey(
+            id_type=DepartmentId,
+            entities=frozenset({Department, OtherDepartment}),
+        ),
+    }
+
+
+def test_the_error_message_names_the_offending_types() -> None:
+    match entity_graph.EntityGraph.build([Employee]):
+        case Ok(graph):
+            pytest.fail(f"Expected diagnostics, got {graph}")
+        case Err(error):
+            assert "Employee.department_id" in str(error)
+            assert "DepartmentId" in str(error)
+
+
+@pytest.mark.parametrize(
+    "entities",
+    [
+        pytest.param([Department, Employee, Project, Assignment], id="valid"),
+        pytest.param(
+            [Department, OtherDepartment, Employee, Unidentified, Assignment],
+            id="invalid",
+        ),
+    ],
+)
+def test_reordering_the_entities_gives_the_same_result(
+    entities: Sequence[type[BaseModel]],
+) -> None:
+    first, *rest = [
+        _comparable(entity_graph.EntityGraph.build(permutation))
+        for permutation in itertools.permutations(entities)
+    ]
+
+    assert all(other == first for other in rest)
+
+
+def _comparable(
+    result: Result[entity_graph.EntityGraph, entity_graph.EntityGraphError],
+) -> entity_graph.EntityGraph | frozenset[entity_graph.EntityGraphDiagnostic]:
+    match result:
+        case Ok(graph):
+            return graph
+        case Err(error):
+            return error.diagnostics
