@@ -5,6 +5,8 @@ and derives its Relation: the fields a View result will have, each with its type
 and the Value that computes it. Backends run the Relation, not the node tree.
 """
 
+import types
+import typing
 from collections.abc import Callable, Collection
 
 import pydantic
@@ -12,6 +14,19 @@ from pydantic.fields import FieldInfo
 
 from functional_relational_python.domain.entity_graph import FieldName, Optionality
 from functional_relational_python.domain.id import IdType
+
+type RuntimeAnnotation = object
+"""A field's annotation as Python holds it at run time: a class, `None`, a generic
+alias such as `list[int]`, a union, a `type` alias, or a `Literal` argument."""
+
+
+def optionality_of(annotation: RuntimeAnnotation) -> Optionality:
+    """Whether `annotation` admits `None`, the inverse of `Lookup.annotation`."""
+    if typing.get_origin(annotation) is typing.Union and types.NoneType in (
+        typing.get_args(annotation)
+    ):
+        return Optionality.OPTIONAL
+    return Optionality.REQUIRED
 
 
 class SourceName(pydantic.RootModel[str], frozen=True):
@@ -88,6 +103,15 @@ class Lookup(pydantic.BaseModel, frozen=True):
     target: type[pydantic.BaseModel]
     optionality: Optionality
 
+    def annotation(self) -> type[pydantic.BaseModel | None]:
+        """The looked-up value's type: the target Entity, or `target | None` if
+        optional. This is the one place an optional field's type is built."""
+        match self.optionality:
+            case Optionality.REQUIRED:
+                return self.target
+            case Optionality.OPTIONAL:
+                return self.target | None
+
 
 type Value = SourceField | Lookup
 """How a field of a View result is computed from the subject."""
@@ -102,6 +126,19 @@ class Field(pydantic.BaseModel, frozen=True):
     info: FieldInfo
     value: Value
 
+    @staticmethod
+    def looked_up(name: FieldName, lookup: Lookup) -> Field:
+        """The field holding the Entity `lookup` finds, typed by `lookup.annotation()`."""
+        return Field(
+            name=name, info=FieldInfo.from_annotation(lookup.annotation()), value=lookup
+        )
+
+    def annotation(self) -> RuntimeAnnotation:
+        return self.info.annotation
+
+    def optionality(self) -> Optionality:
+        return optionality_of(self.annotation())
+
 
 class NestedField(pydantic.BaseModel, frozen=True):
     """A resolved field whose Entity went through a nested pipeline.
@@ -113,6 +150,9 @@ class NestedField(pydantic.BaseModel, frozen=True):
     name: FieldName
     value: Lookup
     relation: Relation
+
+    def optionality(self) -> Optionality:
+        return self.value.optionality
 
 
 type RelationField = Field | NestedField
@@ -142,6 +182,28 @@ class Relation(pydantic.BaseModel, frozen=True):
 
     def field_names(self) -> tuple[FieldName, ...]:
         return tuple(field.name for field in self.fields)
+
+    def lookups(self) -> tuple[Lookup, ...]:
+        """One Lookup per Entity this relation looks up, nested ones included.
+
+        They are in the order the Entities are first looked up.
+        """
+        used: list[Lookup] = []
+        for field in self.fields:
+            match field:
+                case Field(value=value):
+                    match value:
+                        case SourceField():
+                            pass
+                        case Lookup():
+                            used.append(value)
+                case NestedField(value=lookup, relation=nested):
+                    used.extend((lookup, *nested.lookups()))
+        first: dict[type[pydantic.BaseModel], Lookup] = {}
+        for lookup in used:
+            if lookup.target not in first:
+                first[lookup.target] = lookup
+        return tuple(first.values())
 
     def renamed(self, old: FieldName, new: FieldName) -> Relation:
         """Renames `old` to `new` in place, keeping its type."""

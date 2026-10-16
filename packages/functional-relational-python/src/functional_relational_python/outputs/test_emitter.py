@@ -629,7 +629,7 @@ def test_emitted_functions_give_the_same_view_results_as_the_engine(
                     for entity in case.entities
                     if isinstance(entity, lookup.target)
                 }
-                for lookup in emitter.PythonEmitter.lookups(view.relation)
+                for lookup in view.relation.lookups()
             }
             emitted_rows = [
                 list(GeneratedModels.row_of(function(entity, **lookups)).root.items())

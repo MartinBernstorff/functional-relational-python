@@ -230,29 +230,6 @@ class PythonEmitter:
         return BoundName(f"{snake.root}_by_id")
 
     @staticmethod
-    def lookups(relation: ir.Relation) -> tuple[ir.Lookup, ...]:
-        """One Lookup per Entity `relation` looks up, nested ones included.
-
-        They are in the order the Entities are first looked up.
-        """
-        used: list[ir.Lookup] = []
-        for field in relation.fields:
-            match field:
-                case ir.Field(value=value):
-                    match value:
-                        case ir.SourceField():
-                            pass
-                        case ir.Lookup():
-                            used.append(value)
-                case ir.NestedField(value=lookup, relation=nested):
-                    used.extend((lookup, *PythonEmitter.lookups(nested)))
-        first: dict[type[pydantic.BaseModel], ir.Lookup] = {}
-        for lookup in used:
-            if lookup.target not in first:
-                first[lookup.target] = lookup
-        return tuple(first.values())
-
-    @staticmethod
     def _qualified(model: type[pydantic.BaseModel]) -> Expression:
         return Expression(f"{model.__module__}.{model.__qualname__}")
 
@@ -260,7 +237,7 @@ class PythonEmitter:
     def _imports(
         view: compiler.CompiledView, module: ModulePath
     ) -> frozenset[ModulePath]:
-        lookups = PythonEmitter.lookups(view.relation)
+        lookups = view.relation.lookups()
         return frozenset(
             {
                 module,
@@ -279,7 +256,7 @@ class PythonEmitter:
             f"        {PythonEmitter._qualified(lookup.id_type).root},\n"
             f"        {PythonEmitter._qualified(lookup.target).root},\n"
             "    ],\n"
-            for lookup in PythonEmitter.lookups(view.relation)
+            for lookup in view.relation.lookups()
         )
         keyword_only = f"    *,\n{lookups}" if lookups else ""
         model = Expression(f"{module.root}.{view.name.root}")
@@ -342,7 +319,7 @@ class PythonEmitter:
     ) -> list[EmitDiagnostic]:
         """Problems with a View function's parameters and the types they name."""
         diagnostics: list[EmitDiagnostic] = []
-        lookups = PythonEmitter.lookups(view.relation)
+        lookups = view.relation.lookups()
         diagnostics.extend(
             UnimportableReferencedModel(view=view.name, model=model)
             for lookup in lookups
@@ -445,7 +422,7 @@ class _Construction:
 
         `present` gets the construction to write its expression at.
         """
-        match lookup.optionality:
+        match field.optionality():
             case Optionality.REQUIRED:
                 return present(self)
             case Optionality.OPTIONAL:
