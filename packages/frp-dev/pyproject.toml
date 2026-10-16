@@ -1,0 +1,19 @@
+[project]
+name = "frp-dev"
+version = "0.0.0"
+description = "Development commands for the functional-relational-python repo. Not published."
+requires-python = ">=3.14"
+# PyPI rejects any upload with this classifier, so the package cannot be published by mistake.
+classifiers = ["Private :: Do Not Upload"]
+dependencies = [
+    "pydantic>=2.12",
+    "safe-result>=4.0.3",
+    "typer>=0.20",
+]
+
+[project.scripts]
+frp-dev = "frp_dev.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.9,<0.10"]
+build-backend = "uv_build"

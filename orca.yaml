@@ -1,0 +1,5 @@
+scripts:
+  setup: |
+    uv run frp-dev setup
+  archive: |
+    uv run frp-dev teardown

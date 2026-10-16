@@ -1,0 +1,32 @@
+[issues]
+tracker = "linear"
+team = "MB"
+project = "functional-relational-python"
+
+[workspace]
+orca_project = "repo:4b5113d7-50d6-4a15-b4a7-27a92e37974a"
+assignee = "martinbernstorff@gmail.com"
+
+[pool]
+view = "715c01d52713"
+skip_limits_label = "skip-limits"
+
+[pool.limits]
+total = 4
+
+[claims]
+label = "workspace"
+
+[status]
+store = "orca"
+
+[ticket_statuses]
+grill = "Grilling"
+to-ticket = "Speccing"
+todo = "Specced"
+implementing = "Implementing"
+agent-reviewing = "Implementing"
+qa = "QA"
+review = "Review"
+merging = "Merging"
+merged = "Merged"

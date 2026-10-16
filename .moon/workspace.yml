@@ -1,0 +1,10 @@
+$schema: 'https://moonrepo.dev/schemas/workspace.json'
+
+# The workspace members form a single root project: tach, pyrefly and noprim check
+# across package boundaries, so they are not split per package.
+projects:
+  functional-relational-python: '.'
+
+vcs:
+  defaultBranch: 'main'
+  provider: 'github'

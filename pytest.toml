@@ -1,0 +1,14 @@
+[pytest]
+testpaths = ["packages"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+strict = true
+addopts = [
+  "--report-chars=a",        # summary line per non-passing test
+  "--exitfirst",             # stop on first failure
+  "--numprocesses=auto",     # pytest-xdist: one worker per core
+  "--quiet",                 # drop the platform header
+  "--tb=short",              # failing line + assertion detail
+  "--import-mode=importlib", # co-located tests: no sys.path insertion, same basenames allowed across packages
+]

@@ -1,0 +1,15 @@
+project-includes = ["packages/*/src"]
+project-excludes = ["**/.venv/**", "**/__pycache__/**"]
+search-path = [
+    "packages/functional-relational-python/src",
+    "packages/frp-dev/src",
+]
+python-version = "3.14"
+# Every error kind at error severity.
+preset = "all"
+permissive-ignores = false
+
+[errors]
+# A RootModel wrapping a primitive is meant to read as the thing it wraps, so
+# requiring bool(...) at every call site would defeat the pattern.
+implicit-bool = false

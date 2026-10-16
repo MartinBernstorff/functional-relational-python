@@ -1,0 +1,10 @@
+# Installed by `uv run frp-dev setup`. The hook script may run whichever lefthook
+# is first on PATH, so require one that understands `jobs`.
+min_version: 2.1.0
+
+pre-commit:
+  jobs:
+    # phase-1 fixes lint and formatting before checking, so re-stage what it fixed.
+    - name: phase-1
+      run: moon run :phase-1
+      stage_fixed: true

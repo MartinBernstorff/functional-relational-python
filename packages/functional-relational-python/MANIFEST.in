@@ -1,0 +1,4 @@
+# Tests live beside the code; keep them out of the distribution. setuptools only
+# applies this to the sdist, so build the wheel from the sdist (`uv build` does by
+# default; `uv build --wheel` does not). `moon run :smoke` checks both artifacts.
+global-exclude test_*.py

@@ -1,0 +1,9 @@
+$schema: 'https://moonrepo.dev/schemas/toolchains.json'
+
+# Versions are inherited from .prototools.
+unstable_python:
+  packageManager: 'uv'
+  venvName: '.venv'
+
+unstable_uv:
+  syncArgs: ['--locked']

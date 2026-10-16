@@ -1,0 +1,4 @@
+# Typer decides flag-ness from the annotation being literally `bool`, so a boolean
+# option such as `--quiet` has no other spelling. Only bool parameters of
+# `@app.command` / `@app.callback` functions are exempt.
+exempt-typer-args = true

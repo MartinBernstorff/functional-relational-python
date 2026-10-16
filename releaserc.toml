@@ -1,0 +1,12 @@
+[semantic_release]
+tag_format = "v{version}"
+# Below 1.0.0 a breaking change is a minor bump, not a major one.
+allow_zero_version = true
+major_on_zero = false
+# The release workflow builds the distribution itself, after the tag exists, so
+# setuptools_scm stamps the released version.
+build_command = ""
+
+[semantic_release.branches.main]
+match = "main"
+prerelease = false

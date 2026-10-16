@@ -1,0 +1,134 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+language: 'python'
+stack: 'backend'
+layer: 'library'
+tags: ['python']
+
+fileGroups:
+  sources:
+    - 'packages/*/src/**/*.py'
+  manifests:
+    - 'pyproject.toml'
+    - 'packages/*/pyproject.toml'
+    - 'uv.lock'
+  workflows:
+    - '.github/workflows/*.yml'
+
+tasks:
+  # Fast enough for pre-commit. Fixes lint and formatting, then checks the rest.
+  phase-1:
+    command: 'noop'
+    inputs: []
+    deps:
+      - 'format'
+      - 'typecheck'
+      - 'tach'
+      - 'noprim'
+      - 'actionlint'
+    options:
+      runInCI: false
+      # format rewrites files, so the checks must not read them at the same time.
+      runDepsInParallel: false
+
+  # Every check, without fixing. `moon ci` runs this and everything it depends on.
+  full:
+    command: 'noop'
+    inputs: []
+    deps:
+      - 'lint'
+      - 'format-check'
+      - 'typecheck'
+      - 'tach'
+      - 'noprim'
+      - 'actionlint'
+      - 'test'
+      - 'smoke'
+
+  test:
+    script: 'uv run pytest'
+    inputs:
+      - '@group(sources)'
+      - '@group(manifests)'
+      - 'pytest.toml'
+    options:
+      outputStyle: 'buffer-only-failure'
+
+  typecheck:
+    script: 'uv run pyrefly check'
+    inputs:
+      - '@group(sources)'
+      - '@group(manifests)'
+      - 'pyrefly.toml'
+
+  tach:
+    script: 'uv run tach check && uv run tach check-external'
+    inputs:
+      - '@group(sources)'
+      - '@group(manifests)'
+      - 'tach.toml'
+
+  noprim:
+    script: 'uv run noprim check packages'
+    inputs:
+      - '@group(sources)'
+      - '@group(manifests)'
+      - 'noprim.toml'
+
+  lint:
+    script: 'uv run ruff check .'
+    inputs:
+      - '@group(sources)'
+      - 'ruff.toml'
+
+  lint-fix:
+    script: 'uv run ruff check --fix .'
+    inputs:
+      - '@group(sources)'
+      - 'ruff.toml'
+    options:
+      cache: false
+      runInCI: false
+
+  format-check:
+    script: 'uv run ruff format --check .'
+    inputs:
+      - '@group(sources)'
+      - 'ruff.toml'
+
+  # Runs after lint-fix, because both rewrite the same files.
+  format:
+    script: 'uv run ruff format .'
+    inputs:
+      - '@group(sources)'
+      - 'ruff.toml'
+    deps:
+      - 'lint-fix'
+    options:
+      cache: false
+      runInCI: false
+
+  actionlint:
+    script: 'uv run actionlint'
+    inputs:
+      - '@group(workflows)'
+
+  # Builds the published distribution and installs it into a clean venv. Catches a
+  # dependency the manifest forgot, and test files leaking into the distribution.
+  smoke:
+    script: |
+      set -euo pipefail
+      tmp="$(mktemp -d)"
+      trap 'rm -rf "$tmp"' EXIT
+      uv build --quiet --package functional-relational-python --out-dir "$tmp/dist"
+      leaked="$( (unzip -Z1 "$tmp"/dist/*.whl; tar -tzf "$tmp"/dist/*.tar.gz) | grep -E '(^|/)test_[^/]*\.py$' || true)"
+      test -z "$leaked" || { echo "smoke: test files in the distribution:"; echo "$leaked"; exit 1; }
+      uv venv --quiet --python 3.14 "$tmp/venv"
+      uv pip install --quiet --python "$tmp/venv" "$tmp"/dist/*.whl
+      "$tmp/venv/bin/frp" --help > /dev/null
+    inputs:
+      - '@group(sources)'
+      - '@group(manifests)'
+      - 'packages/functional-relational-python/MANIFEST.in'
+      - 'packages/functional-relational-python/README.md'
+      - 'packages/functional-relational-python/src/**/py.typed'
