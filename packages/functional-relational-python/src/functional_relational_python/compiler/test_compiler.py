@@ -17,7 +17,6 @@ from functional_relational_python.domain.id import Id, IdType
 from functional_relational_python.language import ir, steps
 from functional_relational_python.language.views import View, ViewName
 from functional_relational_python.outputs import engine
-from functional_relational_python.outputs.codegen import RuntimeAnnotation
 
 
 class Text(pydantic.RootModel[str], frozen=True):
@@ -818,7 +817,7 @@ def new_id_type(entity: ir.SourceName) -> IdType:
 
 
 def new_model(
-    name: ir.SourceName, fields: Mapping[FieldName, RuntimeAnnotation]
+    name: ir.SourceName, fields: Mapping[FieldName, ir.RuntimeAnnotation]
 ) -> type[pydantic.BaseModel]:
     annotations = {field.root: annotation for field, annotation in fields.items()}
     model = types.new_class(
@@ -842,7 +841,7 @@ def entity_model(
     Field names never collide, before or after resolving: the j-th Reference is
     `r{j}_id` or `r{j}`, and Text fields are `f{j}`.
     """
-    fields: dict[FieldName, RuntimeAnnotation] = {FieldName("id"): id_type}
+    fields: dict[FieldName, ir.RuntimeAnnotation] = {FieldName("id"): id_type}
     referenced = draw(st.lists(st.sampled_from(targets), max_size=3))
     for index, target in enumerate(referenced):
         field = draw(st.sampled_from([f"r{index}_id", f"r{index}"]))
@@ -1154,7 +1153,7 @@ class PlainShape(pydantic.BaseModel, frozen=True):
     """An `ir.Field` without its FieldInfo, which compares by identity."""
 
     name: FieldName
-    annotation: RuntimeAnnotation
+    annotation: ir.RuntimeAnnotation
     value: ir.Value
 
 

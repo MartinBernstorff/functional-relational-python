@@ -17,7 +17,6 @@ from functional_relational_python.domain.entity_graph import (
     EntityGraph,
     FieldName,
     IdAnnotation,
-    Optionality,
 )
 from functional_relational_python.language import ir
 from functional_relational_python.language.views import View, ViewName
@@ -361,17 +360,7 @@ def _resolved(
     root = ir.FromSource(source=lookup.target)
     nested = node.then(root)
     if nested == root:
-        entity = (
-            lookup.target
-            if lookup.optionality is Optionality.REQUIRED
-            else lookup.target | None
-        )
-        return _CheckedField(
-            field=ir.Field(
-                name=name, info=FieldInfo.from_annotation(entity), value=lookup
-            ),
-            diagnostics=(),
-        )
+        return _CheckedField(field=ir.Field.looked_up(name, lookup), diagnostics=())
     match _check_node(entity_graph, view, nested):
         case ir.Relation() as relation:
             return _CheckedField(
