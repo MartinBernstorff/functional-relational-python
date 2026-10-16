@@ -1,0 +1,32 @@
+[project]
+name = "functional-relational-python"
+dynamic = ["version"]
+description = "Generate Pydantic view models from a relational algebra over your domain entities."
+readme = "README.md"
+requires-python = ">=3.14"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+dependencies = [
+    "typer>=0.20",
+]
+
+[project.urls]
+Repository = "https://github.com/MartinBernstorff/functional-relational-python"
+
+[project.scripts]
+frp = "functional_relational_python.cli:app"
+
+[build-system]
+requires = ["setuptools>=80", "setuptools-scm>=9"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+# The git root is two levels up; tags live there.
+root = "../.."
+# A clone without tags (a fork, or before the first release) still builds.
+fallback_version = "0.0.0"
+
+

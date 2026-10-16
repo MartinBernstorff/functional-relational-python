@@ -1,0 +1,31 @@
+[project]
+name = "frp-workspace"
+version = "0.0.0"
+requires-python = ">=3.14"
+dependencies = [
+    "functional-relational-python",
+    "frp-dev",
+]
+
+[dependency-groups]
+dev = [
+    "actionlint-py>=1.7.12.25",
+    "lefthook>=2.2.2",
+    "noprim>=0.4.0",
+    "pyrefly>=1.4.0",
+    "pytest>=9.1.1",
+    "pytest-randomly>=5.0.0",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.17.1",
+    "tach>=0.35.3",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+functional-relational-python = { workspace = true }
+frp-dev = { workspace = true }

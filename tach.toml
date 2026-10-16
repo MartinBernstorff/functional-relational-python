@@ -1,0 +1,21 @@
+source_roots = [
+    "packages/functional-relational-python/src",
+    "packages/frp-dev/src",
+]
+forbid_circular_dependencies = true
+exclude = ["**/__pycache__", "**/*egg-info", "docs"]
+
+# Workspace-level dev dependencies, not dependencies of either package.
+[external]
+exclude = ["pytest"]
+
+# `tach check` enforces boundaries between modules within a package. Imports across
+# packages (e.g. the published library importing the unpublished frp_dev) are caught
+# by `tach check-external`, since each package must declare what it imports.
+[[modules]]
+path = "functional_relational_python"
+depends_on = []
+
+[[modules]]
+path = "frp_dev"
+depends_on = []

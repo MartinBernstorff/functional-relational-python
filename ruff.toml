@@ -1,0 +1,57 @@
+target-version = "py314"
+line-length = 88
+src = [
+    "packages/functional-relational-python/src",
+    "packages/frp-dev/src",
+]
+extend-exclude = ["docs"]
+
+[lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "N",
+    "UP",
+    "B",
+    "SIM",
+    "RUF",
+    "C4",
+    "PIE",
+    "PT",
+    "RET",
+    "TID",
+    "PTH",
+    "ARG",
+    "ERA",
+    "TRY",
+    "PL",
+    "A",
+    "ASYNC",
+    "FBT",
+    "ISC",
+    "LOG",
+    "G",
+    "INP",
+    "T20",
+    "Q",
+    "SLF",
+    "FURB",
+    "PERF",
+]
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+"**/test_*.py" = ["PLR2004"]
+# A Typer command's bool parameter is a CLI flag, not a boolean trap.
+"packages/*/src/*/cli.py" = ["FBT001", "FBT002"]
+
+[lint.isort]
+known-first-party = ["functional_relational_python", "frp_dev"]
+
+[lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[format]
+docstring-code-format = true
