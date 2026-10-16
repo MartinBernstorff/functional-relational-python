@@ -2,10 +2,12 @@ import pydantic
 import pytest
 from safe_result import Err, Ok
 
-from functional_relational_python import compiler, engine, ir, steps
-from functional_relational_python.entity_graph import EntityGraph, FieldName
-from functional_relational_python.id import Id
-from functional_relational_python.views import View, ViewName
+from functional_relational_python.compiler import compiler
+from functional_relational_python.domain.entity_graph import EntityGraph, FieldName
+from functional_relational_python.domain.id import Id
+from functional_relational_python.language import ir, steps
+from functional_relational_python.language.views import View, ViewName
+from functional_relational_python.outputs import engine
 
 
 class Text(pydantic.RootModel[str], frozen=True):

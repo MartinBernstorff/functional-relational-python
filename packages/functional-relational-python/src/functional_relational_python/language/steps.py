@@ -9,8 +9,8 @@ from collections.abc import Callable, Iterable
 
 from safe_result import Ok
 
-from functional_relational_python import ir
-from functional_relational_python.entity_graph import FieldName, IdAnnotation
+from functional_relational_python.domain.entity_graph import FieldName, IdAnnotation
+from functional_relational_python.language import ir
 
 type Step = Callable[[ir.Node], ir.Node]
 

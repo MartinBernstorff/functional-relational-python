@@ -11,12 +11,14 @@ from hypothesis import event, given
 from hypothesis import strategies as st
 from safe_result import Err, Ok
 
-from functional_relational_python import codegen, compiler, emitter, engine, ir, steps
-from functional_relational_python.codegen import Codegen, ModulePath
-from functional_relational_python.entity_graph import EntityGraph, FieldName
-from functional_relational_python.id import Id
-from functional_relational_python.test_compiler import Depth, pipelines
-from functional_relational_python.views import View, ViewName
+from functional_relational_python.compiler import compiler
+from functional_relational_python.compiler.test_compiler import Depth, pipelines
+from functional_relational_python.domain.entity_graph import EntityGraph, FieldName
+from functional_relational_python.domain.id import Id
+from functional_relational_python.language import ir, steps
+from functional_relational_python.language.views import View, ViewName
+from functional_relational_python.outputs import codegen, emitter, engine
+from functional_relational_python.outputs.codegen import Codegen, ModulePath
 
 
 class Text(pydantic.RootModel[str], frozen=True):

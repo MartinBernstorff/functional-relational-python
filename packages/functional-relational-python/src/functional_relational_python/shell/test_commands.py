@@ -2,24 +2,29 @@ import pydantic
 import pytest
 from safe_result import Err, Ok
 
-from functional_relational_python import commands, compiler, steps
-from functional_relational_python.catalog import (
+from functional_relational_python.compiler import compiler
+from functional_relational_python.domain.id import Id
+from functional_relational_python.language import steps
+from functional_relational_python.language.views import View, ViewName
+from functional_relational_python.outputs.codegen import CodegenError, ModulePath
+from functional_relational_python.shell import commands
+from functional_relational_python.shell.catalog import (
     CatalogAttributeMissingError,
     CatalogModuleNotFoundError,
     ImportPath,
     NotACatalogError,
     ViewCatalog,
 )
-from functional_relational_python.codegen import CodegenError, ModulePath
-from functional_relational_python.filesystem import (
+from functional_relational_python.shell.project_config import ConfigFile, ProjectConfig
+from functional_relational_python.support.filesystem import (
     Directory,
     FileText,
     InMemoryFileSystem,
 )
-from functional_relational_python.generated_files import StaleFilesError, Staleness
-from functional_relational_python.id import Id
-from functional_relational_python.project_config import ConfigFile, ProjectConfig
-from functional_relational_python.views import View, ViewName
+from functional_relational_python.support.generated_files import (
+    StaleFilesError,
+    Staleness,
+)
 
 
 class Text(pydantic.RootModel[str], frozen=True):

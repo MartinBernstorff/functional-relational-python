@@ -3,13 +3,7 @@ from pathlib import PurePosixPath
 import pytest
 from safe_result import Err, Ok
 
-from functional_relational_python.filesystem import (
-    Directory,
-    FileText,
-    InMemoryFileSystem,
-    RelativePath,
-)
-from functional_relational_python.project_config import (
+from functional_relational_python.shell.project_config import (
     ConfigExistsError,
     ConfigFile,
     ConfigLoadError,
@@ -17,6 +11,12 @@ from functional_relational_python.project_config import (
     ConfigSyntaxError,
     InvalidConfigError,
     ProjectConfig,
+)
+from functional_relational_python.support.filesystem import (
+    Directory,
+    FileText,
+    InMemoryFileSystem,
+    RelativePath,
 )
 
 

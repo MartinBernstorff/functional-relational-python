@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, RootModel
 from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.id import Id, IdType
+from functional_relational_python.domain.id import Id, IdType
 
 
 class FieldName(RootModel[str]):

@@ -18,17 +18,21 @@ from collections.abc import Callable
 import pydantic
 from safe_result import Err, Ok, Result
 
-from functional_relational_python import compiler, ir
-from functional_relational_python.codegen import (
+from functional_relational_python.compiler import compiler
+from functional_relational_python.domain.entity_graph import (
+    DiagnosticMessage,
+    Optionality,
+)
+from functional_relational_python.language import ir
+from functional_relational_python.language.views import ViewName
+from functional_relational_python.outputs.codegen import (
     Codegen,
     InvalidModelName,
     ModuleLayout,
     ModulePath,
     Symbol,
 )
-from functional_relational_python.entity_graph import DiagnosticMessage, Optionality
-from functional_relational_python.identifier import Identifier
-from functional_relational_python.views import ViewName
+from functional_relational_python.support.identifier import Identifier
 
 
 class BoundName(pydantic.RootModel[str], frozen=True):

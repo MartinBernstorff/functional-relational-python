@@ -2,8 +2,8 @@ import importlib.metadata
 
 from typer.testing import CliRunner
 
-from functional_relational_python import cli
-from functional_relational_python.project_config import ProjectConfig
+from functional_relational_python.shell import cli
+from functional_relational_python.shell.project_config import ProjectConfig
 
 
 def test_version_prints_the_installed_version() -> None:

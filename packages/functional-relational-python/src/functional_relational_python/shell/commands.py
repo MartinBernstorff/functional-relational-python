@@ -3,17 +3,24 @@
 import pydantic
 from safe_result import Err, Ok, Result
 
-from functional_relational_python import compiler
-from functional_relational_python.catalog import CatalogLoadError
-from functional_relational_python.codegen import CodegenError
-from functional_relational_python.entity_graph import EntityGraphError
-from functional_relational_python.filesystem import Directory, FilePath, FileSystem
-from functional_relational_python.generated_files import (
+from functional_relational_python.compiler import compiler
+from functional_relational_python.domain.entity_graph import EntityGraphError
+from functional_relational_python.outputs.codegen import CodegenError
+from functional_relational_python.shell.catalog import CatalogLoadError
+from functional_relational_python.shell.project_config import (
+    ConfigFile,
+    ConfigLoadError,
+)
+from functional_relational_python.support.filesystem import (
+    Directory,
+    FilePath,
+    FileSystem,
+)
+from functional_relational_python.support.generated_files import (
     GeneratedFiles,
     NotGeneratedFilesError,
     StaleFilesError,
 )
-from functional_relational_python.project_config import ConfigFile, ConfigLoadError
 
 type GenerateError = (
     ConfigLoadError

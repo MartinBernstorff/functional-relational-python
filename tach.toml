@@ -3,7 +3,18 @@ source_roots = [
     "packages/frp-dev/src",
 ]
 forbid_circular_dependencies = true
-exclude = ["**/__pycache__", "**/*egg-info", "docs"]
+# Tests may import across layers, e.g. to compare the engine with generated code.
+exclude = ["**/__pycache__", "**/*egg-info", "docs", "**/test_*.py"]
+
+# Each layer is a package of the library. A layer may import itself and any layer
+# below it, never one above.
+# shell:    config, catalog loading, file writes, the CLI. The only side effects.
+# outputs:  consume a compiled Relation: the in-memory engine and the Python output.
+# compiler: checks a View's pipeline against the Entity graph, giving a Relation.
+# language: the steps users write, and the IR nodes and Relations they build.
+# domain:   Entities, Ids and the Entity graph.
+# support:  identifiers, file paths and generated files, shared by every layer.
+layers = ["shell", "outputs", "compiler", "language", "domain", "support"]
 
 # Workspace-level dev dependencies, not dependencies of either package.
 [external]
@@ -13,9 +24,29 @@ exclude = ["pytest", "hypothesis"]
 # packages (e.g. the published library importing the unpublished frp_dev) are caught
 # by `tach check-external`, since each package must declare what it imports.
 [[modules]]
-path = "functional_relational_python"
+path = "frp_dev"
 depends_on = []
 
 [[modules]]
-path = "frp_dev"
-depends_on = []
+path = "functional_relational_python.shell"
+layer = "shell"
+
+[[modules]]
+path = "functional_relational_python.outputs"
+layer = "outputs"
+
+[[modules]]
+path = "functional_relational_python.compiler"
+layer = "compiler"
+
+[[modules]]
+path = "functional_relational_python.language"
+layer = "language"
+
+[[modules]]
+path = "functional_relational_python.domain"
+layer = "domain"
+
+[[modules]]
+path = "functional_relational_python.support"
+layer = "support"

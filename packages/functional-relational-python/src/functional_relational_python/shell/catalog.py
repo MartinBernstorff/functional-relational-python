@@ -7,18 +7,21 @@ from collections.abc import Sequence
 import pydantic
 from safe_result import Err, Ok, Result
 
-from functional_relational_python import compiler
-from functional_relational_python.codegen import (
+from functional_relational_python.compiler import compiler
+from functional_relational_python.domain.entity_graph import (
+    EntityGraph,
+    EntityGraphError,
+)
+from functional_relational_python.language.views import View
+from functional_relational_python.outputs.codegen import (
     Codegen,
     CodegenError,
     ModuleLayout,
     ModulePath,
 )
-from functional_relational_python.entity_graph import EntityGraph, EntityGraphError
-from functional_relational_python.filesystem import Directory
-from functional_relational_python.generated_files import GeneratedFiles
-from functional_relational_python.identifier import Identifier
-from functional_relational_python.views import View
+from functional_relational_python.support.filesystem import Directory
+from functional_relational_python.support.generated_files import GeneratedFiles
+from functional_relational_python.support.identifier import Identifier
 
 
 class ViewCatalog(pydantic.BaseModel, frozen=True):

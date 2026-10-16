@@ -3,7 +3,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 from safe_result import Err
 
-from functional_relational_python.filesystem import (
+from functional_relational_python.support.filesystem import (
     Directory,
     FileSystem,
     FileText,

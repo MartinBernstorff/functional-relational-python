@@ -7,15 +7,17 @@ from hypothesis import event, given
 from hypothesis import strategies as st
 from safe_result import Err, Ok
 
-from functional_relational_python import compiler, diagnostics, engine, ir, steps
-from functional_relational_python.codegen import RuntimeAnnotation
-from functional_relational_python.entity_graph import (
+from functional_relational_python.compiler import compiler, diagnostics
+from functional_relational_python.domain.entity_graph import (
     EntityGraph,
     FieldName,
     Optionality,
 )
-from functional_relational_python.id import Id, IdType
-from functional_relational_python.views import View, ViewName
+from functional_relational_python.domain.id import Id, IdType
+from functional_relational_python.language import ir, steps
+from functional_relational_python.language.views import View, ViewName
+from functional_relational_python.outputs import engine
+from functional_relational_python.outputs.codegen import RuntimeAnnotation
 
 
 class Text(pydantic.RootModel[str], frozen=True):

@@ -9,14 +9,15 @@ from collections.abc import Mapping
 import pydantic
 from safe_result import Err, Ok, Result
 
-from functional_relational_python import compiler, ir
-from functional_relational_python.entity_graph import (
+from functional_relational_python.compiler import compiler
+from functional_relational_python.domain.entity_graph import (
     DiagnosticMessage,
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.id import IdValue
-from functional_relational_python.views import ViewName
+from functional_relational_python.domain.id import IdValue
+from functional_relational_python.language import ir
+from functional_relational_python.language.views import ViewName
 
 
 class ViewRow(pydantic.RootModel[Mapping[FieldName, object]], frozen=True):

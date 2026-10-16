@@ -1,9 +1,12 @@
 import pydantic
 
-from functional_relational_python import ir
-from functional_relational_python.entity_graph import DiagnosticMessage, FieldName
-from functional_relational_python.id import IdType
-from functional_relational_python.views import ViewName
+from functional_relational_python.domain.entity_graph import (
+    DiagnosticMessage,
+    FieldName,
+)
+from functional_relational_python.domain.id import IdType
+from functional_relational_python.language import ir
+from functional_relational_python.language.views import ViewName
 
 
 class UnknownField(pydantic.BaseModel, frozen=True):

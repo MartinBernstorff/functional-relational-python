@@ -10,8 +10,8 @@ from collections.abc import Callable, Collection
 import pydantic
 from pydantic.fields import FieldInfo
 
-from functional_relational_python.entity_graph import FieldName, Optionality
-from functional_relational_python.id import IdType
+from functional_relational_python.domain.entity_graph import FieldName, Optionality
+from functional_relational_python.domain.id import IdType
 
 
 class SourceName(pydantic.RootModel[str], frozen=True):

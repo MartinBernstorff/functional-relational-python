@@ -1,6 +1,6 @@
 import pydantic
 
-from functional_relational_python import steps
+from functional_relational_python.language import steps
 
 
 class ViewName(pydantic.RootModel[str], frozen=True):

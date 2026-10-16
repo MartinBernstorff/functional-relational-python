@@ -21,16 +21,20 @@ from typing import Annotated
 import pydantic
 from safe_result import Err, Ok, Result
 
-from functional_relational_python import compiler, ir
-from functional_relational_python.entity_graph import (
+from functional_relational_python.compiler import compiler
+from functional_relational_python.domain.entity_graph import (
     DiagnosticMessage,
     FieldName,
     Optionality,
 )
-from functional_relational_python.filesystem import FileText, RelativePath
-from functional_relational_python.generated_files import GeneratedFile, GeneratedFiles
-from functional_relational_python.identifier import Identifier
-from functional_relational_python.views import ViewName
+from functional_relational_python.language import ir
+from functional_relational_python.language.views import ViewName
+from functional_relational_python.support.filesystem import FileText, RelativePath
+from functional_relational_python.support.generated_files import (
+    GeneratedFile,
+    GeneratedFiles,
+)
+from functional_relational_python.support.identifier import Identifier
 
 type RuntimeAnnotation = object
 """A field's annotation as Python holds it at run time: a class, `None`, a generic

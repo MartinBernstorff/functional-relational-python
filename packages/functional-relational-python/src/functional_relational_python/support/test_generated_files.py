@@ -3,13 +3,13 @@ from pathlib import PurePosixPath
 import pytest
 from safe_result import Err, Ok
 
-from functional_relational_python.filesystem import (
+from functional_relational_python.support.filesystem import (
     Directory,
     FileText,
     InMemoryFileSystem,
     RelativePath,
 )
-from functional_relational_python.generated_files import (
+from functional_relational_python.support.generated_files import (
     GeneratedFile,
     GeneratedFiles,
     StaleFile,

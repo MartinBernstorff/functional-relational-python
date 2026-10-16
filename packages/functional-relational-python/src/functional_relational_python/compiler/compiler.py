@@ -12,15 +12,16 @@ import pydantic
 from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
-from functional_relational_python import diagnostics, ir
-from functional_relational_python.entity_graph import (
+from functional_relational_python.compiler import diagnostics
+from functional_relational_python.domain.entity_graph import (
     EntityGraph,
     FieldName,
     IdAnnotation,
     Optionality,
 )
-from functional_relational_python.identifier import Identifier
-from functional_relational_python.views import View, ViewName
+from functional_relational_python.language import ir
+from functional_relational_python.language.views import View, ViewName
+from functional_relational_python.support.identifier import Identifier
 
 type Diagnostics = Annotated[
     tuple[diagnostics.Diagnostic, ...], pydantic.Field(min_length=1)

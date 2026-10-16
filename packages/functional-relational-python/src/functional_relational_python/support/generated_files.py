@@ -6,7 +6,7 @@ import typing
 import pydantic
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.filesystem import (
+from functional_relational_python.support.filesystem import (
     Directory,
     FilePath,
     FileSystem,

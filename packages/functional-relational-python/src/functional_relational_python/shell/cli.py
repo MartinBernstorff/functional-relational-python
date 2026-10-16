@@ -6,9 +6,9 @@ from typing import Annotated
 import typer
 from safe_result import Err, Ok
 
-from functional_relational_python import commands
-from functional_relational_python.filesystem import Directory, LocalFileSystem
-from functional_relational_python.project_config import ConfigFile, ProjectConfig
+from functional_relational_python.shell import commands
+from functional_relational_python.shell.project_config import ConfigFile, ProjectConfig
+from functional_relational_python.support.filesystem import Directory, LocalFileSystem
 
 app = typer.Typer(
     no_args_is_help=True,
