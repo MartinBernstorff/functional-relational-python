@@ -1,8 +1,10 @@
 import pydantic
 import pytest
+from hypothesis import event, given
+from hypothesis import strategies as st
 from safe_result import Err, Ok
 
-from functional_relational_python.compiler import compiler
+from functional_relational_python.compiler import compiler, test_compiler
 from functional_relational_python.domain.entity_graph import EntityGraph, FieldName
 from functional_relational_python.domain.id import Id
 from functional_relational_python.language import ir, steps
@@ -338,3 +340,163 @@ def test_a_dangling_reference_names_the_entity_the_field_and_the_ids() -> None:
     assert dangling.describe().root == (
         "Employee.department_id references missing IDs: 2, 3"
     )
+
+
+# Property-based tests: the engine runs every View the compiler compiles, over
+# EntityGraphs generated per example (see `test_compiler`).
+
+
+class TotalityCase(pydantic.BaseModel, frozen=True):
+    views: test_compiler.ViewCase
+    stored: tuple[pydantic.BaseModel, ...]
+
+
+@st.composite
+def totality_cases(draw: st.DrawFn) -> TotalityCase:
+    views = draw(test_compiler.view_cases())
+    return TotalityCase(
+        views=views, stored=draw(test_compiler.stored_entities(views.models))
+    )
+
+
+def has_unique_field_names(relation: ir.Relation) -> bool:
+    """Whether no two fields share a name, in nested relations too."""
+    names = relation.field_names()
+    return len(set(names)) == len(names) and all(
+        has_unique_field_names(field.relation)
+        for field in relation.fields
+        if isinstance(field, ir.NestedField)
+    )
+
+
+@given(totality_cases())
+def test_every_view_either_gives_results_or_reports_diagnostics(
+    case: TotalityCase,
+) -> None:
+    graph = case.views.models.graph()
+    checked = compiler.check(graph, case.views.views)
+    compiled = tuple(v for v in checked if isinstance(v, compiler.CompiledView))
+    view_engine = engine.InMemoryViewEngine(
+        graph, compiler.CompiledViews(views=compiled)
+    )
+    for entity in case.stored:
+        view_engine.put(entity).unwrap()
+
+    assert [view.name for view in checked] == [view.name for view in case.views.views]
+    assert case.views.valid <= {view.name for view in compiled}
+    for view in checked:
+        event(f"valid by construction: {view.name in case.views.valid}")
+        match view:
+            case compiler.CompiledView() if view.source not in graph.entities:
+                assert has_unique_field_names(view.relation)
+                match view_engine.read(view.name):
+                    case Err(engine.NonEntitySourceError()):
+                        pass
+                    case result:
+                        pytest.fail(f"expected NonEntitySourceError, got {result}")
+            case compiler.CompiledView():
+                assert has_unique_field_names(view.relation)
+                rows = view_engine.read(view.name).unwrap()
+                event(f"compiled view has rows: {bool(rows)}")
+                assert all(
+                    tuple(row.root) == view.relation.field_names() for row in rows
+                )
+                assert len(rows) == sum(
+                    type(entity) is view.source for entity in case.stored
+                )
+            case compiler.PoisonedView(diagnostics=reported):
+                for diagnostic in reported:
+                    event(f"diagnostic: {type(diagnostic).__name__}")
+                    assert diagnostic.view == view.name
+                    assert diagnostic.describe().root
+    match compiler.compile_views(graph, case.views.views):
+        case Ok(all_compiled):
+            assert test_compiler.shapes(all_compiled.views) == test_compiler.shapes(
+                compiled
+            )
+        case Err(error):
+            assert error.diagnostics == tuple(
+                diagnostic
+                for view in checked
+                if isinstance(view, compiler.PoisonedView)
+                for diagnostic in view.diagnostics
+            )
+
+
+class RoundTripCase(pydantic.BaseModel, frozen=True):
+    models: test_compiler.Models
+    source: type[pydantic.BaseModel]
+    resolved: tuple[FieldName, ...]
+    stored: tuple[pydantic.BaseModel, ...]
+
+
+@st.composite
+def round_trip_cases(draw: st.DrawFn) -> RoundTripCase:
+    drawn_models = draw(test_compiler.models())
+    graph = drawn_models.graph()
+    # Only a graph without References gives a source that resolves nothing.
+    referencing = [
+        model for model in drawn_models.entities if graph.entities[model].references
+    ]
+    source = draw(st.sampled_from(referencing or drawn_models.entities))
+    references = [reference.field for reference in graph.entities[source].references]
+    resolved = (
+        draw(st.lists(st.sampled_from(references), unique=True, min_size=1))
+        if references
+        else []
+    )
+    return RoundTripCase(
+        models=drawn_models,
+        source=source,
+        resolved=tuple(resolved),
+        stored=draw(test_compiler.stored_entities(drawn_models)),
+    )
+
+
+def with_ids_again(
+    source: type[pydantic.BaseModel], relation: ir.Relation, row: engine.ViewRow
+) -> pydantic.BaseModel:
+    """The `source` instance `row` was built from: each resolved Entity is replaced
+    by its ID, under the Reference's own name."""
+    values: dict[str, object] = {}
+    for field in relation.fields:
+        value = row.root[field.name]
+        match field.value:
+            case ir.SourceField(field=name):
+                values[name.root] = value
+            case ir.Lookup(reference=reference):
+                values[reference.field.root] = (
+                    vars(value)["id"] if isinstance(value, pydantic.BaseModel) else None
+                )
+    return source(**values)
+
+
+@given(round_trip_cases())
+def test_resolving_then_replacing_entities_by_their_ids_gives_the_original(
+    case: RoundTripCase,
+) -> None:
+    graph = case.models.graph()
+    view = View(
+        name=ViewName.fake(),
+        source=case.source,
+        step=steps.resolve(named(*case.resolved)),
+    )
+    compiled = compiler.compile_views(graph, [view]).unwrap()
+    view_engine = engine.InMemoryViewEngine(graph, compiled)
+    for entity in case.stored:
+        view_engine.put(entity).unwrap()
+
+    rows = view_engine.read(view.name).unwrap()
+
+    (compiled_view,) = compiled.views
+    absent = [
+        field.name
+        for field in compiled_view.relation.fields
+        for row in rows
+        if isinstance(field.value, ir.Lookup) and row.root[field.name] is None
+    ]
+    event(f"references resolved: {len(case.resolved)}")
+    event(f"an optional reference is absent: {bool(absent)}")
+    assert [
+        with_ids_again(case.source, compiled_view.relation, row) for row in rows
+    ] == [entity for entity in case.stored if type(entity) is case.source]
