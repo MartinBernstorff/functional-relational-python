@@ -1,0 +1,58 @@
+name: release
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    permissions:
+      contents: write # push the tag and create the GitHub Release
+      id-token: write # mandatory for PyPI trusted publishing
+    # Under workflow_run, github.ref is always the default branch regardless of
+    # what triggered the run, so head_branch is the only reliable guard.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'push'
+          && github.event.workflow_run.head_branch == 'main')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # setuptools_scm and semantic-release both need full tag history
+
+      - name: Python Semantic Release
+        id: release
+        uses: python-semantic-release/python-semantic-release@b700dbeb1f431a0fcc30a79f3f0869407fe07278 # v10.7.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          config_file: releaserc.toml
+          # Committing would write to protected main, which GITHUB_TOKEN cannot do.
+          commit: false
+          changelog: false
+
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        if: steps.release.outputs.released == 'true'
+        with:
+          auto-install: true
+
+      # Runs after the tag exists, so setuptools_scm stamps the released version.
+      # Only the library is built; frp-dev is never published.
+      - name: Build distributions
+        if: steps.release.outputs.released == 'true'
+        run: uv build --package functional-relational-python --out-dir dist
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        if: steps.release.outputs.released == 'true'
