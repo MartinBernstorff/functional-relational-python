@@ -12,6 +12,7 @@ from safe_result import Err, Ok, Result
 from functional_relational_python.compiler import compiler
 from functional_relational_python.domain.entity_graph import (
     EntityGraph,
+    EntityNode,
     FieldName,
 )
 from functional_relational_python.domain.id import IdValue
@@ -134,8 +135,8 @@ class InMemoryViewEngine:
         model = type(entity)
         if model not in self._entity_graph.entities:
             return Err(NotAnEntityError(model))
-        primary_key = FieldName("id")
-        self._entities.setdefault(model, {})[getattr(entity, primary_key.root)] = entity
+        primary_key = getattr(entity, EntityNode.primary_key.root)
+        self._entities.setdefault(model, {})[primary_key] = entity
         return Ok(None)
 
     def read(

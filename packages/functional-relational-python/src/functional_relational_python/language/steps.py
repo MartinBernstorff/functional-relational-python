@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable
 
 from safe_result import Ok
 
-from functional_relational_python.domain.entity_graph import FieldName, IdAnnotation
+from functional_relational_python.domain.entity_graph import reference_annotation
 from functional_relational_python.language import ir
 
 type Step = Callable[[ir.Node], ir.Node]
@@ -48,13 +48,12 @@ def is_reference(field: ir.RelationField) -> bool:
     """Whether `field` is a Reference: typed `X` or `X | None` for an Id `X`.
 
     The primary key is not a Reference, under whatever name it has been renamed to.
-    It is told apart by where its value comes from, the subject's `id` field.
+    It is told apart by where its value comes from, the subject's primary key.
     """
     match field:
-        case ir.Field(info=info, value=value):
-            primary_key = ir.SourceField(field=FieldName("id"))
-            return value != primary_key and isinstance(IdAnnotation.of(info), Ok)
-        case ir.NestedField():
+        case ir.Field(info=info, value=ir.SourceField(field=source)):
+            return isinstance(reference_annotation(source, info), Ok)
+        case ir.Field() | ir.NestedField():
             return False
 
 

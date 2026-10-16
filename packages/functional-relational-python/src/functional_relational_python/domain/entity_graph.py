@@ -3,6 +3,7 @@ import typing
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
 from enum import StrEnum
+from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, RootModel
 from pydantic.fields import FieldInfo
@@ -44,6 +45,9 @@ class EntityNode(BaseModel):
     """An Entity in the EntityGraph: its model, primary key type and References."""
 
     model_config = ConfigDict(frozen=True)
+
+    primary_key: ClassVar[FieldName] = FieldName("id")
+    """The name of every Entity's primary key. It is never a Reference."""
 
     model: type[BaseModel]
     id_type: IdType
@@ -148,6 +152,31 @@ class IdAnnotation(BaseModel):
                 return Err(NotAnIdAnnotationError(info))
 
 
+class NotAReferenceError(Exception):
+    """A field is the primary key, or is not typed `X` or `X | None` for an Id `X`."""
+
+    def __init__(self, field: FieldName) -> None:
+        self.field = field
+        super().__init__(f"{field.root} is not a Reference")
+
+
+def reference_annotation(
+    field: FieldName, info: FieldInfo
+) -> Result[IdAnnotation, NotAReferenceError]:
+    """The ID type and optionality of `field`, if it is a Reference.
+
+    `field` is the subject's own field the value comes from, so a renamed primary
+    key is still the primary key.
+    """
+    if field == EntityNode.primary_key:
+        return Err(NotAReferenceError(field))
+    match IdAnnotation.of(info):
+        case Ok(annotation):
+            return Ok(annotation)
+        case Err():
+            return Err(NotAReferenceError(field))
+
+
 class _ReferenceField(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -174,7 +203,7 @@ class EntityGraph(BaseModel):
         diagnostics: set[EntityGraphDiagnostic] = set()
         keyed_by: defaultdict[IdType, set[type[BaseModel]]] = defaultdict(set)
         for model in set(entities):
-            match model.model_fields.get("id"):
+            match model.model_fields.get(EntityNode.primary_key.root):
                 case FieldInfo(annotation=type() as id_type) if issubclass(id_type, Id):
                     keyed_by[id_type].add(model)
                 case _:
@@ -226,9 +255,7 @@ class EntityGraph(BaseModel):
     @staticmethod
     def _reference_fields(model: type[BaseModel]) -> Iterator[_ReferenceField]:
         for name, info in model.model_fields.items():
-            if name == "id":
-                continue
-            match IdAnnotation.of(info):
+            match reference_annotation(FieldName(name), info):
                 case Ok(annotation):
                     yield _ReferenceField(
                         field=FieldName(name),
@@ -246,3 +273,28 @@ class EntityGraph(BaseModel):
             if node.id_type is id_type:
                 return Ok(model)
         return Err(NoEntityError(id_type))
+
+    def reference_of(
+        self, field: FieldName, info: FieldInfo
+    ) -> Result[Reference, NotAReferenceError | NoEntityError]:
+        """The Entity the Reference `field`, typed by `info`, points to.
+
+        `field` is the subject's own field the value comes from.
+        """
+        match reference_annotation(field, info):
+            case Err() as not_a_reference:
+                return not_a_reference
+            case Ok(annotation):
+                pass
+        match self.entity_keyed_by(annotation.id_type):
+            case Err() as no_entity:
+                return no_entity
+            case Ok(target):
+                return Ok(
+                    Reference(
+                        field=field,
+                        id_type=annotation.id_type,
+                        target=target,
+                        optionality=annotation.optionality,
+                    )
+                )
