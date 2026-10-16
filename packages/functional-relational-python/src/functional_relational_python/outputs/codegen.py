@@ -3,12 +3,11 @@
 Everything here is pure: it builds file contents and touches no filesystem.
 `generated_files` writes and checks them.
 
-Generation runs in two passes. Planning decides every model's name and module and
-renders its field types; rendering then turns each module's models into source.
-A View's model is named after the View. A model with a generated name, such as
-the model of a resolved field with a nested pipeline (`nested_model_name`), is one
-more `ViewModel` in the plan: the planner names it, and the name checks and
-rendering treat it like any other.
+Generation runs in two passes. Planning decides every model's module and renders
+its field types; rendering then turns each module's models into source. The
+compiler has already named every model (`model_names`): a View's model, and the
+model of each resolved field with a nested pipeline. A nested model is one more
+`ViewModel` in the plan; the clash checks and rendering treat it like any other.
 """
 
 import sys
@@ -22,6 +21,7 @@ import pydantic
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
+from functional_relational_python.compiler.model_names import ModelNames
 from functional_relational_python.domain.entity_graph import (
     FieldName,
     Optionality,
@@ -86,17 +86,6 @@ type ModuleLayout = Callable[[compiler.CompiledView], ModulePath]
 
 class AnnotationText(pydantic.RootModel[str], frozen=True):
     """How an annotation or name reads in a diagnostic, e.g. `Annotated[int, 0]`."""
-
-
-class InvalidModelName(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View's name cannot be used as a class name."""
-
-    view: ViewName
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.view.root}: the View name is not a valid Python class name."
-        )
 
 
 class GeneratedIntoDefiningModule(pydantic.BaseModel, Diagnostic, frozen=True):
@@ -174,8 +163,7 @@ class NameClash(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 type CodegenDiagnostic = (
-    InvalidModelName
-    | DuplicateModelName
+    DuplicateModelName
     | GeneratedIntoDefiningModule
     | UnsupportedAnnotation
     | UnimportableType
@@ -364,7 +352,8 @@ class _ModelPlanner:
                 AnnotationText(f"{model.__module__}.{model.__qualname__}")
             )
 
-    def plan(self, name: Identifier, relation: ir.Relation) -> None:
+    def plan(self, names: ModelNames, relation: ir.Relation) -> None:
+        name = names.name.identifier()
         fields: list[ModelField] = []
         symbols: set[Symbol] = {Codegen.base}
         for field in relation.fields:
@@ -373,10 +362,13 @@ class _ModelPlanner:
                 case ir.Field(info=info):
                     rendered = renderer.render(info.annotation)
                 case ir.NestedField(value=lookup, relation=nested):
-                    nested_name = Codegen.nested_model_name(name, field.name)
+                    nested_names = names.nested_in(field)
                     self.use(lookup.target)
-                    self.plan(nested_name, nested)
-                    symbol = Symbol(module=self.module, qualname=(nested_name,))
+                    self.plan(nested_names, nested)
+                    symbol = Symbol(
+                        module=self.module,
+                        qualname=(nested_names.name.identifier(),),
+                    )
                     symbols.add(symbol)
                     rendered = symbol.reference().optional(field.optionality())
             fields.append(ModelField(name=field.name, type=rendered))
@@ -438,26 +430,13 @@ class Codegen:
         )
 
     @staticmethod
-    def nested_model_name(parent: Identifier, field: FieldName) -> Identifier:
-        """The model a nested resolved field is typed by: `EmployeeDepartment`
-        for the field `department` of `Employee`."""
-        pascal = "".join(part[:1].upper() + part[1:] for part in field.root.split("_"))
-        return Identifier(f"{parent.root}{pascal}")
-
-    @staticmethod
     def _plan(
         view: compiler.CompiledView, module: ModulePath
     ) -> list[ViewModel] | list[CodegenDiagnostic]:
         """The View's model, after the nested models it refers to."""
         planner = _ModelPlanner(view.name, module)
         planner.use(view.source)
-        match Identifier.of(view.name):
-            case Ok(name):
-                planner.plan(name, view.relation)
-            case Err():
-                planner.diagnostics.append(InvalidModelName(view=view.name))
-                # Planned only for its field diagnostics; the name is never used.
-                planner.plan(Identifier("InvalidModelName"), view.relation)
+        planner.plan(view.names.model, view.relation)
         if planner.defined_here:
             planner.diagnostics.append(
                 GeneratedIntoDefiningModule(

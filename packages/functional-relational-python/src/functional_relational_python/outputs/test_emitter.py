@@ -17,7 +17,7 @@ from functional_relational_python.domain.entity_graph import EntityGraph, FieldN
 from functional_relational_python.domain.id import Id
 from functional_relational_python.language import ir, steps
 from functional_relational_python.language.views import View, ViewName
-from functional_relational_python.outputs import codegen, emitter, engine
+from functional_relational_python.outputs import emitter, engine
 from functional_relational_python.outputs.codegen import Codegen, ModulePath
 
 
@@ -237,23 +237,6 @@ def test_the_emitted_module_matches_the_golden_file() -> None:
     assert emit(golden_views()).root == golden.read_text()
 
 
-@pytest.mark.parametrize(
-    ("view", "function"),
-    [
-        ("CompanyPublic", "company_public"),
-        ("Company", "company"),
-        ("Company2Public", "company2_public"),
-        ("HTTPServer", "httpserver"),
-    ],
-)
-def test_a_function_is_named_after_its_view_in_snake_case(
-    view: str, function: str
-) -> None:
-    assert emitter.PythonEmitter.function_name(ViewName(view)) == (
-        emitter.BoundName(function)
-    )
-
-
 def test_a_source_that_cannot_be_imported_is_a_diagnostic() -> None:
     class Local(pydantic.BaseModel, frozen=True):
         name: Text
@@ -263,34 +246,6 @@ def test_a_source_that_cannot_be_imported_is_a_diagnostic() -> None:
     assert emit_diagnostics([view]) == (
         emitter.UnimportableSource(view=view.name, source=Local),
     )
-
-
-def test_a_view_name_that_is_no_function_name_is_a_diagnostic() -> None:
-    view = View(name=ViewName("Class"), source=Company, step=steps.pipeline())
-
-    assert emit_diagnostics([view]) == (
-        emitter.InvalidFunctionName(
-            view=view.name, function=emitter.PythonEmitter.function_name(view.name)
-        ),
-    )
-
-
-def test_a_view_name_that_is_neither_a_class_nor_a_function_name_reports_both() -> None:
-    view = View(name=ViewName("Company Public"), source=Company, step=steps.pipeline())
-
-    assert emit_diagnostics([view]) == (
-        codegen.InvalidModelName(view=view.name),
-        emitter.InvalidFunctionName(
-            view=view.name, function=emitter.PythonEmitter.function_name(view.name)
-        ),
-    )
-
-
-@pytest.mark.parametrize("name", ["None", "True", "False"])
-def test_a_view_name_that_is_no_class_name_is_a_diagnostic(name: str) -> None:
-    view = View(name=ViewName(name), source=Company, step=steps.pipeline())
-
-    assert emit_diagnostics([view]) == (codegen.InvalidModelName(view=view.name),)
 
 
 def test_views_with_the_same_function_name_are_a_diagnostic() -> None:
@@ -406,13 +361,6 @@ def test_a_looked_up_entity_that_cannot_be_imported_is_a_diagnostic() -> None:
             ),
         ),
         (
-            emitter.InvalidFunctionName(
-                view=ViewName("Company Public"),
-                function=emitter.BoundName("company public"),
-            ),
-            "Company Public: 'company public' is not a valid Python function name.",
-        ),
-        (
             emitter.DuplicateFunctionName(
                 function=emitter.BoundName("company_public"),
                 views=(ViewName("CompanyPublic"), ViewName("companyPublic")),
@@ -450,7 +398,6 @@ def test_a_looked_up_entity_that_cannot_be_imported_is_a_diagnostic() -> None:
     ],
     ids=[
         "unimportable",
-        "invalid",
         "duplicate",
         "shadowed",
         "unimportable-referenced",
@@ -620,9 +567,7 @@ def test_emitted_functions_give_the_same_view_results_as_the_engine(
 
     with emitted_module(compiled) as module:
         for view in compiled.views:
-            function = getattr(
-                module, emitter.PythonEmitter.function_name(view.name).root
-            )
+            function = getattr(module, emitter.PythonEmitter.function_name(view).root)
             lookups = {
                 emitter.PythonEmitter.lookup_parameter(lookup.target).root: {
                     vars(entity)["id"]: entity
