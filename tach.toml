@@ -7,7 +7,7 @@ exclude = ["**/__pycache__", "**/*egg-info", "docs"]
 
 # Workspace-level dev dependencies, not dependencies of either package.
 [external]
-exclude = ["pytest"]
+exclude = ["pytest", "hypothesis"]
 
 # `tach check` enforces boundaries between modules within a package. Imports across
 # packages (e.g. the published library importing the unpublished frp_dev) are caught
