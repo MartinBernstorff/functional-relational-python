@@ -11,6 +11,7 @@ compiled Relation, so the two agree (the differential test in `test_mappings.py`
 checks this).
 """
 
+import typing
 from collections.abc import Callable, Sequence
 
 import pydantic
@@ -57,6 +58,12 @@ class Indent(pydantic.RootModel[int], frozen=True):
 class MappingsRenderer:
     """Writes the source of every planned mapping function."""
 
+    # `frp generate` does not write mapping functions, so the header does not
+    # point to it.
+    header: typing.ClassVar[FileText] = FileText(
+        f"{GeneratedFiles.header.root}# Maps each View's Source to its View model.\n"
+    )
+
     @staticmethod
     def files(plan: PythonPlan) -> tuple[GeneratedFile, ...]:
         """One file per module, in module order, with its functions in View order.
@@ -82,7 +89,7 @@ class MappingsRenderer:
         rendered = "".join(
             f"\n\n{MappingsRenderer._function(function).root}" for function in functions
         )
-        return FileText(f"{GeneratedFiles.header.root}\n{imports}{rendered}")
+        return FileText(f"{MappingsRenderer.header.root}\n{imports}{rendered}")
 
     @staticmethod
     def _function(function: FunctionPlan) -> FunctionText:

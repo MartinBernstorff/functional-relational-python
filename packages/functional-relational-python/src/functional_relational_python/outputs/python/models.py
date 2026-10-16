@@ -4,6 +4,7 @@ Everything here is pure: it builds file contents and touches no filesystem.
 `generated_files` writes and checks them.
 """
 
+import typing
 from collections.abc import Sequence
 
 from functional_relational_python.outputs.python.plan import ModelPlan, PythonPlan
@@ -21,6 +22,11 @@ from functional_relational_python.support.identifier import Identifier
 
 class ModelsRenderer:
     """Writes the source of every planned View model."""
+
+    header: typing.ClassVar[FileText] = FileText(
+        f"{GeneratedFiles.header.root}"
+        "# Regenerate with `frp generate`; `frp check` fails when this is stale.\n"
+    )
 
     @staticmethod
     def files(plan: PythonPlan) -> tuple[GeneratedFile, ...]:
@@ -76,4 +82,4 @@ class ModelsRenderer:
             )
             for model in models
         )
-        return FileText(f"{GeneratedFiles.header.root}\n{imports}\n\n\n{classes}")
+        return FileText(f"{ModelsRenderer.header.root}\n{imports}\n\n\n{classes}")
