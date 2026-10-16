@@ -113,11 +113,17 @@ dev = [
 name = "functional-relational-python"
 source = { editable = "packages/functional-relational-python" }
 dependencies = [
+    { name = "pydantic" },
+    { name = "safe-result" },
     { name = "typer" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "typer", specifier = ">=0.20" }]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.14.1" },
+    { name = "safe-result", specifier = ">=4.0.3" },
+    { name = "typer", specifier = ">=0.20" },
+]
 
 [[package]]
 name = "gitdb"
