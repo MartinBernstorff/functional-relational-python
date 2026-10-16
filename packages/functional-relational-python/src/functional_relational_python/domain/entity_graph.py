@@ -190,6 +190,23 @@ class IdAnnotation(BaseModel):
             case _:
                 return Err(NotAnIdAnnotationError(info))
 
+    @staticmethod
+    def of_reference(
+        field: FieldName, info: FieldInfo
+    ) -> Result[IdAnnotation, NotAReferenceError]:
+        """The ID type and optionality of `field`, if it is a Reference.
+
+        `field` is the subject's own field the value comes from, so a renamed
+        primary key is still the primary key.
+        """
+        if field == EntityNode.primary_key:
+            return Err(NotAReferenceError(field))
+        match IdAnnotation.of(info):
+            case Ok(annotation):
+                return Ok(annotation)
+            case Err():
+                return Err(NotAReferenceError(field))
+
 
 class NotAReferenceError(Exception):
     """A field is the primary key, or is not typed `X` or `X | None` for an Id `X`."""
@@ -197,23 +214,6 @@ class NotAReferenceError(Exception):
     def __init__(self, field: FieldName) -> None:
         self.field = field
         super().__init__(f"{field.root} is not a Reference")
-
-
-def reference_annotation(
-    field: FieldName, info: FieldInfo
-) -> Result[IdAnnotation, NotAReferenceError]:
-    """The ID type and optionality of `field`, if it is a Reference.
-
-    `field` is the subject's own field the value comes from, so a renamed primary
-    key is still the primary key.
-    """
-    if field == EntityNode.primary_key:
-        return Err(NotAReferenceError(field))
-    match IdAnnotation.of(info):
-        case Ok(annotation):
-            return Ok(annotation)
-        case Err():
-            return Err(NotAReferenceError(field))
 
 
 class _ReferenceField(BaseModel):
@@ -294,7 +294,7 @@ class EntityGraph(BaseModel):
     @staticmethod
     def _reference_fields(model: type[BaseModel]) -> Iterator[_ReferenceField]:
         for name, info in model.model_fields.items():
-            match reference_annotation(FieldName(name), info):
+            match IdAnnotation.of_reference(FieldName(name), info):
                 case Ok(annotation):
                     yield _ReferenceField(
                         field=FieldName(name),
@@ -320,7 +320,7 @@ class EntityGraph(BaseModel):
 
         `field` is the subject's own field the value comes from.
         """
-        match reference_annotation(field, info):
+        match IdAnnotation.of_reference(field, info):
             case Err() as not_a_reference:
                 return not_a_reference
             case Ok(annotation):

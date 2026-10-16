@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable
 
 from safe_result import Ok
 
-from functional_relational_python.domain.entity_graph import reference_annotation
+from functional_relational_python.domain.entity_graph import IdAnnotation
 from functional_relational_python.language import ir
 
 type Step = Callable[[ir.Node], ir.Node]
@@ -52,7 +52,7 @@ def is_reference(field: ir.RelationField) -> bool:
     """
     match field:
         case ir.Field(info=info, value=ir.SourceField(field=source)):
-            return isinstance(reference_annotation(source, info), Ok)
+            return isinstance(IdAnnotation.of_reference(source, info), Ok)
         case ir.Field() | ir.NestedField():
             return False
 
