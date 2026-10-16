@@ -1114,6 +1114,13 @@ def test_every_view_either_gives_results_or_reports_diagnostics(
     for view in checked:
         event(f"valid by construction: {view.name in case.views.valid}")
         match view:
+            case compiler.CompiledView() if view.source not in graph.entities:
+                assert has_unique_field_names(view.relation)
+                match view_engine.read(view.name):
+                    case Err(engine.NonEntitySourceError()):
+                        pass
+                    case result:
+                        pytest.fail(f"expected NonEntitySourceError, got {result}")
             case compiler.CompiledView():
                 assert has_unique_field_names(view.relation)
                 rows = view_engine.read(view.name).unwrap()

@@ -155,6 +155,16 @@ def test_put_rejects_a_model_that_is_not_an_entity() -> None:
             assert error.model is Memo
 
 
+def test_reading_a_view_over_a_source_that_is_not_an_entity_is_an_error() -> None:
+    view = View(name=ViewName.fake(), source=Memo, step=steps.pipeline())
+
+    match make_engine(view).read(view.name):
+        case Err(engine.NonEntitySourceError() as error):
+            assert (error.view, error.source) == (view.name, Memo)
+        case result:
+            pytest.fail(f"expected NonEntitySourceError, got {result}")
+
+
 def test_reading_an_unknown_view_names_it_and_the_known_views() -> None:
     known = view_of(steps.pipeline())
     unknown = ViewName(f"{known.name.root}Typo")

@@ -48,6 +48,18 @@ class UnknownViewError(Exception):
         super().__init__(f"No compiled View named '{view.root}'. Known Views: {names}.")
 
 
+class NonEntitySourceError(Exception):
+    """A View's Source is not an Entity, so the engine holds no rows to read."""
+
+    def __init__(self, view: ViewName, source: type[pydantic.BaseModel]) -> None:
+        self.view = view
+        self.source = source
+        super().__init__(
+            f"View '{view.root}' reads {source.__name__}, which is not an Entity in "
+            "the EntityGraph, so the engine holds no rows for it."
+        )
+
+
 class DanglingReference(pydantic.BaseModel, frozen=True):
     """A Reference field whose IDs key no stored Entity."""
 
@@ -124,13 +136,21 @@ class InMemoryViewEngine:
 
     def read(
         self, view: ViewName
-    ) -> Result[tuple[ViewRow, ...], UnknownViewError | DanglingReferenceError]:
-        """The View's results, or every Reference that points to a missing Entity."""
+    ) -> Result[
+        tuple[ViewRow, ...],
+        UnknownViewError | NonEntitySourceError | DanglingReferenceError,
+    ]:
+        """The View's results, or every Reference that points to a missing Entity.
+
+        Only Entities are stored, so a View over any other Source is an error.
+        """
         match self._views.get(view):
             case None:
                 return Err(UnknownViewError(view, tuple(self._views)))
             case compiled:
                 pass
+        if compiled.source not in self._entity_graph.entities:
+            return Err(NonEntitySourceError(view, compiled.source))
         missing = _Missing()
         rows = tuple(
             self._row(compiled.relation, entity, missing)
