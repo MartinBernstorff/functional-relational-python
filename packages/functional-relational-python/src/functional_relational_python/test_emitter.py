@@ -11,7 +11,7 @@ from hypothesis import event, given
 from hypothesis import strategies as st
 from safe_result import Err, Ok
 
-from functional_relational_python import compiler, emitter, engine, ir, steps
+from functional_relational_python import codegen, compiler, emitter, engine, ir, steps
 from functional_relational_python.codegen import Codegen, ModulePath
 from functional_relational_python.entity_graph import EntityGraph, FieldName
 from functional_relational_python.id import Id
@@ -263,15 +263,32 @@ def test_a_source_that_cannot_be_imported_is_a_diagnostic() -> None:
     )
 
 
-@pytest.mark.parametrize("name", ["Company Public", "Class"], ids=["space", "keyword"])
-def test_a_view_name_that_is_no_function_name_is_a_diagnostic(name: str) -> None:
-    view = View(name=ViewName(name), source=Company, step=steps.pipeline())
+def test_a_view_name_that_is_no_function_name_is_a_diagnostic() -> None:
+    view = View(name=ViewName("Class"), source=Company, step=steps.pipeline())
 
     assert emit_diagnostics([view]) == (
         emitter.InvalidFunctionName(
             view=view.name, function=emitter.PythonEmitter.function_name(view.name)
         ),
     )
+
+
+def test_a_view_name_that_is_neither_a_class_nor_a_function_name_reports_both() -> None:
+    view = View(name=ViewName("Company Public"), source=Company, step=steps.pipeline())
+
+    assert emit_diagnostics([view]) == (
+        codegen.InvalidModelName(view=view.name),
+        emitter.InvalidFunctionName(
+            view=view.name, function=emitter.PythonEmitter.function_name(view.name)
+        ),
+    )
+
+
+@pytest.mark.parametrize("name", ["None", "True", "False"])
+def test_a_view_name_that_is_no_class_name_is_a_diagnostic(name: str) -> None:
+    view = View(name=ViewName(name), source=Company, step=steps.pipeline())
+
+    assert emit_diagnostics([view]) == (codegen.InvalidModelName(view=view.name),)
 
 
 def test_views_with_the_same_function_name_are_a_diagnostic() -> None:

@@ -21,6 +21,7 @@ from safe_result import Err, Ok, Result
 from functional_relational_python import compiler, ir
 from functional_relational_python.codegen import (
     Codegen,
+    InvalidModelName,
     ModuleLayout,
     ModulePath,
     Symbol,
@@ -141,6 +142,7 @@ class ShadowedModule(pydantic.BaseModel, frozen=True):
 
 type Diagnostic = (
     UnimportableSource
+    | InvalidModelName
     | UnimportableReferencedModel
     | InvalidFunctionName
     | DuplicateFunctionName
@@ -310,6 +312,8 @@ class PythonEmitter:
                     UnimportableSource(view=view.name, source=view.source)
                 )
             diagnostics.extend(PythonEmitter._parameter_diagnostics(view, view_models))
+            if isinstance(Identifier.of(view.name), Err):
+                diagnostics.append(InvalidModelName(view=view.name))
             function = PythonEmitter.function_name(view.name)
             if isinstance(Identifier.of(function), Err):
                 diagnostics.append(
