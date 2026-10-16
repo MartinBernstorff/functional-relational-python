@@ -92,14 +92,24 @@ class UnsupportedAnnotation(pydantic.BaseModel, Diagnostic, frozen=True):
 class Unimportable(pydantic.BaseModel, Diagnostic, frozen=True):
     """Generated source would import something it cannot import by its module and
     name, e.g. a class defined in a function: a field's type, the Source, or an
-    Entity the View looks up or its ID type."""
+    Entity the View looks up or its ID type.
+
+    `field` is the field typed by it, or `None` when no model field is: the Source,
+    or what only a mapping function's parameters refer to.
+    """
 
     view: ViewName
+    field: FieldName | None
     annotation: AnnotationText
 
     def describe(self) -> DiagnosticMessage:
+        where = (
+            self.view.root
+            if self.field is None
+            else f"{self.view.root}.{self.field.root}"
+        )
         return DiagnosticMessage(
-            f"{self.view.root}: '{self.annotation.root}' cannot be imported by its "
+            f"{where}: '{self.annotation.root}' cannot be imported by its "
             "module and name. Define it at module level."
         )
 
@@ -299,7 +309,9 @@ class _AnnotationRenderer:
             case Err():
                 self.diagnostics.append(
                     Unimportable(
-                        view=self.view, annotation=AnnotationText.of(annotation)
+                        view=self.view,
+                        field=self.field,
+                        annotation=AnnotationText.of(annotation),
                     )
                 )
                 return TypeExpression(repr(annotation))
@@ -403,7 +415,9 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         compiled: compiler.CompiledViews, layout: PythonLayout
     ) -> Result[PythonPlan, DiagnosticsError[PlanDiagnostic]]:
         """The plan, or every diagnostic. Each diagnostic is reported once, even
-        when both a model and a mapping function run into it."""
+        when both a model and a mapping function run into it. A type a model field
+        cannot import is reported for that field only, not again for the mapping
+        function that looks it up."""
         diagnostics: dict[PlanDiagnostic, None] = {}
         models: dict[ModulePath, list[ModelPlan]] = {}
         functions: dict[ModulePath, list[FunctionPlan]] = {}
@@ -420,7 +434,19 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                 case Ok(function):
                     functions.setdefault(function.symbol.module, []).append(function)
                 case Err(error):
-                    diagnostics.update(dict.fromkeys(error.diagnostics))
+                    unimportable_fields = {
+                        diagnostic.annotation
+                        for diagnostic in model.diagnostics
+                        if isinstance(diagnostic, Unimportable)
+                    }
+                    diagnostics.update(
+                        dict.fromkeys(
+                            diagnostic
+                            for diagnostic in error.diagnostics
+                            if not isinstance(diagnostic, Unimportable)
+                            or diagnostic.annotation not in unimportable_fields
+                        )
+                    )
         plan = PythonPlan(
             models={module: tuple(planned) for module, planned in models.items()},
             functions={module: tuple(planned) for module, planned in functions.items()},
@@ -580,6 +606,8 @@ def _symbols(
                 symbols[item] = symbol
             case Err():
                 unimportable.append(
-                    Unimportable(view=view, annotation=AnnotationText.of(item))
+                    Unimportable(
+                        view=view, field=None, annotation=AnnotationText.of(item)
+                    )
                 )
     return DiagnosticsError.or_ok(unimportable, lambda: symbols)

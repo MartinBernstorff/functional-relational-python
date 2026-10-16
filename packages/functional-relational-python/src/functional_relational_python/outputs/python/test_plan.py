@@ -142,10 +142,20 @@ def test_whatever_cannot_be_imported_is_reported_once() -> None:
         EntityGraph.build([team]).unwrap(), [view]
     ).unwrap()
 
-    # The Entity is a field's type and a looked-up Entity, yet reported once.
-    assert diagnostics_of(compiled, app_layout()) == tuple(
-        Unimportable(view=view.name, annotation=AnnotationText.of(unimportable))
-        for unimportable in (team, player, team_id)
+    # The Entity is a field's type and a looked-up Entity, yet reported once,
+    # for the field.
+    assert diagnostics_of(compiled, app_layout()) == (
+        Unimportable(
+            view=view.name,
+            field=FieldName("team"),
+            annotation=AnnotationText.of(team),
+        ),
+        *(
+            Unimportable(
+                view=view.name, field=None, annotation=AnnotationText.of(unimportable)
+            )
+            for unimportable in (player, team_id)
+        ),
     )
 
 
@@ -158,7 +168,13 @@ def test_a_models_only_layout_reports_only_what_the_models_cannot_import() -> No
 
     assert diagnostics_of(
         compiled, PythonLayout.models_only(into(ModulePath.fake()))
-    ) == (Unimportable(view=view.name, annotation=AnnotationText.of(team)),)
+    ) == (
+        Unimportable(
+            view=view.name,
+            field=FieldName("team"),
+            annotation=AnnotationText.of(team),
+        ),
+    )
 
 
 def test_every_unsupported_annotation_is_reported() -> None:
@@ -348,7 +364,20 @@ def test_models_and_mappings_in_one_module_is_a_diagnostic() -> None:
     [
         (
             Unimportable(
-                view=ViewName("CompanyPublic"), annotation=AnnotationText("app.Local")
+                view=ViewName("CompanyPublic"),
+                field=FieldName("local"),
+                annotation=AnnotationText("app.Local"),
+            ),
+            (
+                "CompanyPublic.local: 'app.Local' cannot be imported by its module "
+                "and name. Define it at module level."
+            ),
+        ),
+        (
+            Unimportable(
+                view=ViewName("CompanyPublic"),
+                field=None,
+                annotation=AnnotationText("app.Local"),
             ),
             (
                 "CompanyPublic: 'app.Local' cannot be imported by its module and "
@@ -393,7 +422,14 @@ def test_models_and_mappings_in_one_module_is_a_diagnostic() -> None:
             "CompanyPublic.tags: cannot generate the type 'Annotated[int, 0]'.",
         ),
     ],
-    ids=["unimportable", "clash", "one-module", "defining-module", "unsupported"],
+    ids=[
+        "unimportable-field",
+        "unimportable",
+        "clash",
+        "one-module",
+        "defining-module",
+        "unsupported",
+    ],
 )
 def test_a_diagnostic_message_names_the_offending_values(
     diagnostic: PlanDiagnostic, message: str
