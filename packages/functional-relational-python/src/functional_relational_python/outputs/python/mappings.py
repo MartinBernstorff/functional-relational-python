@@ -1,150 +1,51 @@
-"""The Python emitter: compiled Views as plain Python mapping functions.
+"""Renders the planned mapping functions: compiled Views as plain Python functions.
 
 Each View becomes a function from one instance of its Source to its View model.
 A View that resolves References also takes, per Entity it looks up, a keyword
-parameter mapping IDs to Entities; a dangling ID raises `KeyError` there. The
-emitted module imports only the Source, Entity and View model modules, so it runs
-and type checks without this library installed.
+parameter mapping IDs to Entities; a dangling ID raises `KeyError` there. A
+module of mapping functions imports only the Source, Entity and View model
+modules, so it runs and type checks without this library installed.
 
 Like the InMemoryViewEngine, it computes each field from the Values of the
-compiled Relation, so the two backends agree (the differential test in
-`test_emitter.py` checks this).
+compiled Relation, so the two agree (the differential test in `test_mappings.py`
+checks this).
 """
 
-import typing
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import pydantic
-from safe_result import Err, Ok, Result
 
-from functional_relational_python.compiler import compiler
-from functional_relational_python.compiler.model_names import ModelNames, PascalCase
-from functional_relational_python.domain.entity_graph import (
-    Optionality,
-)
+from functional_relational_python.domain.entity_graph import Optionality
 from functional_relational_python.language import ir
-from functional_relational_python.language.views import ViewName
 from functional_relational_python.outputs.python.plan import (
-    Codegen,
-    ModuleLayout,
+    FunctionPlan,
+    ModelPlan,
+    PythonPlan,
+)
+from functional_relational_python.outputs.python.symbols import (
+    LineLength,
     ModulePath,
-    Symbol,
 )
-from functional_relational_python.support.diagnostic import (
-    Diagnostic,
-    DiagnosticMessage,
-    DiagnosticsError,
-)
-
-
-class BoundName(pydantic.RootModel[str], frozen=True):
-    """A name the emitted module binds: a function, its parameter or an import."""
-
-    @staticmethod
-    def fake() -> BoundName:
-        return BoundName("company_summary")
-
-
-class EmittedModule(pydantic.RootModel[str], frozen=True):
-    """The source text of an emitted module."""
-
-
-class EmittedFunction(pydantic.RootModel[str], frozen=True):
-    """The source text of one mapping function."""
-
-
-class UnimportableSource(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Source the emitted module cannot import, e.g. a class defined in a function."""
-
-    view: ViewName
-    source: type[pydantic.BaseModel]
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.view.root}: the Source {self.source.__module__}."
-            f"{self.source.__qualname__} cannot be imported by its module and name. "
-            "Define it at module level."
-        )
-
-
-class UnimportableReferencedModel(pydantic.BaseModel, Diagnostic, frozen=True):
-    """An Entity a View looks up, or its ID type, cannot be imported."""
-
-    view: ViewName
-    model: type[pydantic.BaseModel]
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.view.root}: {self.model.__module__}.{self.model.__qualname__} "
-            "cannot be imported by its module and name. Define it at module level."
-        )
-
-
-class DuplicateFunctionName(pydantic.BaseModel, Diagnostic, frozen=True):
-    """Several View names have the same snake_case form."""
-
-    function: BoundName
-    views: tuple[ViewName, ...]
-
-    def describe(self) -> DiagnosticMessage:
-        views = ", ".join(view.root for view in self.views)
-        return DiagnosticMessage(
-            f"Views {views} all emit a function named '{self.function.root}'."
-        )
-
-
-class DuplicateLookupParameter(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View looks up several Entities whose names give the same parameter."""
-
-    view: ViewName
-    parameter: BoundName
-    entities: tuple[type[pydantic.BaseModel], ...]
-
-    def describe(self) -> DiagnosticMessage:
-        entities = ", ".join(
-            f"{entity.__module__}.{entity.__qualname__}" for entity in self.entities
-        )
-        return DiagnosticMessage(
-            f"{self.view.root}: Entities {entities} all need a parameter named "
-            f"'{self.parameter.root}'."
-        )
-
-
-class ShadowedModule(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A name a View's function binds hides a module the emitted module imports.
-
-    The name is the function's own name, or one of its parameters when the View
-    model's module has that parameter's name.
-    """
-
-    view: ViewName
-    name: BoundName
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.view.root}: the emitted name '{self.name.root}' would shadow the "
-            f"imported module '{self.name.root}'."
-        )
-
-
-type EmitDiagnostic = (
-    UnimportableSource
-    | UnimportableReferencedModel
-    | DuplicateFunctionName
-    | DuplicateLookupParameter
-    | ShadowedModule
+from functional_relational_python.support.filesystem import FileText
+from functional_relational_python.support.generated_files import (
+    GeneratedFile,
+    GeneratedFiles,
 )
 
 
 class Expression(pydantic.RootModel[str], frozen=True):
-    """A Python expression in emitted source, e.g. `source.name`.
+    """A Python expression in generated source, e.g. `source.name`.
 
     The later lines of a multi-line expression are indented for where it is used.
     """
 
 
+class FunctionText(pydantic.RootModel[str], frozen=True):
+    """The source text of one mapping function."""
+
+
 class Indent(pydantic.RootModel[int], frozen=True):
-    """How many spaces a line of emitted source starts with."""
+    """How many spaces a line of generated source starts with."""
 
     def pad(self) -> Expression:
         return Expression(" " * self.root)
@@ -153,168 +54,58 @@ class Indent(pydantic.RootModel[int], frozen=True):
         return Indent(self.root + 4)
 
 
-class PythonEmitter:
-    """Emits one module of mapping functions. The entry point is `emit`."""
-
-    parameter: typing.ClassVar[BoundName] = BoundName("source")
-    mapping: typing.ClassVar[ModulePath] = ModulePath("collections.abc")
+class MappingsRenderer:
+    """Writes the source of every planned mapping function. The entry point is
+    `render`."""
 
     @staticmethod
-    def emit(
-        compiled: compiler.CompiledViews, view_models: ModuleLayout
-    ) -> Result[EmittedModule, DiagnosticsError[EmitDiagnostic]]:
-        """Emits a function per View, in View order, or returns every diagnostic.
-
-        `view_models` gives the module each View's model is imported from. The
-        View's models are named by `view.names`; nested ones are in the same
-        module.
-        """
-        diagnostics = PythonEmitter._diagnostics(compiled, view_models)
-        match diagnostics:
-            case (first, *rest):
-                return Err(DiagnosticsError((first, *rest)))
-            case _:
-                pass
-        modules = (
-            module
-            for view in compiled.views
-            for module in PythonEmitter._imports(view, view_models(view))
+    def render(plan: PythonPlan) -> GeneratedFiles:
+        """One file per module, in module order, with its functions in View order."""
+        return GeneratedFiles(
+            files=tuple(
+                GeneratedFile(
+                    path=module.file_path(),
+                    text=MappingsRenderer._module(plan.functions[module]),
+                )
+                for module in sorted(plan.functions, key=lambda module: module.root)
+            )
         )
+
+    @staticmethod
+    def _module(functions: Sequence[FunctionPlan]) -> FileText:
         imports = "\n".join(
             "".join(f"import {module.root}\n" for module in section)
-            for section in ModulePath.import_sections(modules)
-        )
-        functions = "".join(
-            f"\n\n{PythonEmitter._function(view, view_models(view)).root}"
-            for view in compiled.views
-        )
-        return Ok(
-            EmittedModule(
-                "# Generated by functional-relational-python. Do not edit.\n"
-                f"\n{imports}{functions}"
+            for section in ModulePath.import_sections(
+                module for function in functions for module in function.imports()
             )
         )
-
-    @staticmethod
-    def function_name(view: compiler.CompiledView) -> BoundName:
-        return BoundName(view.names.function.root)
-
-    @staticmethod
-    def lookup_parameter(entity: type[pydantic.BaseModel]) -> BoundName:
-        """The keyword parameter mapping IDs to `entity`, e.g. `department_by_id`."""
-        snake = PascalCase(entity.__name__).snake_case()
-        return BoundName(f"{snake.root}_by_id")
-
-    @staticmethod
-    def _qualified(model: type[pydantic.BaseModel]) -> Expression:
-        return Expression(f"{model.__module__}.{model.__qualname__}")
-
-    @staticmethod
-    def _imports(
-        view: compiler.CompiledView, module: ModulePath
-    ) -> frozenset[ModulePath]:
-        lookups = view.relation.lookups()
-        return frozenset(
-            {
-                module,
-                ModulePath(view.source.__module__),
-                *(ModulePath(lookup.target.__module__) for lookup in lookups),
-                *(ModulePath(lookup.id_type.__module__) for lookup in lookups),
-                *((PythonEmitter.mapping,) if lookups else ()),
-            }
+        rendered = "".join(
+            f"\n\n{MappingsRenderer._function(function).root}" for function in functions
         )
+        return FileText(f"{GeneratedFiles.header.root}\n{imports}{rendered}")
 
     @staticmethod
-    def _function(view: compiler.CompiledView, module: ModulePath) -> EmittedFunction:
+    def _function(function: FunctionPlan) -> FunctionText:
         lookups = "".join(
-            f"    {PythonEmitter.lookup_parameter(lookup.target).root}: "
-            f"{PythonEmitter.mapping.root}.Mapping[\n"
-            f"        {PythonEmitter._qualified(lookup.id_type).root},\n"
-            f"        {PythonEmitter._qualified(lookup.target).root},\n"
+            f"    {parameter.name.root}: {FunctionPlan.mapping.root}.Mapping[\n"
+            f"        {parameter.id_type.qualified().root},\n"
+            f"        {parameter.target.qualified().root},\n"
             "    ],\n"
-            for lookup in view.relation.lookups()
+            for parameter in function.lookups
         )
         keyword_only = f"    *,\n{lookups}" if lookups else ""
-        model = Expression(f"{module.root}.{view.names.model.name.root}")
-        call = _Construction(module=module, indent=Indent(4)).call(
-            model,
-            view.names.model,
-            view.relation,
-            Expression(PythonEmitter.parameter.root),
+        model = function.model.symbol.qualified().root
+        call = _Construction(function=function, indent=Indent(4)).call(
+            function.model, Expression(FunctionPlan.source_parameter.root)
         )
-        return EmittedFunction(
-            f"def {PythonEmitter.function_name(view).root}(\n"
-            f"    {PythonEmitter.parameter.root}: "
-            f"{PythonEmitter._qualified(view.source).root},\n"
+        return FunctionText(
+            f"def {function.symbol.bound_name().root}(\n"
+            f"    {FunctionPlan.source_parameter.root}: "
+            f"{function.source.qualified().root},\n"
             f"{keyword_only}"
-            f") -> {model.root}:\n"
+            f") -> {model}:\n"
             f"    return {call.root}\n"
         )
-
-    @staticmethod
-    def _diagnostics(
-        compiled: compiler.CompiledViews, view_models: ModuleLayout
-    ) -> tuple[EmitDiagnostic, ...]:
-        diagnostics: list[EmitDiagnostic] = []
-        imported = {
-            BoundName(module.top_level().root)
-            for view in compiled.views
-            for module in PythonEmitter._imports(view, view_models(view))
-        }
-        views_by_function: dict[BoundName, list[ViewName]] = {}
-        for view in compiled.views:
-            if isinstance(Symbol.of(view.source), Err):
-                diagnostics.append(
-                    UnimportableSource(view=view.name, source=view.source)
-                )
-            diagnostics.extend(PythonEmitter._parameter_diagnostics(view, view_models))
-            function = PythonEmitter.function_name(view)
-            views_by_function.setdefault(function, []).append(view.name)
-        diagnostics.extend(
-            DuplicateFunctionName(function=function, views=tuple(views))
-            for function, views in views_by_function.items()
-            if len(views) > 1
-        )
-        diagnostics.extend(
-            ShadowedModule(view=view, name=function)
-            for function, views in views_by_function.items()
-            if function in imported
-            for view in views
-        )
-        return tuple(diagnostics)
-
-    @staticmethod
-    def _parameter_diagnostics(
-        view: compiler.CompiledView, view_models: ModuleLayout
-    ) -> list[EmitDiagnostic]:
-        """Problems with a View function's parameters and the types they name."""
-        diagnostics: list[EmitDiagnostic] = []
-        lookups = view.relation.lookups()
-        diagnostics.extend(
-            UnimportableReferencedModel(view=view.name, model=model)
-            for lookup in lookups
-            for model in (lookup.target, lookup.id_type)
-            if isinstance(Symbol.of(model), Err)
-        )
-        entities_by_parameter: dict[BoundName, list[type[pydantic.BaseModel]]] = {}
-        for lookup in lookups:
-            entities_by_parameter.setdefault(
-                PythonEmitter.lookup_parameter(lookup.target), []
-            ).append(lookup.target)
-        diagnostics.extend(
-            DuplicateLookupParameter(
-                view=view.name, parameter=parameter, entities=tuple(entities)
-            )
-            for parameter, entities in entities_by_parameter.items()
-            if len(entities) > 1
-        )
-        # The body refers to the View model's module, so no parameter may hide it.
-        diagnostics.extend(
-            ShadowedModule(view=view.name, name=parameter)
-            for parameter in (PythonEmitter.parameter, *entities_by_parameter)
-            if view_models(view).top_level().root == parameter.root
-        )
-        return diagnostics
 
 
 class _Construction:
@@ -324,33 +115,26 @@ class _Construction:
     exploded, and a conditional is split over lines only when it does not fit.
     """
 
-    def __init__(self, module: ModulePath, indent: Indent) -> None:
-        self.module = module
+    def __init__(self, function: FunctionPlan, indent: Indent) -> None:
+        self.function = function
         self.indent = indent
 
-    def call(
-        self,
-        model: Expression,
-        names: ModelNames,
-        relation: ir.Relation,
-        subject: Expression,
-    ) -> Expression:
-        """`model(...)`, with a keyword argument per field of `relation`.
-
-        `names` names the model and the models nested in it.
-        """
-        inner = _Construction(self.module, self.indent.deeper())
+    def call(self, model: ModelPlan, subject: Expression) -> Expression:
+        """`model(...)`, with a keyword argument per field, computed from
+        `subject`."""
+        inner = _Construction(self.function, self.indent.deeper())
         arguments = "".join(
-            f"{inner.indent.pad().root}{field.name.root}="
-            f"{inner.value(names, field, subject).root},\n"
-            for field in relation.fields
+            f"{inner.indent.pad().root}{field.field.name.root}="
+            f"{inner.value(model, field.field, subject).root},\n"
+            for field in model.fields
         )
+        name = model.symbol.qualified().root
         if not arguments:
-            return Expression(f"{model.root}()")
-        return Expression(f"{model.root}(\n{arguments}{self.indent.pad().root})")
+            return Expression(f"{name}()")
+        return Expression(f"{name}(\n{arguments}{self.indent.pad().root})")
 
     def value(
-        self, model: ModelNames, field: ir.RelationField, subject: Expression
+        self, model: ModelPlan, field: ir.RelationField, subject: Expression
     ) -> Expression:
         """The argument for `field` of `model`, on a line at this indentation."""
         match field:
@@ -361,22 +145,19 @@ class _Construction:
                     case ir.Lookup():
                         entity = self._entity(value, subject)
                         return self._optional(field, value, subject, lambda _: entity)
-            case ir.NestedField(value=lookup, relation=relation):
+            case ir.NestedField(value=lookup):
                 nested = model.nested_in(field)
                 return self._optional(
                     field,
                     lookup,
                     subject,
                     lambda construction: construction.call(
-                        Expression(f"{self.module.root}.{nested.name.root}"),
-                        nested,
-                        relation,
-                        self._entity(lookup, subject),
+                        nested, self._entity(lookup, subject)
                     ),
                 )
 
     def _entity(self, lookup: ir.Lookup, subject: Expression) -> Expression:
-        parameter = PythonEmitter.lookup_parameter(lookup.target)
+        parameter = self.function.parameter_of(lookup)
         return Expression(
             f"{parameter.root}[{subject.root}.{lookup.reference.field.root}]"
         )
@@ -400,9 +181,9 @@ class _Construction:
         reference = f"{subject.root}.{lookup.reference.field.root}"
         inline = f"None if {reference} is None else {present(self).root}"
         line = f"{self.indent.pad().root}{field.name.root}={inline},"
-        if "\n" not in inline and len(line) <= Codegen.line_length.root:
+        if "\n" not in inline and len(line) <= LineLength.default().root:
             return Expression(inline)
-        inner = _Construction(self.module, self.indent.deeper())
+        inner = _Construction(self.function, self.indent.deeper())
         pad = inner.indent.pad().root
         return Expression(
             f"(\n{pad}None\n{pad}if {reference} is None\n"

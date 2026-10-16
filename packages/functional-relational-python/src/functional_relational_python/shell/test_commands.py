@@ -6,7 +6,7 @@ from functional_relational_python.compiler import compiler
 from functional_relational_python.domain.id import Id
 from functional_relational_python.language import steps
 from functional_relational_python.language.views import View, ViewName
-from functional_relational_python.outputs.python.plan import ModulePath
+from functional_relational_python.outputs.python.symbols import ModulePath
 from functional_relational_python.shell import commands
 from functional_relational_python.shell.catalog import (
     CatalogAttributeMissingError,

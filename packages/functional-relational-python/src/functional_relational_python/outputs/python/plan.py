@@ -1,96 +1,67 @@
-"""Generates View model source files from compiled Views.
+"""Plans the Python output of compiled Views: what each generated name refers to.
 
-Everything here is pure: it builds file contents and touches no filesystem.
-`generated_files` writes and checks them.
+For each View the plan decides its model's Symbol, the Symbols of the models
+nested in it, and, when the layout asks for them, its mapping function's Symbol
+and lookup parameters. Every problem that depends on where things are generated
+(a name bound twice in one module, a type that cannot be imported, a module that
+defines what it would be overwritten with) is found here, once. The renderers in
+`models` and `mappings` read the plan and cannot fail.
 
-Generation runs in two passes. Planning decides every model's module and renders
-its field types; rendering then turns each module's models into source. The
-compiler has already named every model (`model_names`): a View's model, and the
-model of each resolved field with a nested pipeline. A nested model is one more
-`ViewModel` in the plan; the clash checks and rendering treat it like any other.
+The compiler has already checked the names themselves (`model_names`).
 """
 
-import sys
 import types
 import typing
-from collections.abc import Callable, Iterable, Sequence
-from pathlib import PurePosixPath
-from typing import Annotated
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import pydantic
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
-from functional_relational_python.compiler.model_names import ModelNames
-from functional_relational_python.domain.entity_graph import (
-    FieldName,
-    Optionality,
-)
+from functional_relational_python.compiler.model_names import ModelNames, PascalCase
+from functional_relational_python.domain.entity_graph import FieldName
 from functional_relational_python.language import ir
 from functional_relational_python.language.views import ViewName
+from functional_relational_python.outputs.python.symbols import (
+    AnnotationText,
+    ModulePath,
+    Symbol,
+    TypeExpression,
+)
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,
     DiagnosticsError,
 )
-from functional_relational_python.support.filesystem import FileText, RelativePath
-from functional_relational_python.support.generated_files import (
-    GeneratedFile,
-    GeneratedFiles,
-)
 from functional_relational_python.support.identifier import Identifier
 
-
-class ModulePath(pydantic.RootModel[str], frozen=True):
-    """A dotted Python module path, e.g. `myapp.views.company`."""
-
-    @pydantic.field_validator("root")
-    @classmethod
-    def _dotted_identifiers(cls, root: str) -> str:
-        _ = [Identifier(part) for part in root.split(".")]
-        return root
-
-    @staticmethod
-    def fake() -> ModulePath:
-        return ModulePath("app.views")
-
-    def file_path(self) -> RelativePath:
-        """Where the module lives, relative to the directory it is imported from."""
-        return RelativePath(PurePosixPath(*self.root.split(".")).with_suffix(".py"))
-
-    def top_level(self) -> Identifier:
-        """The name `import <this module>` binds."""
-        return Identifier(self.root.split(".")[0])
-
-    @staticmethod
-    def import_sections(
-        modules: Iterable[ModulePath],
-    ) -> tuple[tuple[ModulePath, ...], ...]:
-        """`modules` grouped like isort: the standard library, then the rest.
-
-        Each section is sorted, and an empty one is left out.
-        """
-        ordered = sorted(set(modules), key=lambda module: module.root)
-        stdlib = tuple(
-            module
-            for module in ordered
-            if module.top_level().root in sys.stdlib_module_names
-        )
-        rest = tuple(module for module in ordered if module not in stdlib)
-        return tuple(section for section in (stdlib, rest) if section)
-
-
 type ModuleLayout = Callable[[compiler.CompiledView], ModulePath]
-"""Maps each compiled View to the module its View model is generated into."""
+"""Maps each compiled View to the module something of it is generated into."""
 
 
-class AnnotationText(pydantic.RootModel[str], frozen=True):
-    """How an annotation or name reads in a diagnostic, e.g. `Annotated[int, 0]`."""
+class WithoutMappings(pydantic.BaseModel, frozen=True):
+    """Plan View models only, without mapping functions."""
+
+
+class PythonLayout(pydantic.BaseModel, frozen=True):
+    """Where each View's model, and its mapping function, are generated."""
+
+    models: ModuleLayout
+    mappings: ModuleLayout | WithoutMappings
+
+    @staticmethod
+    def models_only(models: ModuleLayout) -> PythonLayout:
+        return PythonLayout(models=models, mappings=WithoutMappings())
+
+
+class Scope(pydantic.RootModel[str], frozen=True):
+    """Where generated source binds names: a module such as `app.views`, or a
+    function such as `app.mappings.company_public`."""
 
 
 class GeneratedIntoDefiningModule(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View model would be generated into a module that defines classes the
-    View uses, overwriting their definitions."""
+    """A View's model or mapping function would be generated into a module that
+    defines classes the View uses, overwriting their definitions."""
 
     view: ViewName
     module: ModulePath
@@ -101,21 +72,6 @@ class GeneratedIntoDefiningModule(pydantic.BaseModel, Diagnostic, frozen=True):
         return DiagnosticMessage(
             f"{self.view.root}: generating into {self.module.root} would overwrite "
             f"the module defining {defined}. Generate into another module."
-        )
-
-
-class DuplicateModelName(pydantic.BaseModel, Diagnostic, frozen=True):
-    """Several Views generate a model of the same name into the same module."""
-
-    module: ModulePath
-    name: Identifier
-    views: tuple[ViewName, ...]
-
-    def describe(self) -> DiagnosticMessage:
-        views = ", ".join(view.root for view in self.views)
-        return DiagnosticMessage(
-            f"{self.module.root}: Views {views} all generate a model named "
-            f"'{self.name.root}'."
         )
 
 
@@ -133,125 +89,156 @@ class UnsupportedAnnotation(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class UnimportableType(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A field's type cannot be imported by its module and name, e.g. a local class."""
+class Unimportable(pydantic.BaseModel, Diagnostic, frozen=True):
+    """Generated source would import something it cannot import by its module and
+    name, e.g. a class defined in a function: a field's type, the Source, or an
+    Entity the View looks up or its ID type."""
 
     view: ViewName
-    field: FieldName
     annotation: AnnotationText
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}.{self.field.root}: '{self.annotation.root}' cannot "
-            "be imported by its module and name. Define it at module level."
+            f"{self.view.root}: '{self.annotation.root}' cannot be imported by its "
+            "module and name. Define it at module level."
         )
 
 
 class NameClash(pydantic.BaseModel, Diagnostic, frozen=True):
-    """Several different things would be bound to one name in a generated module."""
+    """Several things would be bound to one name in a generated module or function:
+    two models, two functions, two parameters, or one of them and an import."""
 
-    module: ModulePath
+    scope: Scope
     name: Identifier
     origins: tuple[AnnotationText, ...]
 
     def describe(self) -> DiagnosticMessage:
         origins = ", ".join(origin.root for origin in self.origins)
         return DiagnosticMessage(
-            f"{self.module.root}: the name '{self.name.root}' would refer to "
+            f"{self.scope.root}: the name '{self.name.root}' would refer to "
             f"each of {origins}."
         )
 
 
-type CodegenDiagnostic = (
-    DuplicateModelName
-    | GeneratedIntoDefiningModule
+class ModelsAndMappingsInOneModule(pydantic.BaseModel, Diagnostic, frozen=True):
+    """The layout generates View models and mapping functions into one module, so
+    one file would overwrite the other."""
+
+    module: ModulePath
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.module.root}: View models and mapping functions cannot be "
+            "generated into the same module."
+        )
+
+
+type PlanDiagnostic = (
+    GeneratedIntoDefiningModule
     | UnsupportedAnnotation
-    | UnimportableType
+    | Unimportable
     | NameClash
+    | ModelsAndMappingsInOneModule
 )
 
 
-class UnimportableError(Exception):
-    """A class or `type` alias cannot be imported by its module and name."""
-
-    def __init__(self, named: ir.RuntimeAnnotation) -> None:
-        self.named = named
-        super().__init__(f"{named!r} cannot be imported by its module and name")
-
-
-class Symbol(pydantic.BaseModel, frozen=True):
-    """A module-level object generated source refers to, e.g. `pydantic.BaseModel`.
-
-    `qualname` has several parts for a nested class; only the first is imported.
-    """
-
-    module: ModulePath
-    qualname: Annotated[tuple[Identifier, ...], pydantic.Field(min_length=1)]
-
-    @staticmethod
-    def of(named: ir.RuntimeAnnotation) -> Result[Symbol, UnimportableError]:
-        """How source imports `named`, a class or `type` alias, by its module and
-        qualified name. That fails when `named` is not reachable that way, e.g. for
-        a class defined in a function."""
-        module = getattr(named, "__module__", "")
-        parts = getattr(named, "__qualname__", "").split(".")
-        reachable = sys.modules.get(module)
-        for part in parts:
-            reachable = getattr(reachable, part, None)
-        if reachable is not named:
-            # Also covers `<locals>` in the qualname: no attribute has that name.
-            return Err(UnimportableError(named))
-        return Ok(
-            Symbol(module=ModulePath(module), qualname=tuple(map(Identifier, parts)))
-        )
-
-    def bound_name(self) -> Identifier:
-        return self.qualname[0]
-
-    def describe(self) -> AnnotationText:
-        return AnnotationText(
-            ".".join([self.module.root, *(part.root for part in self.qualname)])
-        )
-
-    def reference(self) -> TypeExpression:
-        return TypeExpression(".".join(part.root for part in self.qualname))
-
-
-class TypeExpression(pydantic.RootModel[str], frozen=True):
-    """An annotation as it is written in generated source."""
-
-    def optional(self, optionality: Optionality) -> TypeExpression:
-        """Written like `ir.Lookup.annotation`, for a model that only exists as source."""
-        match optionality:
-            case Optionality.REQUIRED:
-                return self
-            case Optionality.OPTIONAL:
-                return TypeExpression(f"{self.root} | None")
-
-
 class ModelField(pydantic.BaseModel, frozen=True):
-    name: FieldName
+    """A field of a planned model: the Relation field it holds, and its type as
+    source."""
+
+    field: ir.RelationField
     type: TypeExpression
 
 
-class LineLength(pydantic.RootModel[int], frozen=True):
-    """The longest line generated source aims for, in characters."""
+class ModelPlan(pydantic.BaseModel, frozen=True):
+    """One model to generate, and the models nested in it.
 
+    `uses` is every Symbol its class statement refers to: the base class, the
+    fields' types and the nested models.
+    """
 
-class ViewModel(pydantic.BaseModel, frozen=True):
-    """One model to generate: its name, module, fields and the Symbols it uses."""
+    base: typing.ClassVar[Symbol] = Symbol(
+        module=ModulePath("pydantic"), qualname=(Identifier("BaseModel"),)
+    )
 
     view: ViewName
-    name: Identifier
-    module: ModulePath
+    symbol: Symbol
     fields: tuple[ModelField, ...]
-    symbols: frozenset[Symbol]
+    uses: frozenset[Symbol]
+    nested: Mapping[FieldName, ModelPlan]
 
-    def symbol(self) -> Symbol:
-        return Symbol(module=self.module, qualname=(self.name,))
+    def nested_in(self, field: ir.NestedField) -> ModelPlan:
+        return self.nested[field.name]
+
+    def with_nested(self) -> tuple[ModelPlan, ...]:
+        """This model and every model nested in it, each after those it refers to."""
+        return (
+            *(
+                model
+                for nested in self.nested.values()
+                for model in nested.with_nested()
+            ),
+            self,
+        )
 
 
-class _FieldRenderer:
+class LookupParameter(pydantic.BaseModel, frozen=True):
+    """A mapping function's keyword parameter, mapping IDs to the Entity `entity`."""
+
+    name: Identifier
+    entity: type[pydantic.BaseModel]
+    id_type: Symbol
+    target: Symbol
+
+    @staticmethod
+    def name_for(entity: type[pydantic.BaseModel]) -> Identifier:
+        """The parameter for `entity`, e.g. `department_by_id`."""
+        snake = PascalCase(entity.__name__).snake_case()
+        return Identifier(f"{snake.root}_by_id")
+
+
+class FunctionPlan(pydantic.BaseModel, frozen=True):
+    """One mapping function to generate: from one instance of the View's Source,
+    and an ID mapping per Entity it looks up, to the View's model."""
+
+    source_parameter: typing.ClassVar[Identifier] = Identifier("source")
+    mapping: typing.ClassVar[ModulePath] = ModulePath("collections.abc")
+
+    view: ViewName
+    symbol: Symbol
+    source: Symbol
+    model: ModelPlan
+    lookups: tuple[LookupParameter, ...]
+
+    def parameter_of(self, lookup: ir.Lookup) -> Identifier:
+        """The parameter holding the Entities `lookup` finds.
+
+        The plan has a parameter for every Lookup of the View's Relation.
+        """
+        (name,) = (
+            parameter.name
+            for parameter in self.lookups
+            if parameter.entity is lookup.target
+        )
+        return name
+
+    def imports(self) -> frozenset[ModulePath]:
+        """The modules the function refers to, each imported whole."""
+        return frozenset(
+            {
+                self.model.symbol.module,
+                self.source.module,
+                *(parameter.target.module for parameter in self.lookups),
+                *(parameter.id_type.module for parameter in self.lookups),
+                *((FunctionPlan.mapping,) if self.lookups else ()),
+            }
+        )
+
+    def scope(self) -> Scope:
+        return Scope(self.symbol.describe().root)
+
+
+class _AnnotationRenderer:
     """Writes one field's annotation as source, collecting what it refers to.
 
     Problems are collected rather than returned early, so every unsupported part
@@ -266,7 +253,7 @@ class _FieldRenderer:
         self.view = view
         self.field = field
         self.symbols: set[Symbol] = set()
-        self.diagnostics: list[CodegenDiagnostic] = []
+        self.diagnostics: list[PlanDiagnostic] = []
 
     def render(self, annotation: ir.RuntimeAnnotation) -> TypeExpression:
         origin = typing.get_origin(annotation)
@@ -294,10 +281,10 @@ class _FieldRenderer:
         if origin is typing.Literal and all(
             type(arg) in (str, int, bool) for arg in args
         ):
-            self.symbols.add(_FieldRenderer.literal)
+            self.symbols.add(_AnnotationRenderer.literal)
             values = ", ".join(repr(arg) for arg in args)
             return TypeExpression(
-                f"{_FieldRenderer.literal.reference().root}[{values}]"
+                f"{_AnnotationRenderer.literal.reference().root}[{values}]"
             )
         if origin in (typing.Literal, typing.Annotated) or not args:
             return self._unsupported(annotation)
@@ -311,10 +298,8 @@ class _FieldRenderer:
                 return symbol.reference()
             case Err():
                 self.diagnostics.append(
-                    UnimportableType(
-                        view=self.view,
-                        field=self.field,
-                        annotation=AnnotationText(repr(annotation)),
+                    Unimportable(
+                        view=self.view, annotation=AnnotationText.of(annotation)
                     )
                 )
                 return TypeExpression(repr(annotation))
@@ -324,119 +309,35 @@ class _FieldRenderer:
             UnsupportedAnnotation(
                 view=self.view,
                 field=self.field,
-                annotation=AnnotationText(repr(annotation)),
+                annotation=AnnotationText.of(annotation),
             )
         )
         return TypeExpression(repr(annotation))
 
 
-class _ModelPlanner:
-    """Plans the models of one View: its own, and one per nested resolved field.
+class _PlannedModel(pydantic.BaseModel, frozen=True):
+    """A View's model, planned even when that found problems."""
 
-    Nested models come before the models that refer to them.
-    """
+    plan: ModelPlan
+    diagnostics: tuple[PlanDiagnostic, ...]
+
+
+class _ModelPlanner:
+    """Plans the model of one View, and one per nested resolved field."""
 
     def __init__(self, view: ViewName, module: ModulePath) -> None:
         self.view = view
         self.module = module
-        self.models: list[ViewModel] = []
-        self.diagnostics: list[CodegenDiagnostic] = []
+        self.diagnostics: list[PlanDiagnostic] = []
         # Classes the View uses that `module` defines, so generating would
         # overwrite their definitions.
         self.defined_here: set[AnnotationText] = set()
 
-    def use(self, model: type) -> None:
-        """Records that the View uses `model`, without generated code naming it."""
-        if model.__module__ == self.module.root:
-            self.defined_here.add(
-                AnnotationText(f"{model.__module__}.{model.__qualname__}")
-            )
-
-    def plan(self, names: ModelNames, relation: ir.Relation) -> None:
-        name = names.name.identifier()
-        fields: list[ModelField] = []
-        symbols: set[Symbol] = {Codegen.base}
-        for field in relation.fields:
-            renderer = _FieldRenderer(self.view, field.name)
-            match field:
-                case ir.Field(info=info):
-                    rendered = renderer.render(info.annotation)
-                case ir.NestedField(value=lookup, relation=nested):
-                    nested_names = names.nested_in(field)
-                    self.use(lookup.target)
-                    self.plan(nested_names, nested)
-                    symbol = Symbol(
-                        module=self.module,
-                        qualname=(nested_names.name.identifier(),),
-                    )
-                    symbols.add(symbol)
-                    rendered = symbol.reference().optional(field.optionality())
-            fields.append(ModelField(name=field.name, type=rendered))
-            symbols |= renderer.symbols
-            self.defined_here |= {
-                symbol.describe()
-                for symbol in renderer.symbols
-                if symbol.module == self.module
-            }
-            self.diagnostics.extend(renderer.diagnostics)
-        self.models.append(
-            ViewModel(
-                view=self.view,
-                name=name,
-                module=self.module,
-                fields=tuple(fields),
-                symbols=frozenset(symbols),
-            )
-        )
-
-
-class Codegen:
-    """Plans and renders View models. The entry point is `generate`."""
-
-    base: typing.ClassVar[Symbol] = Symbol(
-        module=ModulePath("pydantic"), qualname=(Identifier("BaseModel"),)
-    )
-    line_length: typing.ClassVar[LineLength] = LineLength(88)
-
     @staticmethod
-    def generate(
-        compiled: compiler.CompiledViews, layout: ModuleLayout
-    ) -> Result[GeneratedFiles, DiagnosticsError[CodegenDiagnostic]]:
-        """Generates one file per module, or returns every diagnostic."""
-        diagnostics: list[CodegenDiagnostic] = []
-        by_module: dict[ModulePath, list[ViewModel]] = {}
-        for view in compiled.views:
-            planned = Codegen._plan(view, layout(view))
-            for item in planned:
-                match item:
-                    case ViewModel():
-                        by_module.setdefault(item.module, []).append(item)
-                    case _:
-                        diagnostics.append(item)
-        for module, models in by_module.items():
-            diagnostics.extend(Codegen._name_diagnostics(module, models))
-
-        return DiagnosticsError.or_ok(
-            diagnostics,
-            lambda: GeneratedFiles(
-                files=tuple(
-                    GeneratedFile(
-                        path=module.file_path(),
-                        text=Codegen._render_module(module, by_module[module]),
-                    )
-                    for module in sorted(by_module, key=lambda module: module.root)
-                )
-            ),
-        )
-
-    @staticmethod
-    def _plan(
-        view: compiler.CompiledView, module: ModulePath
-    ) -> list[ViewModel] | list[CodegenDiagnostic]:
-        """The View's model, after the nested models it refers to."""
+    def view_model(view: compiler.CompiledView, module: ModulePath) -> _PlannedModel:
         planner = _ModelPlanner(view.name, module)
         planner.use(view.source)
-        planner.plan(view.names.model, view.relation)
+        plan = planner.plan(view.names.model, view.relation)
         if planner.defined_here:
             planner.diagnostics.append(
                 GeneratedIntoDefiningModule(
@@ -447,73 +348,236 @@ class Codegen:
                     ),
                 )
             )
-        if planner.diagnostics:
-            return planner.diagnostics
-        return planner.models
+        return _PlannedModel(plan=plan, diagnostics=tuple(planner.diagnostics))
+
+    def use(self, model: type) -> None:
+        """Records that the View uses `model`, without the model naming it."""
+        if model.__module__ == self.module.root:
+            self.defined_here.add(
+                AnnotationText(f"{model.__module__}.{model.__qualname__}")
+            )
+
+    def plan(self, names: ModelNames, relation: ir.Relation) -> ModelPlan:
+        fields: list[ModelField] = []
+        uses: set[Symbol] = {ModelPlan.base}
+        nested: dict[FieldName, ModelPlan] = {}
+        for field in relation.fields:
+            renderer = _AnnotationRenderer(self.view, field.name)
+            match field:
+                case ir.Field():
+                    rendered = renderer.render(field.annotation())
+                case ir.NestedField(value=lookup, relation=nested_relation):
+                    self.use(lookup.target)
+                    model = self.plan(names.nested_in(field), nested_relation)
+                    nested[field.name] = model
+                    uses.add(model.symbol)
+                    rendered = model.symbol.reference().optional(field.optionality())
+            fields.append(ModelField(field=field, type=rendered))
+            uses |= renderer.symbols
+            self.defined_here |= {
+                symbol.describe()
+                for symbol in renderer.symbols
+                if symbol.module == self.module
+            }
+            self.diagnostics.extend(renderer.diagnostics)
+        return ModelPlan(
+            view=self.view,
+            symbol=Symbol(module=self.module, qualname=(names.name.identifier(),)),
+            fields=tuple(fields),
+            uses=frozenset(uses),
+            nested=nested,
+        )
+
+
+class PythonPlan(pydantic.BaseModel, frozen=True):
+    """Every model and mapping function to generate, by module, in View order.
+
+    `models` holds each View's own model; its nested models are in it.
+    """
+
+    models: Mapping[ModulePath, tuple[ModelPlan, ...]]
+    functions: Mapping[ModulePath, tuple[FunctionPlan, ...]]
 
     @staticmethod
-    def _name_diagnostics(
-        module: ModulePath, models: Sequence[ViewModel]
-    ) -> Iterable[CodegenDiagnostic]:
-        views_by_name: dict[Identifier, list[ViewName]] = {}
-        for model in models:
-            views_by_name.setdefault(model.name, []).append(model.view)
-        for name, views in views_by_name.items():
-            if len(views) > 1:
-                yield DuplicateModelName(module=module, name=name, views=tuple(views))
+    def of(
+        compiled: compiler.CompiledViews, layout: PythonLayout
+    ) -> Result[PythonPlan, DiagnosticsError[PlanDiagnostic]]:
+        """The plan, or every diagnostic. Each diagnostic is reported once, even
+        when both a model and a mapping function run into it."""
+        diagnostics: dict[PlanDiagnostic, None] = {}
+        models: dict[ModulePath, list[ModelPlan]] = {}
+        functions: dict[ModulePath, list[FunctionPlan]] = {}
+        for view in compiled.views:
+            model = _ModelPlanner.view_model(view, layout.models(view))
+            diagnostics.update(dict.fromkeys(model.diagnostics))
+            models.setdefault(model.plan.symbol.module, []).append(model.plan)
+            match layout.mappings:
+                case WithoutMappings():
+                    continue
+                case mappings:
+                    pass
+            match _function(view, model.plan, mappings(view)):
+                case Ok(function):
+                    functions.setdefault(function.symbol.module, []).append(function)
+                case Err(error):
+                    diagnostics.update(dict.fromkeys(error.diagnostics))
+        plan = PythonPlan(
+            models={module: tuple(planned) for module, planned in models.items()},
+            functions={module: tuple(planned) for module, planned in functions.items()},
+        )
+        diagnostics.update(dict.fromkeys(plan._layout_diagnostics()))
+        return DiagnosticsError.or_ok(diagnostics, lambda: plan)
 
-        # Every name the module binds, by what it is bound to. A Symbol in this
-        # module (a model) and an import of it are the same binding.
-        bindings: dict[Identifier, set[Symbol]] = {}
-        for model in models:
-            for symbol in {model.symbol(), *model.symbols}:
-                bindings.setdefault(symbol.bound_name(), set()).add(
-                    Symbol(module=symbol.module, qualname=(symbol.bound_name(),))
-                )
-        for name, bound in bindings.items():
-            if len(bound) > 1:
-                yield NameClash(
-                    module=module,
-                    name=name,
-                    origins=tuple(
-                        sorted(
-                            (symbol.describe() for symbol in bound),
-                            key=lambda text: text.root,
-                        )
+    def _layout_diagnostics(self) -> Iterable[PlanDiagnostic]:
+        for module, models in self.models.items():
+            namespace = _Namespace(Scope(module.root))
+            for model in (m for view in models for m in view.with_nested()):
+                namespace.define(
+                    model.symbol.bound_name(),
+                    AnnotationText(
+                        f"{model.symbol.describe().root} "
+                        f"(the model of View {model.view.root})"
                     ),
                 )
+                for symbol in model.uses:
+                    if symbol.module != module:
+                        namespace.refer(symbol.bound_name(), symbol.describe())
+            yield from namespace.clashes()
+        for module, functions in self.functions.items():
+            namespace = _Namespace(Scope(module.root))
+            for function in functions:
+                namespace.define(
+                    function.symbol.bound_name(),
+                    AnnotationText(
+                        f"{function.symbol.describe().root} "
+                        f"(the mapping function of View {function.view.root})"
+                    ),
+                )
+                for imported in function.imports():
+                    namespace.refer_to_module(imported)
+            yield from namespace.clashes()
+            for function in functions:
+                yield from _Namespace.of_function(function).clashes()
+        yield from (
+            ModelsAndMappingsInOneModule(module=module)
+            for module in sorted(
+                self.models.keys() & self.functions.keys(),
+                key=lambda module: module.root,
+            )
+        )
+
+
+class _Namespace:
+    """The names generated source binds in one Scope, with what each refers to."""
+
+    def __init__(self, scope: Scope) -> None:
+        self.scope = scope
+        self.bound: dict[Identifier, list[AnnotationText]] = {}
+
+    def define(self, name: Identifier, origin: AnnotationText) -> None:
+        """Binds `name` to a thing generated here. Each binding counts, so two
+        Views generating one name clash."""
+        self.bound.setdefault(name, []).append(origin)
+
+    def refer(self, name: Identifier, origin: AnnotationText) -> None:
+        """Refers to `name`, imported or built in. Referring to the same thing
+        twice is one binding."""
+        origins = self.bound.setdefault(name, [])
+        if origin not in origins:
+            origins.append(origin)
+
+    def refer_to_module(self, module: ModulePath) -> None:
+        """Refers to `module` by its full path, so to its top-level package."""
+        top_level = module.top_level()
+        self.refer(top_level, AnnotationText(f"the module {top_level.root}"))
 
     @staticmethod
-    def _render_module(module: ModulePath, models: Sequence[ViewModel]) -> FileText:
-        imported: dict[ModulePath, set[Identifier]] = {}
-        for model in models:
-            for symbol in model.symbols:
-                if symbol.module.root != "builtins" and symbol.module != module:
-                    imported.setdefault(symbol.module, set()).add(symbol.bound_name())
-
-        sections: list[list[str]] = []
-        for section in ModulePath.import_sections(imported):
-            lines: list[str] = []
-            for source in section:
-                names = sorted(name.root for name in imported[source])
-                line = f"from {source.root} import {', '.join(names)}"
-                if len(line) > Codegen.line_length.root:
-                    listed = "".join(f"    {name},\n" for name in names)
-                    line = f"from {source.root} import (\n{listed})"
-                lines.append(line)
-            sections.append(lines)
-        imports = "\n\n".join("\n".join(lines) for lines in sections)
-
-        base = Codegen.base.reference().root
-        classes = "\n\n".join(
-            f"class {model.name.root}({base}, frozen=True):\n"
-            + (
-                "".join(
-                    f"    {field.name.root}: {field.type.root}\n"
-                    for field in model.fields
-                )
-                or "    pass\n"
-            )
-            for model in models
+    def of_function(function: FunctionPlan) -> _Namespace:
+        """A function's parameters, and the module its body builds models from."""
+        namespace = _Namespace(function.scope())
+        namespace.define(
+            FunctionPlan.source_parameter,
+            AnnotationText(
+                f"the parameter for the Source {function.source.describe().root}"
+            ),
         )
-        return FileText(f"{GeneratedFiles.header.root}\n{imports}\n\n\n{classes}")
+        for parameter in function.lookups:
+            namespace.define(
+                parameter.name,
+                AnnotationText(f"the parameter for {parameter.target.describe().root}"),
+            )
+        namespace.refer_to_module(function.model.symbol.module)
+        return namespace
+
+    def clashes(self) -> Iterable[NameClash]:
+        for name, origins in self.bound.items():
+            if len(origins) > 1:
+                yield NameClash(
+                    scope=self.scope,
+                    name=name,
+                    origins=tuple(sorted(origins, key=lambda text: text.root)),
+                )
+
+
+def _function(
+    view: compiler.CompiledView, model: ModelPlan, module: ModulePath
+) -> Result[FunctionPlan, DiagnosticsError[PlanDiagnostic]]:
+    """The View's mapping function, generated into `module`."""
+    lookups = view.relation.lookups()
+    match _symbols(
+        view.name,
+        (
+            view.source,
+            *(t for lookup in lookups for t in (lookup.target, lookup.id_type)),
+        ),
+    ):
+        case Ok(symbols):
+            pass
+        case Err(error):
+            return Err(DiagnosticsError(error.diagnostics))
+    function = FunctionPlan(
+        view=view.name,
+        symbol=Symbol(module=module, qualname=(Identifier(view.names.function.root),)),
+        source=symbols[view.source],
+        model=model,
+        lookups=tuple(
+            LookupParameter(
+                name=LookupParameter.name_for(lookup.target),
+                entity=lookup.target,
+                target=symbols[lookup.target],
+                id_type=symbols[lookup.id_type],
+            )
+            for lookup in lookups
+        ),
+    )
+    defined = sorted(
+        {symbol.describe() for symbol in symbols.values() if symbol.module == module},
+        key=lambda text: text.root,
+    )
+    return DiagnosticsError.or_ok(
+        [
+            GeneratedIntoDefiningModule(
+                view=view.name, module=module, defined=tuple(defined)
+            )
+        ]
+        if defined
+        else [],
+        lambda: function,
+    )
+
+
+def _symbols(
+    view: ViewName, named: Sequence[type]
+) -> Result[Mapping[type, Symbol], DiagnosticsError[Unimportable]]:
+    """How generated source imports each of `named`, or each that it cannot."""
+    symbols: dict[type, Symbol] = {}
+    unimportable: list[Unimportable] = []
+    for item in named:
+        match Symbol.of(item):
+            case Ok(symbol):
+                symbols[item] = symbol
+            case Err():
+                unimportable.append(
+                    Unimportable(view=view, annotation=AnnotationText.of(item))
+                )
+    return DiagnosticsError.or_ok(unimportable, lambda: symbols)

@@ -1,4 +1,5 @@
 import contextlib
+import subprocess
 import sys
 import types
 from collections.abc import Generator, Iterable
@@ -18,8 +19,21 @@ from functional_relational_python.domain.id import Id
 from functional_relational_python.language import ir, steps
 from functional_relational_python.language.views import View, ViewName
 from functional_relational_python.outputs import engine
-from functional_relational_python.outputs.python import mappings as emitter
-from functional_relational_python.outputs.python.plan import Codegen, ModulePath
+from functional_relational_python.outputs.python.mappings import MappingsRenderer
+from functional_relational_python.outputs.python.models import ModelsRenderer
+from functional_relational_python.outputs.python.plan import (
+    ModuleLayout,
+    PythonLayout,
+    PythonPlan,
+)
+from functional_relational_python.outputs.python.symbols import ModulePath
+from functional_relational_python.support.filesystem import (
+    Directory,
+    FileText,
+    InMemoryFileSystem,
+    LocalFileSystem,
+)
+from functional_relational_python.support.generated_files import GeneratedFiles
 
 
 class Text(pydantic.RootModel[str], frozen=True):
@@ -90,60 +104,6 @@ class Transfer(pydantic.BaseModel, frozen=True):
     archived_department_id: ArchivedDepartmentId
 
 
-# The View models the golden module refers to. Codegen (MB-182) generates these;
-# here they are written by hand so the golden module type checks.
-class CompanyFull(pydantic.BaseModel, frozen=True):
-    id: CompanyId
-    name: Text
-    secret: Text
-
-
-class CompanyPublic(pydantic.BaseModel, frozen=True):
-    id: CompanyId
-    name: Text
-
-
-class CompanyName(pydantic.BaseModel, frozen=True):
-    name: Text
-
-
-class CompanyTitle(pydantic.BaseModel, frozen=True):
-    id: CompanyId
-    title: Text
-
-
-class CompanySecret(pydantic.BaseModel, frozen=True):
-    secret: Text
-
-
-class EmployeeHydrated(pydantic.BaseModel, frozen=True):
-    id: EmployeeId
-    name: Text
-    department: Department
-    mentor: Employee | None
-
-
-class EmployeeOverviewDepartment(pydantic.BaseModel, frozen=True):
-    id: DepartmentId
-    name: Text
-    company: Company
-
-
-class EmployeeOverview(pydantic.BaseModel, frozen=True):
-    id: EmployeeId
-    name: Text
-    department: EmployeeOverviewDepartment
-    mentor_id: EmployeeId | None
-
-
-class EmployeeMentorMentor(pydantic.BaseModel, frozen=True):
-    name: Text
-
-
-class EmployeeMentor(pydantic.BaseModel, frozen=True):
-    mentor: EmployeeMentorMentor | None
-
-
 def entity_graph() -> EntityGraph:
     return EntityGraph.build([Company, Wide, Department, Employee]).unwrap()
 
@@ -158,26 +118,6 @@ def compile_all(views: Iterable[View]) -> compiler.CompiledViews:
             return compiled
         case Err(error):
             pytest.fail(f"expected compiled views, got {error}")
-
-
-def this_module(_view: compiler.CompiledView) -> ModulePath:
-    return ModulePath(__name__)
-
-
-def emit(views: Iterable[View]) -> emitter.EmittedModule:
-    match emitter.PythonEmitter.emit(compile_all(views), this_module):
-        case Ok(emitted):
-            return emitted
-        case Err(error):
-            pytest.fail(f"expected an emitted module, got {error}")
-
-
-def emit_diagnostics(views: Iterable[View]) -> tuple[emitter.EmitDiagnostic, ...]:
-    match emitter.PythonEmitter.emit(compile_all(views), this_module):
-        case Ok(emitted):
-            pytest.fail(f"expected diagnostics, got {emitted.root}")
-        case Err(error):
-            return error.diagnostics
 
 
 def golden_views() -> list[View]:
@@ -228,190 +168,204 @@ def golden_views() -> list[View]:
     ]
 
 
-def test_the_emitted_module_matches_the_golden_file() -> None:
-    """The golden file is type checked with the rest of the package (`:typecheck`).
-
-    To regenerate it, write `emit(golden_views()).root` to the file.
-    """
-    golden = Path(__file__).with_name("test_mappings_golden.py")
-
-    assert emit(golden_views()).root == golden.read_text()
+def into(module: ModulePath) -> ModuleLayout:
+    """Every View into `module`."""
+    return lambda _view: module
 
 
-def test_a_source_that_cannot_be_imported_is_a_diagnostic() -> None:
-    class Local(pydantic.BaseModel, frozen=True):
-        name: Text
-
-    view = View(name=ViewName.fake(), source=Local, step=steps.pipeline())
-
-    assert emit_diagnostics([view]) == (
-        emitter.UnimportableSource(view=view.name, source=Local),
-    )
-
-
-def test_views_with_the_same_function_name_are_a_diagnostic() -> None:
-    views = [
-        View(name=ViewName(name), source=Company, step=steps.pipeline())
-        for name in ["CompanyPublic", "companyPublic"]
-    ]
-
-    assert emit_diagnostics(views) == (
-        emitter.DuplicateFunctionName(
-            function=emitter.BoundName("company_public"),
-            views=tuple(view.name for view in views),
-        ),
-    )
-
-
-def test_a_function_named_like_an_imported_module_is_a_diagnostic() -> None:
-    root = __name__.split(".")[0]
-    view = View(
-        name=ViewName(root.title().replace("_", "")),
-        source=Company,
-        step=steps.pipeline(),
-    )
-
-    assert emit_diagnostics([view]) == (
-        emitter.ShadowedModule(view=view.name, name=emitter.BoundName(root)),
-    )
-
-
-def test_a_view_model_module_named_like_the_parameter_is_a_diagnostic() -> None:
-    view = View(name=ViewName.fake(), source=Company, step=steps.pipeline())
-
-    match emitter.PythonEmitter.emit(
-        compile_all([view]),
-        lambda _view: ModulePath(f"{emitter.PythonEmitter.parameter.root}.views"),
-    ):
-        case Ok(emitted):
-            pytest.fail(f"expected diagnostics, got {emitted.root}")
+def plan_of(compiled: compiler.CompiledViews, layout: PythonLayout) -> PythonPlan:
+    match PythonPlan.of(compiled, layout):
+        case Ok(plan):
+            return plan
         case Err(error):
-            assert error.diagnostics == (
-                emitter.ShadowedModule(
-                    view=view.name, name=emitter.PythonEmitter.parameter
-                ),
-            )
+            pytest.fail(f"expected a plan, got {error}")
 
 
-def test_a_view_model_module_named_like_a_lookup_parameter_is_a_diagnostic() -> None:
-    view = View(name=ViewName.fake(), source=Employee, step=steps.hydrate())
-    parameter = emitter.PythonEmitter.lookup_parameter(Department)
+class Generated:
+    """Where the tests generate models and mapping functions: two top-level
+    modules, so `import <module>` binds the module itself."""
 
-    match emitter.PythonEmitter.emit(
-        compile_all([view]), lambda _view: ModulePath(f"{parameter.root}.views")
-    ):
-        case Ok(emitted):
-            pytest.fail(f"expected diagnostics, got {emitted.root}")
-        case Err(error):
-            assert error.diagnostics == (
-                emitter.ShadowedModule(view=view.name, name=parameter),
-            )
+    models: ClassVar[ModulePath] = ModulePath("frp_generated_models")
+    mappings: ClassVar[ModulePath] = ModulePath("frp_generated_mappings")
 
+    @staticmethod
+    def layout() -> PythonLayout:
+        return PythonLayout(
+            models=into(Generated.models), mappings=into(Generated.mappings)
+        )
 
-def hydrated_diagnostics(
-    entities: Iterable[type[pydantic.BaseModel]], source: type[pydantic.BaseModel]
-) -> tuple[emitter.EmitDiagnostic, ...]:
-    graph = EntityGraph.build(entities).unwrap()
-    view = View(name=ViewName.fake(), source=source, step=steps.hydrate())
-    match emitter.PythonEmitter.emit(
-        compiler.compile_views(graph, [view]).unwrap(), this_module
-    ):
-        case Ok(emitted):
-            pytest.fail(f"expected diagnostics, got {emitted.root}")
-        case Err(error):
-            return error.diagnostics
+    @staticmethod
+    def text(files: GeneratedFiles) -> FileText:
+        (file,) = files.files
+        return file.text
 
 
-def test_entities_whose_names_give_the_same_lookup_parameter_are_a_diagnostic() -> None:
-    assert hydrated_diagnostics(
-        [Company, Department, Archive.Department, Transfer], Transfer
-    ) == (
-        emitter.DuplicateLookupParameter(
-            view=ViewName.fake(),
-            parameter=emitter.BoundName("department_by_id"),
-            entities=(Department, Archive.Department),
-        ),
+def test_golden_mapping_functions() -> None:
+    plan = plan_of(compile_all(golden_views()), Generated.layout())
+
+    assert Generated.text(MappingsRenderer.render(plan)) == FileText(
+        """\
+# Generated by functional-relational-python. Do not edit.
+# Regenerate with `frp generate`; `frp check` fails when this is stale.
+
+import collections.abc
+
+import frp_generated_models
+import functional_relational_python.outputs.python.test_mappings
+
+
+def company_full(
+    source: functional_relational_python.outputs.python.test_mappings.Company,
+) -> frp_generated_models.CompanyFull:
+    return frp_generated_models.CompanyFull(
+        id=source.id,
+        name=source.name,
+        secret=source.secret,
     )
 
 
-def test_a_looked_up_entity_that_cannot_be_imported_is_a_diagnostic() -> None:
-    class TeamId(Id[int]):
-        pass
-
-    class Team(pydantic.BaseModel, frozen=True):
-        id: TeamId
-
-    class Player(pydantic.BaseModel, frozen=True):
-        team_id: TeamId
-
-    assert hydrated_diagnostics([Team], Player) == (
-        emitter.UnimportableSource(view=ViewName.fake(), source=Player),
-        emitter.UnimportableReferencedModel(view=ViewName.fake(), model=Team),
-        emitter.UnimportableReferencedModel(view=ViewName.fake(), model=TeamId),
+def company_public(
+    source: functional_relational_python.outputs.python.test_mappings.Company,
+) -> frp_generated_models.CompanyPublic:
+    return frp_generated_models.CompanyPublic(
+        id=source.id,
+        name=source.name,
     )
 
 
-@pytest.mark.parametrize(
-    ("diagnostic", "message"),
-    [
-        (
-            emitter.UnimportableSource(view=ViewName("CompanyPublic"), source=Company),
-            (
-                f"CompanyPublic: the Source {__name__}.Company cannot be imported "
-                "by its module and name. Define it at module level."
-            ),
-        ),
-        (
-            emitter.DuplicateFunctionName(
-                function=emitter.BoundName("company_public"),
-                views=(ViewName("CompanyPublic"), ViewName("companyPublic")),
-            ),
-            (
-                "Views CompanyPublic, companyPublic all emit a function named "
-                "'company_public'."
-            ),
-        ),
-        (
-            emitter.ShadowedModule(view=ViewName("App"), name=emitter.BoundName("app")),
-            "App: the emitted name 'app' would shadow the imported module 'app'.",
-        ),
-        (
-            emitter.UnimportableReferencedModel(
-                view=ViewName("TransferView"), model=Department
-            ),
-            (
-                f"TransferView: {__name__}.Department cannot be imported by its "
-                "module and name. Define it at module level."
-            ),
-        ),
-        (
-            emitter.DuplicateLookupParameter(
-                view=ViewName("TransferView"),
-                parameter=emitter.BoundName("department_by_id"),
-                entities=(Department, Archive.Department),
-            ),
-            (
-                f"TransferView: Entities {__name__}.Department, "
-                f"{__name__}.Archive.Department all need a parameter named "
-                "'department_by_id'."
-            ),
-        ),
+def company_name(
+    source: functional_relational_python.outputs.python.test_mappings.Company,
+) -> frp_generated_models.CompanyName:
+    return frp_generated_models.CompanyName(
+        name=source.name,
+    )
+
+
+def company_title(
+    source: functional_relational_python.outputs.python.test_mappings.Company,
+) -> frp_generated_models.CompanyTitle:
+    return frp_generated_models.CompanyTitle(
+        id=source.id,
+        title=source.name,
+    )
+
+
+def company_secret(
+    source: functional_relational_python.outputs.python.test_mappings.Company,
+) -> frp_generated_models.CompanySecret:
+    return frp_generated_models.CompanySecret(
+        secret=source.secret,
+    )
+
+
+def employee_hydrated(
+    source: functional_relational_python.outputs.python.test_mappings.Employee,
+    *,
+    department_by_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.DepartmentId,
+        functional_relational_python.outputs.python.test_mappings.Department,
     ],
-    ids=[
-        "unimportable",
-        "duplicate",
-        "shadowed",
-        "unimportable-referenced",
-        "duplicate-lookup",
+    employee_by_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.EmployeeId,
+        functional_relational_python.outputs.python.test_mappings.Employee,
     ],
-)
-def test_a_diagnostic_message_names_the_offending_values(
-    diagnostic: emitter.EmitDiagnostic, message: str
-) -> None:
-    assert diagnostic.describe().root == message
+) -> frp_generated_models.EmployeeHydrated:
+    return frp_generated_models.EmployeeHydrated(
+        id=source.id,
+        name=source.name,
+        department=department_by_id[source.department_id],
+        mentor=None if source.mentor_id is None else employee_by_id[source.mentor_id],
+    )
 
 
-# Differential test: for generated Sources and pipelines, the emitted functions and
+def employee_overview(
+    source: functional_relational_python.outputs.python.test_mappings.Employee,
+    *,
+    department_by_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.DepartmentId,
+        functional_relational_python.outputs.python.test_mappings.Department,
+    ],
+    company_by_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.CompanyId,
+        functional_relational_python.outputs.python.test_mappings.Company,
+    ],
+) -> frp_generated_models.EmployeeOverview:
+    return frp_generated_models.EmployeeOverview(
+        id=source.id,
+        name=source.name,
+        department=frp_generated_models.EmployeeOverviewDepartment(
+            id=department_by_id[source.department_id].id,
+            name=department_by_id[source.department_id].name,
+            company=company_by_id[department_by_id[source.department_id].company_id],
+        ),
+        mentor_id=source.mentor_id,
+    )
+
+
+def employee_mentor(
+    source: functional_relational_python.outputs.python.test_mappings.Employee,
+    *,
+    employee_by_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.EmployeeId,
+        functional_relational_python.outputs.python.test_mappings.Employee,
+    ],
+) -> frp_generated_models.EmployeeMentor:
+    return frp_generated_models.EmployeeMentor(
+        mentor=(
+            None
+            if source.mentor_id is None
+            else frp_generated_models.EmployeeMentorMentor(
+                name=employee_by_id[source.mentor_id].name,
+            )
+        ),
+    )
+"""
+    )
+
+
+def test_writing_the_mapping_functions_twice_succeeds() -> None:
+    files = MappingsRenderer.render(
+        plan_of(compile_all(golden_views()), Generated.layout())
+    )
+    filesystem = InMemoryFileSystem()
+    output = Directory.fake()
+    files.write(filesystem, output).unwrap()
+
+    assert isinstance(files.write(filesystem, output), Ok)
+
+
+def test_generated_models_and_mappings_pass_the_type_checker(tmp_path: Path) -> None:
+    plan = plan_of(compile_all(golden_views()), Generated.layout())
+    # Two directories, since writing either GeneratedFiles cleans up the other's
+    # files as no longer generated.
+    for name, files in [
+        ("models", ModelsRenderer.render(plan)),
+        ("mappings", MappingsRenderer.render(plan)),
+    ]:
+        (tmp_path / name).mkdir()
+        files.write(LocalFileSystem(), Directory(tmp_path / name)).unwrap()
+    source_root = Path(__file__).parents[3]
+    _ = (tmp_path / "pyrefly.toml").write_text(
+        f'search-path = ["{tmp_path / "models"}", "{tmp_path / "mappings"}", '
+        f'"{source_root}"]\n'
+        f'python-interpreter-path = "{sys.executable}"\n'
+        'project-includes = ["mappings", "models"]\n'
+        'preset = "all"\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pyrefly", "check", "--config", "pyrefly.toml"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+# Differential test: for generated Sources and pipelines, the mapping functions and
 # the InMemoryViewEngine give the same View results.
 
 texts = st.builds(Text, st.text(max_size=3))
@@ -501,90 +455,95 @@ def differential_cases(draw: st.DrawFn) -> DifferentialCase:
     return DifferentialCase(views=tuple(views), entities=draw(entities()))
 
 
-class GeneratedModels:
-    """The module codegen's View models are executed into, for the emitted module."""
-
-    # A top-level name, so `import <name>` binds the module itself.
-    module: ClassVar[ModulePath] = ModulePath("frp_differential_view_models")
-
-    @staticmethod
-    def layout(_view: compiler.CompiledView) -> ModulePath:
-        return GeneratedModels.module
+class Executed:
+    """Generated models and mapping functions, run as modules."""
 
     @staticmethod
     def row_of(model: pydantic.BaseModel) -> engine.ViewRow:
         """A View model as a ViewRow, nested View models included."""
         return engine.ViewRow(
             {
-                FieldName(name): GeneratedModels.row_of(value)
+                FieldName(name): Executed.row_of(value)
                 if isinstance(value, pydantic.BaseModel)
-                and type(value).__module__ == GeneratedModels.module.root
+                and type(value).__module__ == Generated.models.root
                 else value
                 for name, value in vars(model).items()
             }
         )
 
+    @staticmethod
+    def models(text: FileText) -> types.ModuleType:
+        """The models in `text`, made to forbid extra fields, because pydantic
+        would otherwise ignore a field a mapping function wrongly passes."""
+        module = types.ModuleType(Generated.models.root)
+        exec(text.root, module.__dict__)
+        # In definition order, so a model is rebuilt after the models it nests.
+        for model in vars(module).values():
+            if (
+                isinstance(model, type)
+                and issubclass(model, pydantic.BaseModel)
+                and model.__module__ == module.__name__
+            ):
+                model.model_config["extra"] = "forbid"
+                _ = model.model_rebuild(force=True)
+        return module
+
 
 @contextlib.contextmanager
-def emitted_module(compiled: compiler.CompiledViews) -> Generator[types.ModuleType]:
-    """Runs the emitted module against the View models codegen generates.
-
-    The models forbid extra fields, because pydantic would otherwise ignore a field
-    the emitted function wrongly passes.
-    """
-    match Codegen.generate(compiled, GeneratedModels.layout):
-        case Ok(generated):
-            (file,) = generated.files
-        case Err(error):
-            pytest.fail(f"expected View models, got {error}")
-    view_models = types.ModuleType(GeneratedModels.module.root)
-    exec(
-        file.text.root.replace(
-            "(BaseModel, frozen=True)", "(BaseModel, frozen=True, extra='forbid')"
-        ),
-        view_models.__dict__,
-    )
-    sys.modules[view_models.__name__] = view_models
+def mapping_functions(plan: PythonPlan) -> Generator[types.ModuleType]:
+    """The mapping functions, run against the View models of the same plan."""
+    models = Executed.models(Generated.text(ModelsRenderer.render(plan)))
+    sys.modules[models.__name__] = models
     try:
-        match emitter.PythonEmitter.emit(compiled, GeneratedModels.layout):
-            case Ok(emitted):
-                module = types.ModuleType(f"{__name__}_emitted")
-                exec(emitted.root, module.__dict__)
-                yield module
-            case Err(error):
-                pytest.fail(f"expected an emitted module, got {error}")
+        module = types.ModuleType(Generated.mappings.root)
+        exec(Generated.text(MappingsRenderer.render(plan)).root, module.__dict__)
+        yield module
     finally:
-        del sys.modules[view_models.__name__]
+        del sys.modules[models.__name__]
+
+
+def view_source(
+    compiled: compiler.CompiledViews, name: ViewName
+) -> type[pydantic.BaseModel]:
+    (source,) = (view.source for view in compiled.views if view.name == name)
+    return source
 
 
 @given(differential_cases())
-def test_emitted_functions_give_the_same_view_results_as_the_engine(
+def test_mapping_functions_give_the_same_view_results_as_the_engine(
     case: DifferentialCase,
 ) -> None:
     compiled = compile_all(case.views)
     view_engine = engine.InMemoryViewEngine(entity_graph(), compiled)
     for entity in case.entities:
         view_engine.put(entity).unwrap()
+    plan = plan_of(compiled, Generated.layout())
 
-    with emitted_module(compiled) as module:
-        for view in compiled.views:
-            function = getattr(module, emitter.PythonEmitter.function_name(view).root)
+    with mapping_functions(plan) as module:
+        for function in plan.functions[Generated.mappings]:
             lookups = {
-                emitter.PythonEmitter.lookup_parameter(lookup.target).root: {
+                parameter.name.root: {
                     vars(entity)["id"]: entity
                     for entity in case.entities
-                    if isinstance(entity, lookup.target)
+                    if isinstance(entity, parameter.entity)
                 }
-                for lookup in view.relation.lookups()
+                for parameter in function.lookups
             }
-            emitted_rows = [
-                list(GeneratedModels.row_of(function(entity, **lookups)).root.items())
+            mapped_rows = [
+                list(
+                    Executed.row_of(
+                        getattr(module, function.symbol.bound_name().root)(
+                            entity, **lookups
+                        )
+                    ).root.items()
+                )
                 for entity in case.entities
-                if isinstance(entity, view.source)
+                if isinstance(entity, view_source(compiled, function.view))
             ]
             engine_rows = [
-                list(row.root.items()) for row in view_engine.read(view.name).unwrap()
+                list(row.root.items())
+                for row in view_engine.read(function.view).unwrap()
             ]
             # Catches a strategy that stops drawing resolves over stored rows.
-            event(f"resolving view has rows: {bool(lookups) and bool(emitted_rows)}")
-            assert emitted_rows == engine_rows
+            event(f"resolving view has rows: {bool(lookups) and bool(mapped_rows)}")
+            assert mapped_rows == engine_rows
