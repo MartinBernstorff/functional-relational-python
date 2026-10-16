@@ -20,3 +20,7 @@ class Id[T](RootModel[T]):
 # subclasses. Every IdType comes from an `issubclass(_, Id)` check, so skip it.
 type IdType = Annotated[type[Id[object]], SkipValidation]
 """Any ID type, i.e. any subclass of `Id`."""
+
+# Likewise, no ID is an instance of `Id[object]`, and validating would convert it.
+type IdValue = Annotated[Id[object], SkipValidation]
+"""Any ID, i.e. an instance of any subclass of `Id`."""

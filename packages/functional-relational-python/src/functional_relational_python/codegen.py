@@ -5,9 +5,10 @@ Everything here is pure: it builds file contents and touches no filesystem.
 
 Generation runs in two passes. Planning decides every model's name and module and
 renders its field types; rendering then turns each module's models into source.
-Model names are explicit (a View's name) for now. A model with a generated name,
-e.g. a variant of a union View, is one more `ViewModel` in the plan: the planner
-names it, and the name checks and rendering treat it like any other.
+A View's model is named after the View. A model with a generated name, such as
+the model of a resolved field with a nested pipeline (`nested_model_name`), is one
+more `ViewModel` in the plan: the planner names it, and the name checks and
+rendering treat it like any other.
 """
 
 import keyword
@@ -21,8 +22,12 @@ from typing import Annotated
 import pydantic
 from safe_result import Err, Ok, Result
 
-from functional_relational_python import compiler
-from functional_relational_python.entity_graph import DiagnosticMessage, FieldName
+from functional_relational_python import compiler, ir
+from functional_relational_python.entity_graph import (
+    DiagnosticMessage,
+    FieldName,
+    Optionality,
+)
 from functional_relational_python.filesystem import FileText, RelativePath
 from functional_relational_python.generated_files import GeneratedFile, GeneratedFiles
 from functional_relational_python.views import ViewName
@@ -300,6 +305,50 @@ class _FieldRenderer:
         return TypeExpression(repr(annotation))
 
 
+class _ModelPlanner:
+    """Plans the models of one View: its own, and one per nested resolved field.
+
+    Nested models come before the models that refer to them.
+    """
+
+    def __init__(self, view: ViewName, module: ModulePath) -> None:
+        self.view = view
+        self.module = module
+        self.models: list[ViewModel] = []
+        self.diagnostics: list[Diagnostic] = []
+
+    def plan(self, name: Identifier, relation: ir.Relation) -> None:
+        fields: list[ModelField] = []
+        symbols: set[Symbol] = {Codegen.base}
+        for field in relation.fields:
+            renderer = _FieldRenderer(self.view, field.name)
+            match field:
+                case ir.Field(info=info):
+                    rendered = renderer.render(info.annotation)
+                case ir.NestedField(value=lookup, relation=nested):
+                    nested_name = Codegen.nested_model_name(name, field.name)
+                    self.plan(nested_name, nested)
+                    symbol = Symbol(module=self.module, qualname=(nested_name,))
+                    renderer.symbols.add(symbol)
+                    rendered = TypeExpression(
+                        symbol.reference().root
+                        if lookup.optionality is Optionality.REQUIRED
+                        else f"{symbol.reference().root} | None"
+                    )
+            fields.append(ModelField(name=field.name, type=rendered))
+            symbols |= renderer.symbols
+            self.diagnostics.extend(renderer.diagnostics)
+        self.models.append(
+            ViewModel(
+                view=self.view,
+                name=name,
+                module=self.module,
+                fields=tuple(fields),
+                symbols=frozenset(symbols),
+            )
+        )
+
+
 class Codegen:
     """Plans and renders View models. The entry point is `generate`."""
 
@@ -320,11 +369,13 @@ class Codegen:
         diagnostics: list[Diagnostic] = []
         by_module: dict[ModulePath, list[ViewModel]] = {}
         for view in compiled.views:
-            match Codegen._plan(view, layout(view)):
-                case ViewModel() as model:
-                    by_module.setdefault(model.module, []).append(model)
-                case planned:
-                    diagnostics.extend(planned)
+            planned = Codegen._plan(view, layout(view))
+            for item in planned:
+                match item:
+                    case ViewModel():
+                        by_module.setdefault(item.module, []).append(item)
+                    case _:
+                        diagnostics.append(item)
         for module, models in by_module.items():
             diagnostics.extend(Codegen._name_diagnostics(module, models))
 
@@ -343,33 +394,28 @@ class Codegen:
         )
 
     @staticmethod
+    def nested_model_name(parent: Identifier, field: FieldName) -> Identifier:
+        """The model a nested resolved field is typed by: `EmployeeDepartment`
+        for the field `department` of `Employee`."""
+        pascal = "".join(part[:1].upper() + part[1:] for part in field.root.split("_"))
+        return Identifier(f"{parent.root}{pascal}")
+
+    @staticmethod
     def _plan(
         view: compiler.CompiledView, module: ModulePath
-    ) -> ViewModel | list[Diagnostic]:
-        diagnostics: list[Diagnostic] = []
+    ) -> list[ViewModel] | list[Diagnostic]:
+        """The View's model, after the nested models it refers to."""
+        planner = _ModelPlanner(view.name, module)
         name = view.name.root
-        if not name.isidentifier() or keyword.iskeyword(name):
-            diagnostics.append(InvalidModelName(view=view.name))
-
-        fields: list[ModelField] = []
-        symbols: set[Symbol] = {Codegen.base}
-        for field in view.relation.fields:
-            renderer = _FieldRenderer(view.name, field.name)
-            fields.append(
-                ModelField(name=field.name, type=renderer.render(field.info.annotation))
-            )
-            symbols |= renderer.symbols
-            diagnostics.extend(renderer.diagnostics)
-
-        if diagnostics:
-            return diagnostics
-        return ViewModel(
-            view=view.name,
-            name=Identifier(name),
-            module=module,
-            fields=tuple(fields),
-            symbols=frozenset(symbols),
-        )
+        if name.isidentifier() and not keyword.iskeyword(name):
+            planner.plan(Identifier(name), view.relation)
+        else:
+            planner.diagnostics.append(InvalidModelName(view=view.name))
+            # Planned only for its field diagnostics; the name is never used.
+            planner.plan(Identifier("InvalidModelName"), view.relation)
+        if planner.diagnostics:
+            return planner.diagnostics
+        return planner.models
 
     @staticmethod
     def _name_diagnostics(

@@ -13,7 +13,12 @@ from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
 from functional_relational_python import diagnostics, ir
-from functional_relational_python.entity_graph import EntityGraph
+from functional_relational_python.entity_graph import (
+    EntityGraph,
+    FieldName,
+    IdAnnotation,
+    Optionality,
+)
 from functional_relational_python.views import View, ViewName
 
 type Diagnostics = Annotated[
@@ -33,8 +38,10 @@ class Poisoned(pydantic.BaseModel, frozen=True):
 
 
 class CompiledView(pydantic.BaseModel, frozen=True):
+    """A checked View: its Source, and the Relation backends compute from it."""
+
     name: ViewName
-    node: ir.Node
+    source: type[pydantic.BaseModel]
     relation: ir.Relation
 
 
@@ -56,13 +63,13 @@ class CompileError(Exception):
 
 
 def compile_views(
-    _entity_graph: EntityGraph, views: Iterable[View], /
+    entity_graph: EntityGraph, views: Iterable[View], /
 ) -> Result[CompiledViews, CompileError]:
     """Compiles every View, or returns every diagnostic from all of them.
 
-    The EntityGraph is unused until References are resolved (MB-181).
+    `entity_graph` is what References are resolved against.
     """
-    checked = check(views)
+    checked = check(entity_graph, views)
     poisoned = [view for view in checked if isinstance(view, PoisonedView)]
     if poisoned:
         return Err(
@@ -79,34 +86,43 @@ def compile_views(
     )
 
 
-def check(views: Iterable[View]) -> tuple[CompiledView | PoisonedView, ...]:
+def check(
+    entity_graph: EntityGraph, views: Iterable[View]
+) -> tuple[CompiledView | PoisonedView, ...]:
     """Checks every View independently, so a defect in one never hides another."""
-    return tuple(_check_view(view) for view in views)
+    return tuple(_check_view(entity_graph, view) for view in views)
 
 
-def _check_view(view: View) -> CompiledView | PoisonedView:
+def _check_view(entity_graph: EntityGraph, view: View) -> CompiledView | PoisonedView:
     node = view.step(ir.FromSource(source=view.source))
-    match _check_node(view.name, node):
+    match _check_node(entity_graph, view.name, node):
         case ir.Relation() as relation:
-            return CompiledView(name=view.name, node=node, relation=relation)
+            return CompiledView(name=view.name, source=view.source, relation=relation)
         case Poisoned(diagnostics=reported):
             return PoisonedView(name=view.name, diagnostics=reported)
 
 
-def _check_node(view: ViewName, node: ir.Node) -> ir.Relation | Poisoned:
+def _check_node(
+    entity_graph: EntityGraph, view: ViewName, node: ir.Node
+) -> ir.Relation | Poisoned:
     match node:
         case ir.FromSource():
             return ir.Relation.of(node)
-        case ir.Omit() | ir.Rename() | ir.Project():
-            match _check_node(view, node.input):
+        case ir.Omit() | ir.Rename() | ir.Project() | ir.Resolve():
+            match _check_node(entity_graph, view, node.input):
                 case ir.Relation() as relation:
-                    return _check_step(view, node, relation)
+                    return _check_step(entity_graph, view, node, relation)
                 case Poisoned(recovered=recovered, diagnostics=earlier):
-                    return _poison(_check_step(view, node, recovered), earlier)
+                    return _poison(
+                        _check_step(entity_graph, view, node, recovered), earlier
+                    )
 
 
 def _check_step(
-    view: ViewName, node: ir.Omit | ir.Rename | ir.Project, relation: ir.Relation
+    entity_graph: EntityGraph,
+    view: ViewName,
+    node: ir.Omit | ir.Rename | ir.Project | ir.Resolve,
+    relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
     """Checks one step against the relation its input has."""
     match node:
@@ -116,6 +132,8 @@ def _check_step(
             return _check_rename(view, node, relation)
         case ir.Project():
             return _check_project(view, node, relation)
+        case ir.Resolve():
+            return _check_resolve(entity_graph, view, node, relation)
 
 
 def _check_omit(
@@ -164,7 +182,14 @@ def _check_rename(
         if node.new in names
         else ir.Relation(
             source=relation.source,
-            fields=(*relation.fields, ir.Field(name=node.new, info=FieldInfo())),
+            fields=(
+                *relation.fields,
+                ir.Field(
+                    name=node.new,
+                    info=FieldInfo(),
+                    value=ir.SourceField(field=node.field),
+                ),
+            ),
         )
     )
     return Poisoned(recovered=recovered, diagnostics=tuple(reported))
@@ -188,6 +213,146 @@ def _check_project(
         return kept
     # The known fields are kept, so later steps are checked against them.
     return Poisoned(recovered=kept, diagnostics=unknown)
+
+
+class _CheckedField(pydantic.BaseModel, frozen=True):
+    """One field after `resolve`, with the diagnostics resolving it reported.
+
+    When resolving fails, `field` is the unresolved field, so later steps still
+    find it under its old name.
+    """
+
+    field: ir.RelationField
+    diagnostics: tuple[diagnostics.Diagnostic, ...]
+
+
+def _check_resolve(
+    entity_graph: EntityGraph, view: ViewName, node: ir.Resolve, relation: ir.Relation
+) -> ir.Relation | Poisoned:
+    checked = tuple(
+        _resolve_field(entity_graph, view, node, relation, field)
+        if node.fields.predicate(field)
+        else _CheckedField(field=field, diagnostics=())
+        for field in relation.fields
+    )
+    resolved = ir.Relation(
+        source=relation.source, fields=tuple(check.field for check in checked)
+    )
+    reported = tuple(d for check in checked for d in check.diagnostics)
+    if not reported:
+        return resolved
+    return Poisoned(recovered=resolved, diagnostics=reported)
+
+
+def _resolve_field(
+    entity_graph: EntityGraph,
+    view: ViewName,
+    node: ir.Resolve,
+    relation: ir.Relation,
+    field: ir.RelationField,
+) -> _CheckedField:
+    match _lookup(entity_graph, view, relation, field):
+        case _CheckedField() as unresolved:
+            return unresolved
+        case ir.Lookup() as lookup:
+            pass
+    # A field named just `_id` keeps its name rather than losing all of it.
+    name = FieldName(field.name.root.removesuffix("_id") or field.name.root)
+    if name != field.name and name in relation.field_names():
+        return _CheckedField(
+            field=field,
+            diagnostics=(
+                diagnostics.ResolvedNameCollision(
+                    view=view, source=relation.source, field=field.name, existing=name
+                ),
+            ),
+        )
+    return _resolved(entity_graph, view, node, name, lookup)
+
+
+def _lookup(
+    entity_graph: EntityGraph,
+    view: ViewName,
+    relation: ir.Relation,
+    field: ir.RelationField,
+) -> ir.Lookup | _CheckedField:
+    """How `field` is looked up, or the field unresolved with why it can't be."""
+    not_a_reference = _CheckedField(
+        field=field,
+        diagnostics=(
+            diagnostics.NotAReference(
+                view=view, source=relation.source, field=field.name
+            ),
+        ),
+    )
+    match field:
+        case ir.Field(info=info, value=ir.SourceField() as reference):
+            pass
+        case ir.Field() | ir.NestedField():
+            return not_a_reference
+    match IdAnnotation.of(info):
+        case Err():
+            return not_a_reference
+        case Ok(annotation):
+            pass
+    match entity_graph.entity_keyed_by(annotation.id_type):
+        case Err():
+            return _CheckedField(
+                field=field,
+                diagnostics=(
+                    diagnostics.UnresolvableReference(
+                        view=view,
+                        source=relation.source,
+                        field=field.name,
+                        id_type=annotation.id_type,
+                    ),
+                ),
+            )
+        case Ok(target):
+            return ir.Lookup(
+                reference=reference,
+                id_type=annotation.id_type,
+                target=target,
+                optionality=annotation.optionality,
+            )
+
+
+def _resolved(
+    entity_graph: EntityGraph,
+    view: ViewName,
+    node: ir.Resolve,
+    name: FieldName,
+    lookup: ir.Lookup,
+) -> _CheckedField:
+    """The field holding the looked-up Entity, after `node.then` if it does anything.
+
+    Without a nested pipeline the field is typed by the Entity class itself.
+    """
+    root = ir.FromSource(source=lookup.target)
+    nested = node.then(root)
+    if nested == root:
+        entity = (
+            lookup.target
+            if lookup.optionality is Optionality.REQUIRED
+            else lookup.target | None
+        )
+        return _CheckedField(
+            field=ir.Field(
+                name=name, info=FieldInfo.from_annotation(entity), value=lookup
+            ),
+            diagnostics=(),
+        )
+    match _check_node(entity_graph, view, nested):
+        case ir.Relation() as relation:
+            return _CheckedField(
+                field=ir.NestedField(name=name, value=lookup, relation=relation),
+                diagnostics=(),
+            )
+        case Poisoned(recovered=recovered, diagnostics=reported):
+            return _CheckedField(
+                field=ir.NestedField(name=name, value=lookup, relation=recovered),
+                diagnostics=reported,
+            )
 
 
 def _poison(

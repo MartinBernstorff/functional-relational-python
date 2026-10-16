@@ -107,6 +107,56 @@ class EntityGraphError(Exception):
         )
 
 
+class NotAnIdAnnotationError(Exception):
+    """A field's annotation is neither `X` nor `X | None` for an `Id` subclass `X`."""
+
+    def __init__(self, info: FieldInfo) -> None:
+        self.info = info
+        super().__init__(f"{info.annotation!r} is not an Id type, optional or not")
+
+
+class NoEntityError(Exception):
+    """An ID type is the primary key of no Entity in the EntityGraph."""
+
+    def __init__(self, id_type: IdType) -> None:
+        self.id_type = id_type
+        super().__init__(f"{id_type.__qualname__} is the primary key of no entity")
+
+
+class IdAnnotation(BaseModel):
+    """A field annotated `X` or `X | None`, where `X` is an `Id` subclass.
+
+    Only these two shapes are References; `list[X]` and the like are not.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id_type: IdType
+    optionality: Optionality
+
+    @staticmethod
+    def of(info: FieldInfo) -> Result[IdAnnotation, NotAnIdAnnotationError]:
+        annotation = info.annotation
+        match annotation:
+            case type() as id_type if issubclass(id_type, Id):
+                return Ok(
+                    IdAnnotation(id_type=id_type, optionality=Optionality.REQUIRED)
+                )
+            case _:
+                pass
+        match (typing.get_origin(annotation), typing.get_args(annotation)):
+            case (
+                types.UnionType,
+                (type() as id_type, types.NoneType)
+                | (types.NoneType, type() as id_type),
+            ) if issubclass(id_type, Id):
+                return Ok(
+                    IdAnnotation(id_type=id_type, optionality=Optionality.OPTIONAL)
+                )
+            case _:
+                return Err(NotAnIdAnnotationError(info))
+
+
 class _ReferenceField(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -182,29 +232,24 @@ class EntityGraph(BaseModel):
 
     @staticmethod
     def _reference_fields(model: type[BaseModel]) -> Iterator[_ReferenceField]:
-        for name, field in model.model_fields.items():
+        for name, info in model.model_fields.items():
             if name == "id":
                 continue
-            annotation = field.annotation
-            match annotation:
-                case type() as id_type if issubclass(id_type, Id):
+            match IdAnnotation.of(info):
+                case Ok(annotation):
                     yield _ReferenceField(
                         field=FieldName(name),
-                        id_type=id_type,
-                        optionality=Optionality.REQUIRED,
+                        id_type=annotation.id_type,
+                        optionality=annotation.optionality,
                     )
-                case _:
+                case Err():
                     pass
-            match (typing.get_origin(annotation), typing.get_args(annotation)):
-                case (
-                    types.UnionType,
-                    (type() as id_type, types.NoneType)
-                    | (types.NoneType, type() as id_type),
-                ) if issubclass(id_type, Id):
-                    yield _ReferenceField(
-                        field=FieldName(name),
-                        id_type=id_type,
-                        optionality=Optionality.OPTIONAL,
-                    )
-                case _:
-                    pass
+
+    def entity_keyed_by(
+        self, id_type: IdType
+    ) -> Result[type[BaseModel], NoEntityError]:
+        """The Entity whose primary key `id_type` is."""
+        for model, node in self.entities.items():
+            if node.id_type is id_type:
+                return Ok(model)
+        return Err(NoEntityError(id_type))

@@ -7,7 +7,10 @@ ones.
 import functools
 from collections.abc import Callable, Iterable
 
+from safe_result import Ok
+
 from functional_relational_python import ir
+from functional_relational_python.entity_graph import FieldName, IdAnnotation
 
 type Step = Callable[[ir.Node], ir.Node]
 
@@ -34,6 +37,43 @@ def project(fields: Iterable[ir.FieldName]) -> Step:
         return ir.Project(input=node, fields=kept)
 
     return step
+
+
+def select(predicate: ir.FieldPredicate) -> ir.Select:
+    """The fields `predicate` accepts, for a step that acts on several fields."""
+    return ir.Select(predicate=predicate)
+
+
+def is_reference(field: ir.RelationField) -> bool:
+    """Whether `field` is a Reference: typed `X` or `X | None` for an Id `X`.
+
+    The primary key `id` is not a Reference.
+    """
+    match field:
+        case ir.Field(name=name, info=info):
+            return name != FieldName("id") and isinstance(IdAnnotation.of(info), Ok)
+        case ir.NestedField():
+            return False
+
+
+def resolve(fields: ir.Select, *then: Step) -> Step:
+    """Replaces each Reference in `fields` with the Entity it points to.
+
+    A `department_id` field becomes `department`. The steps in `then` form a
+    pipeline applied to each referenced Entity; without them, the field holds the
+    Entity itself.
+    """
+    nested = pipeline(*then)
+
+    def step(node: ir.Node) -> ir.Node:
+        return ir.Resolve(input=node, fields=fields, then=nested)
+
+    return step
+
+
+def hydrate(*then: Step) -> Step:
+    """Resolves every Reference: `resolve(select(is_reference), *then)`."""
+    return resolve(select(is_reference), *then)
 
 
 def pipeline(*steps: Step) -> Step:

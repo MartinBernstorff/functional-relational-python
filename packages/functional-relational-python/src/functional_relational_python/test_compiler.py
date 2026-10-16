@@ -5,7 +5,12 @@ from hypothesis import strategies as st
 from safe_result import Err, Ok
 
 from functional_relational_python import compiler, diagnostics, ir, steps
-from functional_relational_python.entity_graph import EntityGraph, FieldName
+from functional_relational_python.entity_graph import (
+    EntityGraph,
+    FieldName,
+    Optionality,
+)
+from functional_relational_python.id import Id
 from functional_relational_python.views import View, ViewName
 
 
@@ -207,10 +212,14 @@ def test_building_a_pipeline_checks_nothing() -> None:
 def test_rename_keeps_the_field_in_place_with_its_type() -> None:
     view = compile_one(steps.rename(FieldName("secret"), FieldName("code")))
 
-    assert [(field.name, field.info) for field in view.relation.fields] == [
-        (FieldName("code") if name == "secret" else FieldName(name), info)
+    assert view.relation.fields == tuple(
+        ir.Field(
+            name=FieldName("code") if name == "secret" else FieldName(name),
+            info=info,
+            value=ir.SourceField(field=FieldName(name)),
+        )
         for name, info in Company.model_fields.items()
-    ]
+    )
 
 
 @pytest.mark.parametrize(
@@ -378,7 +387,7 @@ def test_n_independent_defects_give_exactly_n_diagnostics(
 def test_only_defective_views_are_poisoned_and_each_names_its_diagnostics(
     case: ViewsWithDefects,
 ) -> None:
-    checked = compiler.check(case.views)
+    checked = compiler.check(empty_graph(), case.views)
 
     poisoned = [view for view in checked if isinstance(view, compiler.PoisonedView)]
     assert {view.name for view in poisoned} == case.defective_views
@@ -418,3 +427,276 @@ def test_project_equals_omitting_every_other_field(case: Projection) -> None:
     assert compile_relation(steps.project(case.kept)) == compile_relation(
         steps.pipeline(*map(steps.omit, others))
     )
+
+
+# Resolving References against `hr_graph()`.
+
+
+class DepartmentId(Id[int]):
+    pass
+
+
+class Department(pydantic.BaseModel):
+    id: DepartmentId
+    name: Text
+
+
+class EmployeeId(Id[int]):
+    pass
+
+
+class Employee(pydantic.BaseModel):
+    id: EmployeeId
+    name: Text
+    department_id: DepartmentId
+    mentor_id: EmployeeId | None
+
+
+class Clash(pydantic.BaseModel):
+    """`department_id` would resolve onto the existing `department`."""
+
+    department: Text
+    department_id: DepartmentId
+
+
+class ProjectId(Id[int]):
+    """The primary key of no Entity in `hr_graph()`."""
+
+
+class Memo(pydantic.BaseModel):
+    """A Source that is not an Entity, with a Reference that resolves to nothing."""
+
+    project_id: ProjectId
+    department_id: DepartmentId
+
+
+def hr_graph() -> EntityGraph:
+    return EntityGraph.build([Department, Employee]).unwrap()
+
+
+def named(*fields: FieldName) -> ir.Select:
+    return steps.select(lambda field: field.name in fields)
+
+
+def compile_resolving(
+    source: type[pydantic.BaseModel], step: steps.Step
+) -> compiler.CompiledView:
+    match compiler.compile_views(
+        hr_graph(), [View(name=ViewName.fake(), source=source, step=step)]
+    ):
+        case Ok(compiled):
+            return compiled.views[0]
+        case Err(error):
+            pytest.fail(f"expected a compiled view, got {error}")
+
+
+def resolve_diagnostics(
+    source: type[pydantic.BaseModel], step: steps.Step
+) -> tuple[diagnostics.Diagnostic, ...]:
+    match compiler.compile_views(
+        hr_graph(), [View(name=ViewName.fake(), source=source, step=step)]
+    ):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            return error.diagnostics
+
+
+def values(view: compiler.CompiledView) -> dict[FieldName, ir.Value]:
+    """The values of the View's fields, by name, for asserting what resolved."""
+    return {field.name: field.value for field in view.relation.fields}
+
+
+def test_hydrate_resolves_every_reference_and_drops_the_id_suffix() -> None:
+    view = compile_resolving(Employee, steps.hydrate())
+
+    assert [
+        (field.name, field.info.annotation)
+        for field in view.relation.fields
+        if isinstance(field, ir.Field)
+    ] == [
+        (FieldName("id"), EmployeeId),
+        (FieldName("name"), Text),
+        (FieldName("department"), Department),
+        (FieldName("mentor"), Employee | None),
+    ]
+
+
+def test_a_reference_without_the_id_suffix_keeps_its_name() -> None:
+    view = compile_resolving(
+        Employee,
+        steps.pipeline(
+            steps.rename(FieldName("department_id"), FieldName("team")),
+            steps.resolve(named(FieldName("team"))),
+        ),
+    )
+
+    assert values(view)[FieldName("team")] == ir.Lookup(
+        reference=ir.SourceField(field=FieldName("department_id")),
+        id_type=DepartmentId,
+        target=Department,
+        optionality=Optionality.REQUIRED,
+    )
+
+
+def test_resolve_leaves_unselected_references_alone() -> None:
+    view = compile_resolving(Employee, steps.resolve(named(FieldName("mentor_id"))))
+
+    assert field_names(view) == names(
+        Text("id"), Text("name"), Text("department_id"), Text("mentor")
+    )
+
+
+def test_a_nested_pipeline_types_the_field_by_its_relation() -> None:
+    view = compile_resolving(
+        Employee,
+        steps.resolve(
+            named(FieldName("mentor_id")), steps.omit(FieldName("mentor_id"))
+        ),
+    )
+
+    match view.relation.fields[-1]:
+        case ir.NestedField(name=name, value=lookup, relation=relation):
+            assert (name, lookup.optionality, relation.field_names()) == (
+                FieldName("mentor"),
+                Optionality.OPTIONAL,
+                (FieldName("id"), FieldName("name"), FieldName("department_id")),
+            )
+        case field:
+            pytest.fail(f"expected a nested field, got {field}")
+
+
+def test_an_empty_nested_pipeline_resolves_to_the_entity_itself() -> None:
+    nested = compile_resolving(
+        Employee, steps.resolve(named(FieldName("department_id")), steps.pipeline())
+    )
+    plain = compile_resolving(
+        Employee, steps.resolve(named(FieldName("department_id")))
+    )
+
+    # FieldInfo compares by identity, so compare what each field holds instead.
+    assert [(type(f), f.name, f.value) for f in nested.relation.fields] == [
+        (type(f), f.name, f.value) for f in plain.relation.fields
+    ]
+
+
+def test_resolving_onto_an_existing_field_names_the_source_and_both_fields() -> None:
+    assert resolve_diagnostics(Clash, steps.hydrate()) == (
+        diagnostics.ResolvedNameCollision(
+            view=ViewName.fake(),
+            source=ir.SourceName("Clash"),
+            field=FieldName("department_id"),
+            existing=FieldName("department"),
+        ),
+    )
+
+
+def test_resolving_a_field_that_is_not_a_reference_is_a_diagnostic() -> None:
+    assert resolve_diagnostics(Employee, steps.resolve(named(FieldName("name")))) == (
+        diagnostics.NotAReference(
+            view=ViewName.fake(),
+            source=ir.SourceName("Employee"),
+            field=FieldName("name"),
+        ),
+    )
+
+
+def test_a_reference_to_no_entity_is_a_diagnostic_and_others_still_resolve() -> None:
+    match compiler.check(
+        hr_graph(),
+        [
+            View(
+                name=ViewName.fake(),
+                source=Memo,
+                step=steps.pipeline(
+                    steps.hydrate(), steps.omit(FieldName("department"))
+                ),
+            )
+        ],
+    ):
+        case (compiler.PoisonedView(diagnostics=reported),):
+            assert reported == (
+                diagnostics.UnresolvableReference(
+                    view=ViewName.fake(),
+                    source=ir.SourceName("Memo"),
+                    field=FieldName("project_id"),
+                    id_type=ProjectId,
+                ),
+            )
+        case checked:
+            pytest.fail(f"expected one poisoned view, got {checked}")
+
+
+def test_a_defect_in_a_nested_pipeline_names_the_referenced_entity() -> None:
+    unknown = FieldName("budget")
+
+    assert resolve_diagnostics(
+        Employee, steps.resolve(named(FieldName("department_id")), steps.omit(unknown))
+    ) == (
+        diagnostics.UnknownField(
+            view=ViewName.fake(),
+            source=ir.SourceName("Department"),
+            field=unknown,
+            valid=(FieldName("id"), FieldName("name")),
+        ),
+    )
+
+
+def test_building_a_resolve_checks_nothing() -> None:
+    root = ir.FromSource(source=Memo)
+    selection = named(FieldName("does_not_exist"))
+
+    node = steps.resolve(selection)(root)
+
+    match node:
+        case ir.Resolve(input=input_node, fields=fields):
+            assert (input_node, fields) == (root, selection)
+        case _:
+            pytest.fail(f"expected a Resolve node, got {node}")
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "message"),
+    [
+        (
+            diagnostics.NotAReference(
+                view=ViewName("EmployeeView"),
+                source=ir.SourceName("Employee"),
+                field=FieldName("name"),
+            ),
+            (
+                "EmployeeView: cannot resolve Employee.name, because it is not a "
+                "Reference."
+            ),
+        ),
+        (
+            diagnostics.UnresolvableReference(
+                view=ViewName("MemoView"),
+                source=ir.SourceName("Memo"),
+                field=FieldName("project_id"),
+                id_type=ProjectId,
+            ),
+            (
+                "MemoView: cannot resolve Memo.project_id, because ProjectId is the "
+                "primary key of no entity."
+            ),
+        ),
+        (
+            diagnostics.ResolvedNameCollision(
+                view=ViewName("ClashView"),
+                source=ir.SourceName("Clash"),
+                field=FieldName("department_id"),
+                existing=FieldName("department"),
+            ),
+            (
+                "ClashView: resolving Clash.department_id would name it "
+                "'department', but Clash already has a field 'department'."
+            ),
+        ),
+    ],
+    ids=["not-a-reference", "unresolvable", "collision"],
+)
+def test_a_resolve_diagnostic_message_names_the_offending_values(
+    diagnostic: diagnostics.Diagnostic, message: str
+) -> None:
+    assert diagnostic.describe().root == message

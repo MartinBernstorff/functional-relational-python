@@ -10,14 +10,21 @@ import pydantic
 from safe_result import Err, Ok, Result
 
 from functional_relational_python import compiler, ir
-from functional_relational_python.entity_graph import EntityGraph, FieldName
+from functional_relational_python.entity_graph import (
+    DiagnosticMessage,
+    EntityGraph,
+    FieldName,
+)
+from functional_relational_python.id import IdValue
 from functional_relational_python.views import ViewName
 
 
 class ViewRow(pydantic.RootModel[Mapping[FieldName, object]], frozen=True):
     """One View result: the value of each field the View's Relation has.
 
-    Values are the Entity's own field values, so their types are the user's.
+    Values are the Entity's own field values, so their types are the user's. A
+    resolved field holds the referenced Entity, or a ViewRow if it has a nested
+    pipeline.
     """
 
     @staticmethod
@@ -56,6 +63,56 @@ class UnknownViewError(Exception):
         super().__init__(f"No compiled View named '{view.root}'. Known Views: {names}.")
 
 
+class DanglingReference(pydantic.BaseModel, frozen=True):
+    """A Reference field whose IDs key no stored Entity."""
+
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+    missing: tuple[IdValue, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        missing = ", ".join(repr(id_value.root) for id_value in self.missing)
+        return DiagnosticMessage(
+            f"{self.entity.__name__}.{self.field.root} references missing IDs: "
+            f"{missing}"
+        )
+
+
+class DanglingReferenceError(Exception):
+    """A View resolves References to Entities that are not stored.
+
+    `dangling` has one entry per Entity and field, each with every missing ID.
+    """
+
+    def __init__(self, dangling: tuple[DanglingReference, ...]) -> None:
+        self.dangling = dangling
+        super().__init__("\n".join(d.describe().root for d in dangling))
+
+
+type FieldValue = object
+"""A View result's field value: the Entity's own value, an Entity, or a ViewRow."""
+
+
+class _Missing:
+    """The missing IDs found while running a View, by Entity and field."""
+
+    def __init__(self) -> None:
+        self.ids: dict[tuple[type[pydantic.BaseModel], FieldName], list[IdValue]] = {}
+
+    def add(
+        self, entity: type[pydantic.BaseModel], field: FieldName, id_value: IdValue
+    ) -> None:
+        missing = self.ids.setdefault((entity, field), [])
+        if id_value not in missing:
+            missing.append(id_value)
+
+    def dangling(self) -> tuple[DanglingReference, ...]:
+        return tuple(
+            DanglingReference(entity=entity, field=field, missing=tuple(ids))
+            for (entity, field), ids in self.ids.items()
+        )
+
+
 class InMemoryViewEngine:
     """Holds Entities by ID and runs compiled Views over them.
 
@@ -68,34 +125,74 @@ class InMemoryViewEngine:
     ) -> None:
         self._entity_graph = entity_graph
         self._views = {view.name: view for view in views.views}
-        self._entities: dict[type[pydantic.BaseModel], dict[object, ViewRow]] = {}
+        self._entities: dict[
+            type[pydantic.BaseModel], dict[IdValue, pydantic.BaseModel]
+        ] = {}
 
     def put(self, entity: pydantic.BaseModel) -> Result[None, NotAnEntityError]:
         model = type(entity)
         if model not in self._entity_graph.entities:
             return Err(NotAnEntityError(model))
-        row = ViewRow(
-            {FieldName(name): getattr(entity, name) for name in model.model_fields}
-        )
-        self._entities.setdefault(model, {})[row.root[FieldName("id")]] = row
+        primary_key = FieldName("id")
+        self._entities.setdefault(model, {})[getattr(entity, primary_key.root)] = entity
         return Ok(None)
 
-    def read(self, view: ViewName) -> Result[tuple[ViewRow, ...], UnknownViewError]:
+    def read(
+        self, view: ViewName
+    ) -> Result[tuple[ViewRow, ...], UnknownViewError | DanglingReferenceError]:
+        """The View's results, or every Reference that points to a missing Entity."""
         match self._views.get(view):
             case None:
                 return Err(UnknownViewError(view, tuple(self._views)))
             case compiled:
-                return Ok(self._run(compiled.node))
+                pass
+        missing = _Missing()
+        rows = tuple(
+            self._row(compiled.relation, entity, missing)
+            for entity in self._entities.get(compiled.source, {}).values()
+        )
+        if dangling := missing.dangling():
+            return Err(DanglingReferenceError(dangling))
+        return Ok(rows)
 
-    def _run(self, node: ir.Node) -> tuple[ViewRow, ...]:
-        match node:
-            case ir.FromSource():
-                return tuple(self._entities.get(node.source, {}).values())
-            case ir.Omit():
-                return tuple(row.without(node.field) for row in self._run(node.input))
-            case ir.Rename():
-                return tuple(
-                    row.renamed(node.field, node.new) for row in self._run(node.input)
-                )
-            case ir.Project():
-                return tuple(row.keeping(node.fields) for row in self._run(node.input))
+    def _row(
+        self, relation: ir.Relation, subject: pydantic.BaseModel, missing: _Missing
+    ) -> ViewRow:
+        return ViewRow(
+            {
+                field.name: self._field(field, subject, missing)
+                for field in relation.fields
+            }
+        )
+
+    def _field(
+        self, field: ir.RelationField, subject: pydantic.BaseModel, missing: _Missing
+    ) -> FieldValue:
+        match field:
+            case ir.Field(value=value):
+                match value:
+                    case ir.SourceField():
+                        return getattr(subject, value.field.root)
+                    case ir.Lookup():
+                        return self._lookup(value, subject, missing)
+            case ir.NestedField(value=lookup, relation=relation):
+                match self._lookup(lookup, subject, missing):
+                    case None:
+                        return None
+                    case entity:
+                        return self._row(relation, entity, missing)
+
+    def _lookup(
+        self, lookup: ir.Lookup, subject: pydantic.BaseModel, missing: _Missing
+    ) -> pydantic.BaseModel | None:
+        """The referenced Entity; `None` for an absent optional Reference, or when
+        the Entity is missing, which `missing` records."""
+        id_value = getattr(subject, lookup.reference.field.root)
+        if id_value is None:
+            return None
+        match self._entities.get(lookup.target, {}).get(id_value):
+            case None:
+                missing.add(type(subject), lookup.reference.field, id_value)
+                return None
+            case entity:
+                return entity
