@@ -9,6 +9,7 @@ Clashes that depend on where the output puts things (two models of one name in a
 module, a model named like an import) are not checked here: the outputs own them.
 """
 
+import keyword
 import re
 from collections.abc import Mapping
 
@@ -56,19 +57,6 @@ class InvalidNestedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class InvalidFunctionName(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View's name in snake_case is not a valid function name."""
-
-    view: ViewName
-    function: CandidateName
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.view.root}: '{self.function.root}' is not a valid Python "
-            "function name."
-        )
-
-
 class InvalidFieldName(pydantic.BaseModel, Diagnostic, frozen=True):
     """A rename or resolve gives a field a name no View model field can have."""
 
@@ -84,9 +72,7 @@ class InvalidFieldName(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-type ModelNameDiagnostic = (
-    InvalidModelName | InvalidNestedModelName | InvalidFunctionName
-)
+type ModelNameDiagnostic = InvalidModelName | InvalidNestedModelName
 
 
 class ModelName(pydantic.RootModel[str], frozen=True):
@@ -117,6 +103,16 @@ class FunctionName(pydantic.RootModel[str], frozen=True):
     @staticmethod
     def fake() -> FunctionName:
         return FunctionName("company_summary")
+
+    @staticmethod
+    def of(model: ModelName) -> FunctionName:
+        """The model's name in snake_case: `CompanyPublic` is `company_public`.
+
+        A keyword gets a trailing underscore, as PEP 8 suggests: `Class` is
+        `class_`.
+        """
+        snake = PascalCase(model.root).snake_case().root
+        return FunctionName(f"{snake}_" if keyword.iskeyword(snake) else snake)
 
 
 class PascalCase(pydantic.RootModel[str], frozen=True):
@@ -203,37 +199,27 @@ class ViewModelNames(pydantic.BaseModel, frozen=True):
                         models = Err(DiagnosticsError(error.diagnostics))
             case InvalidModelName() as invalid:
                 models = Err(DiagnosticsError((invalid,)))
-        function = ViewModelNames.function_name(view)
         match models:
             case Ok(names):
-                match function:
-                    case FunctionName():
-                        return Ok(ViewModelNames(model=names, function=function))
-                    case InvalidFunctionName():
-                        return Err(DiagnosticsError((function,)))
+                return Ok(
+                    ViewModelNames(model=names, function=FunctionName.of(names.name))
+                )
             case Err(error):
-                match function:
-                    case FunctionName():
-                        return Err(error)
-                    case InvalidFunctionName():
-                        return Err(DiagnosticsError((*error.diagnostics, function)))
+                return Err(error)
 
     @staticmethod
     def view_diagnostics(
         view: ViewName,
-    ) -> tuple[InvalidModelName | InvalidFunctionName, ...]:
+    ) -> tuple[InvalidModelName, ...]:
         """What is wrong with the names taken from the View's name alone.
 
         For a View that did not compile, whose nested models are unknown.
         """
-        return tuple(
-            name
-            for name in (
-                ViewModelNames.model_name(view),
-                ViewModelNames.function_name(view),
-            )
-            if isinstance(name, InvalidModelName | InvalidFunctionName)
-        )
+        match ViewModelNames.model_name(view):
+            case ModelName():
+                return ()
+            case InvalidModelName() as invalid:
+                return (invalid,)
 
     @staticmethod
     def model_name(view: ViewName) -> ModelName | InvalidModelName:
@@ -243,16 +229,6 @@ class ViewModelNames(pydantic.BaseModel, frozen=True):
                 return ModelName(view.root)
             case Err():
                 return InvalidModelName(view=view)
-
-    @staticmethod
-    def function_name(view: ViewName) -> FunctionName | InvalidFunctionName:
-        """The View's name in snake_case: `CompanyPublic` is `company_public`."""
-        candidate = PascalCase(view.root).snake_case()
-        match Identifier.of(candidate):
-            case Ok():
-                return FunctionName(candidate.root)
-            case Err():
-                return InvalidFunctionName(view=view, function=candidate)
 
     @staticmethod
     def check_field(

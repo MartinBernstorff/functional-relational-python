@@ -95,7 +95,6 @@ type CompileDiagnostic = (
     | model_names.InvalidFieldName
     | model_names.InvalidModelName
     | model_names.InvalidNestedModelName
-    | model_names.InvalidFunctionName
     | NotAReference
     | UnresolvableReference
     | ResolvedNameCollision
