@@ -13,12 +13,12 @@ from functional_relational_python.domain.entity_graph import EntityGraph, FieldN
 from functional_relational_python.domain.id import Id
 from functional_relational_python.language import steps
 from functional_relational_python.language.views import View, ViewName
-from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
     PythonLayout,
     PythonPlan,
 )
+from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import ModulePath
 from functional_relational_python.support.filesystem import (
     Directory,
@@ -69,7 +69,7 @@ def single_module(module: ModulePath) -> ModuleLayout:
 def generate(views: list[View], layout: ModuleLayout) -> GeneratedFiles:
     match PythonPlan.of(compile_views(views), PythonLayout.models_only(layout)):
         case Ok(plan):
-            return ModelsRenderer.render(plan)
+            return PythonRenderer.render(plan)
         case Err(error):
             pytest.fail(f"expected generated files, got {error}")
 

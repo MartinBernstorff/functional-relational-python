@@ -11,6 +11,7 @@ compiled Relation, so the two agree (the differential test in `test_mappings.py`
 checks this).
 """
 
+import typing
 from collections.abc import Callable, Sequence
 
 import pydantic
@@ -55,20 +56,26 @@ class Indent(pydantic.RootModel[int], frozen=True):
 
 
 class MappingsRenderer:
-    """Writes the source of every planned mapping function. The entry point is
-    `render`."""
+    """Writes the source of every planned mapping function."""
+
+    # `frp generate` does not write mapping functions, so the header does not
+    # point to it.
+    header: typing.ClassVar[FileText] = FileText(
+        f"{GeneratedFiles.header.root}# Maps each View's Source to its View model.\n"
+    )
 
     @staticmethod
-    def render(plan: PythonPlan) -> GeneratedFiles:
-        """One file per module, in module order, with its functions in View order."""
-        return GeneratedFiles(
-            files=tuple(
-                GeneratedFile(
-                    path=module.file_path(),
-                    text=MappingsRenderer._module(plan.functions[module]),
-                )
-                for module in sorted(plan.functions, key=lambda module: module.root)
+    def files(plan: PythonPlan) -> tuple[GeneratedFile, ...]:
+        """One file per module, in module order, with its functions in View order.
+
+        `render.PythonRenderer` writes them together with the View models.
+        """
+        return tuple(
+            GeneratedFile(
+                path=module.file_path(),
+                text=MappingsRenderer._module(plan.functions[module]),
             )
+            for module in sorted(plan.functions, key=lambda module: module.root)
         )
 
     @staticmethod
@@ -82,7 +89,7 @@ class MappingsRenderer:
         rendered = "".join(
             f"\n\n{MappingsRenderer._function(function).root}" for function in functions
         )
-        return FileText(f"{GeneratedFiles.header.root}\n{imports}{rendered}")
+        return FileText(f"{MappingsRenderer.header.root}\n{imports}{rendered}")
 
     @staticmethod
     def _function(function: FunctionPlan) -> FunctionText:

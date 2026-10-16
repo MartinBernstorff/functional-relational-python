@@ -269,3 +269,50 @@ def _comparable(
             return graph
         case Err(error):
             return frozenset(error.diagnostics)
+
+
+class Label(RootModel[str]):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("annotation", "split"),
+    [
+        (Label, (entity_graph.Optionality.REQUIRED, Label)),
+        (Label | None, (entity_graph.Optionality.OPTIONAL, Label)),
+        (Label | int | None, (entity_graph.Optionality.OPTIONAL, Label | int)),
+        (list[Label | None], (entity_graph.Optionality.REQUIRED, list[Label | None])),
+    ],
+    ids=["required", "optional", "optional union", "list of optionals"],
+)
+def test_an_annotation_is_optional_iff_it_admits_none(
+    annotation: entity_graph.RuntimeAnnotation,
+    split: tuple[entity_graph.Optionality, entity_graph.RuntimeAnnotation],
+) -> None:
+    optionality, required = split
+
+    assert entity_graph.Optionality.of_annotation(
+        annotation
+    ) == entity_graph.SplitAnnotation(optionality=optionality, required=required)
+
+
+@pytest.mark.parametrize("optionality", list(entity_graph.Optionality))
+def test_an_annotation_built_with_an_optionality_is_recognised_as_it(
+    optionality: entity_graph.Optionality,
+) -> None:
+    assert entity_graph.Optionality.of_annotation(
+        optionality.annotate(Label)
+    ) == entity_graph.SplitAnnotation(optionality=optionality, required=Label)
+
+
+@pytest.mark.parametrize(
+    ("optionality", "text"),
+    [
+        (entity_graph.Optionality.REQUIRED, "Label"),
+        (entity_graph.Optionality.OPTIONAL, "Label | None"),
+    ],
+)
+def test_an_annotation_is_written_with_its_optionality(
+    optionality: entity_graph.Optionality, text: str
+) -> None:
+    assert optionality.annotate_text(Label("Label")) == Label(text)

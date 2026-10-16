@@ -1,3 +1,5 @@
+import functools
+import operator
 import types
 import typing
 from collections import defaultdict
@@ -25,9 +27,59 @@ class FieldName(RootModel[str]):
         return FieldName("department_id")
 
 
+type RuntimeAnnotation = object
+"""A field's annotation as Python holds it at run time: a class, `None`, a generic
+alias such as `list[int]`, a union, a `type` alias, or a `Literal` argument."""
+
+
 class Optionality(StrEnum):
+    """Whether a value may be `None`.
+
+    An optional annotation is `X | None`. This is the one place that says so: it
+    builds optional annotations, at run time and as source text, and recognises
+    them.
+    """
+
     REQUIRED = "required"
     OPTIONAL = "optional"
+
+    @staticmethod
+    def of_annotation(annotation: RuntimeAnnotation) -> SplitAnnotation:
+        """Whether `annotation` admits `None`, and `annotation` without `None`:
+        `X | None` is an optional `X`, `X | Y | None` an optional `X | Y`."""
+        args = typing.get_args(annotation)
+        if typing.get_origin(annotation) is typing.Union and types.NoneType in args:
+            rest = [arg for arg in args if arg is not types.NoneType]
+            return SplitAnnotation(
+                optionality=Optionality.OPTIONAL,
+                required=functools.reduce(operator.or_, rest),
+            )
+        return SplitAnnotation(optionality=Optionality.REQUIRED, required=annotation)
+
+    def annotate[T](self, annotation: type[T]) -> type[T | None]:
+        """`annotation` as a run time annotation of this optionality."""
+        match self:
+            case Optionality.REQUIRED:
+                return annotation
+            case Optionality.OPTIONAL:
+                return annotation | None
+
+    def annotate_text[T: RootModel[str]](self, annotation: T) -> T:
+        """`annotation`, written as source, as an annotation of this optionality."""
+        match self:
+            case Optionality.REQUIRED:
+                return annotation
+            case Optionality.OPTIONAL:
+                return annotation.model_validate(f"{annotation.root} | None")
+
+
+class SplitAnnotation(BaseModel):
+    """An annotation, told apart into whether it admits `None` and the rest."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    optionality: Optionality
+    required: RuntimeAnnotation
 
 
 class Reference(BaseModel):
@@ -131,25 +183,29 @@ class IdAnnotation(BaseModel):
 
     @staticmethod
     def of(info: FieldInfo) -> Result[IdAnnotation, NotAnIdAnnotationError]:
-        annotation = info.annotation
-        match annotation:
+        split = Optionality.of_annotation(info.annotation)
+        match split.required:
             case type() as id_type if issubclass(id_type, Id):
-                return Ok(
-                    IdAnnotation(id_type=id_type, optionality=Optionality.REQUIRED)
-                )
-            case _:
-                pass
-        match (typing.get_origin(annotation), typing.get_args(annotation)):
-            case (
-                types.UnionType,
-                (type() as id_type, types.NoneType)
-                | (types.NoneType, type() as id_type),
-            ) if issubclass(id_type, Id):
-                return Ok(
-                    IdAnnotation(id_type=id_type, optionality=Optionality.OPTIONAL)
-                )
+                return Ok(IdAnnotation(id_type=id_type, optionality=split.optionality))
             case _:
                 return Err(NotAnIdAnnotationError(info))
+
+    @staticmethod
+    def of_reference(
+        field: FieldName, info: FieldInfo
+    ) -> Result[IdAnnotation, NotAReferenceError]:
+        """The ID type and optionality of `field`, if it is a Reference.
+
+        `field` is the subject's own field the value comes from, so a renamed
+        primary key is still the primary key.
+        """
+        if field == EntityNode.primary_key:
+            return Err(NotAReferenceError(field))
+        match IdAnnotation.of(info):
+            case Ok(annotation):
+                return Ok(annotation)
+            case Err():
+                return Err(NotAReferenceError(field))
 
 
 class NotAReferenceError(Exception):
@@ -158,23 +214,6 @@ class NotAReferenceError(Exception):
     def __init__(self, field: FieldName) -> None:
         self.field = field
         super().__init__(f"{field.root} is not a Reference")
-
-
-def reference_annotation(
-    field: FieldName, info: FieldInfo
-) -> Result[IdAnnotation, NotAReferenceError]:
-    """The ID type and optionality of `field`, if it is a Reference.
-
-    `field` is the subject's own field the value comes from, so a renamed primary
-    key is still the primary key.
-    """
-    if field == EntityNode.primary_key:
-        return Err(NotAReferenceError(field))
-    match IdAnnotation.of(info):
-        case Ok(annotation):
-            return Ok(annotation)
-        case Err():
-            return Err(NotAReferenceError(field))
 
 
 class _ReferenceField(BaseModel):
@@ -255,7 +294,7 @@ class EntityGraph(BaseModel):
     @staticmethod
     def _reference_fields(model: type[BaseModel]) -> Iterator[_ReferenceField]:
         for name, info in model.model_fields.items():
-            match reference_annotation(FieldName(name), info):
+            match IdAnnotation.of_reference(FieldName(name), info):
                 case Ok(annotation):
                     yield _ReferenceField(
                         field=FieldName(name),
@@ -281,7 +320,7 @@ class EntityGraph(BaseModel):
 
         `field` is the subject's own field the value comes from.
         """
-        match reference_annotation(field, info):
+        match IdAnnotation.of_reference(field, info):
             case Err() as not_a_reference:
                 return not_a_reference
             case Ok(annotation):

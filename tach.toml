@@ -3,8 +3,9 @@ source_roots = [
     "packages/frp-dev/src",
 ]
 forbid_circular_dependencies = true
-# Tests may import across layers, e.g. to compare the engine with generated code.
-exclude = ["**/__pycache__", "**/*egg-info", "docs", "**/test_*.py"]
+# Tests are checked like the code next to them: a test imports only from its own
+# layer and those below, and only declared dependencies.
+exclude = ["**/__pycache__", "**/*egg-info", "docs"]
 
 # Each layer is a package of the library. A layer may import itself and any layer
 # below it, never one above.

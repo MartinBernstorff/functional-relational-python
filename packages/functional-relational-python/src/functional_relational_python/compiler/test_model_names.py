@@ -7,7 +7,6 @@ from functional_relational_python.compiler.model_names import (
     CandidateName,
     FunctionName,
     InvalidFieldName,
-    InvalidFunctionName,
     InvalidModelName,
     InvalidNestedModelName,
     ModelName,
@@ -128,20 +127,11 @@ def invalid_field(
         ),
         (
             view_named(ViewName("Class")),
-            (
-                InvalidFunctionName(
-                    view=ViewName("Class"), function=CandidateName("class")
-                ),
-            ),
+            names(ModelName("Class"), FunctionName("class_")),
         ),
         (
             view_named(ViewName("not a class")),
-            (
-                InvalidModelName(view=ViewName("not a class")),
-                InvalidFunctionName(
-                    view=ViewName("not a class"), function=CandidateName("not a class")
-                ),
-            ),
+            (InvalidModelName(view=ViewName("not a class")),),
         ),
         *(
             (renaming_to(FieldName(new)), (invalid_field(Employee, FieldName(new)),))
@@ -181,7 +171,7 @@ def invalid_field(
         "view-named-True",
         "view-named-False",
         "function-is-keyword",
-        "neither-class-nor-function",
+        "not-a-class-name",
         "field-private",
         "field-keyword",
         "field-not-an-identifier",
@@ -214,9 +204,6 @@ def test_a_compile_defect_and_an_invalid_view_name_are_reported_together() -> No
                     valid=tuple(map(FieldName, Employee.model_fields)),
                 ),
                 InvalidModelName(view=badly_named.name),
-                InvalidFunctionName(
-                    view=badly_named.name, function=CandidateName("not-a-class")
-                ),
             )
 
 
@@ -254,13 +241,6 @@ def test_a_view_that_does_not_compile_still_reports_its_invalid_name() -> None:
             ),
         ),
         (
-            InvalidFunctionName(
-                view=ViewName("Company Public"),
-                function=CandidateName("company public"),
-            ),
-            "Company Public: 'company public' is not a valid Python function name.",
-        ),
-        (
             InvalidFieldName(
                 view=ViewName("KeywordedView"),
                 source=ir.SourceName("Keyworded"),
@@ -273,7 +253,7 @@ def test_a_view_that_does_not_compile_still_reports_its_invalid_name() -> None:
             ),
         ),
     ],
-    ids=["model", "nested-model", "function", "field"],
+    ids=["model", "nested-model", "field"],
 )
 def test_a_name_diagnostic_message_names_the_offending_values(
     diagnostic: diagnostics.CompileDiagnostic, message: str

@@ -75,6 +75,36 @@ class GeneratedIntoDefiningModule(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class _DefinitionsUsed:
+    """The classes a View's model or mapping function uses that the module it is
+    generated into defines. Generating would overwrite their definitions."""
+
+    def __init__(self, view: ViewName, module: ModulePath) -> None:
+        self.view = view
+        self.module = module
+        self.defined: set[AnnotationText] = set()
+
+    def use(self, used: type) -> None:
+        """Records that `used` is used, whether or not it can be imported."""
+        if used.__module__ == self.module.root:
+            self.defined.add(AnnotationText(f"{used.__module__}.{used.__qualname__}"))
+
+    def use_symbol(self, used: Symbol) -> None:
+        if used.module == self.module:
+            self.defined.add(used.describe())
+
+    def diagnostics(self) -> tuple[GeneratedIntoDefiningModule, ...]:
+        if not self.defined:
+            return ()
+        return (
+            GeneratedIntoDefiningModule(
+                view=self.view,
+                module=self.module,
+                defined=tuple(sorted(self.defined, key=lambda text: text.root)),
+            ),
+        )
+
+
 class UnsupportedAnnotation(pydantic.BaseModel, Diagnostic, frozen=True):
     """A field's type has a form the generator cannot write out."""
 
@@ -92,14 +122,24 @@ class UnsupportedAnnotation(pydantic.BaseModel, Diagnostic, frozen=True):
 class Unimportable(pydantic.BaseModel, Diagnostic, frozen=True):
     """Generated source would import something it cannot import by its module and
     name, e.g. a class defined in a function: a field's type, the Source, or an
-    Entity the View looks up or its ID type."""
+    Entity the View looks up or its ID type.
+
+    `field` is the field typed by it, or `None` when no model field is: the Source,
+    or what only a mapping function's parameters refer to.
+    """
 
     view: ViewName
+    field: FieldName | None
     annotation: AnnotationText
 
     def describe(self) -> DiagnosticMessage:
+        where = (
+            self.view.root
+            if self.field is None
+            else f"{self.view.root}.{self.field.root}"
+        )
         return DiagnosticMessage(
-            f"{self.view.root}: '{self.annotation.root}' cannot be imported by its "
+            f"{where}: '{self.annotation.root}' cannot be imported by its "
             "module and name. Define it at module level."
         )
 
@@ -210,6 +250,53 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
     model: ModelPlan
     lookups: tuple[LookupParameter, ...]
 
+    @staticmethod
+    def of(
+        view: compiler.CompiledView, model: ModelPlan, module: ModulePath
+    ) -> Result[FunctionPlan, DiagnosticsError[PlanDiagnostic]]:
+        """The View's mapping function, generated into `module`, building `model`."""
+        lookups = view.relation.lookups()
+        used = _DefinitionsUsed(view.name, module)
+        symbols: dict[type, Symbol] = {}
+        diagnostics: list[PlanDiagnostic] = []
+        for named in (
+            view.source,
+            *(t for lookup in lookups for t in (lookup.target, lookup.id_type)),
+        ):
+            used.use(named)
+            match Symbol.of(named):
+                case Ok(symbol):
+                    symbols[named] = symbol
+                case Err():
+                    diagnostics.append(
+                        Unimportable(
+                            view=view.name,
+                            field=None,
+                            annotation=AnnotationText.of(named),
+                        )
+                    )
+        diagnostics.extend(used.diagnostics())
+        return DiagnosticsError.or_ok(
+            diagnostics,
+            lambda: FunctionPlan(
+                view=view.name,
+                symbol=Symbol(
+                    module=module, qualname=(Identifier(view.names.function.root),)
+                ),
+                source=symbols[view.source],
+                model=model,
+                lookups=tuple(
+                    LookupParameter(
+                        name=LookupParameter.name_for(lookup.target),
+                        entity=lookup.target,
+                        target=symbols[lookup.target],
+                        id_type=symbols[lookup.id_type],
+                    )
+                    for lookup in lookups
+                ),
+            ),
+        )
+
     def parameter_of(self, lookup: ir.Lookup) -> Identifier:
         """The parameter holding the Entities `lookup` finds.
 
@@ -299,7 +386,9 @@ class _AnnotationRenderer:
             case Err():
                 self.diagnostics.append(
                     Unimportable(
-                        view=self.view, annotation=AnnotationText.of(annotation)
+                        view=self.view,
+                        field=self.field,
+                        annotation=AnnotationText.of(annotation),
                     )
                 )
                 return TypeExpression(repr(annotation))
@@ -329,33 +418,17 @@ class _ModelPlanner:
         self.view = view
         self.module = module
         self.diagnostics: list[PlanDiagnostic] = []
-        # Classes the View uses that `module` defines, so generating would
-        # overwrite their definitions.
-        self.defined_here: set[AnnotationText] = set()
+        self.used = _DefinitionsUsed(view, module)
 
     @staticmethod
     def view_model(view: compiler.CompiledView, module: ModulePath) -> _PlannedModel:
         planner = _ModelPlanner(view.name, module)
-        planner.use(view.source)
+        planner.used.use(view.source)
         plan = planner.plan(view.names.model, view.relation)
-        if planner.defined_here:
-            planner.diagnostics.append(
-                GeneratedIntoDefiningModule(
-                    view=view.name,
-                    module=module,
-                    defined=tuple(
-                        sorted(planner.defined_here, key=lambda text: text.root)
-                    ),
-                )
-            )
-        return _PlannedModel(plan=plan, diagnostics=tuple(planner.diagnostics))
-
-    def use(self, model: type) -> None:
-        """Records that the View uses `model`, without the model naming it."""
-        if model.__module__ == self.module.root:
-            self.defined_here.add(
-                AnnotationText(f"{model.__module__}.{model.__qualname__}")
-            )
+        return _PlannedModel(
+            plan=plan,
+            diagnostics=(*planner.diagnostics, *planner.used.diagnostics()),
+        )
 
     def plan(self, names: ModelNames, relation: ir.Relation) -> ModelPlan:
         fields: list[ModelField] = []
@@ -367,18 +440,17 @@ class _ModelPlanner:
                 case ir.Field():
                     rendered = renderer.render(field.annotation())
                 case ir.NestedField(value=lookup, relation=nested_relation):
-                    self.use(lookup.target)
+                    self.used.use(lookup.target)
                     model = self.plan(names.nested_in(field), nested_relation)
                     nested[field.name] = model
                     uses.add(model.symbol)
-                    rendered = model.symbol.reference().optional(field.optionality())
+                    rendered = field.optionality().annotate_text(
+                        model.symbol.reference()
+                    )
             fields.append(ModelField(field=field, type=rendered))
             uses |= renderer.symbols
-            self.defined_here |= {
-                symbol.describe()
-                for symbol in renderer.symbols
-                if symbol.module == self.module
-            }
+            for symbol in renderer.symbols:
+                self.used.use_symbol(symbol)
             self.diagnostics.extend(renderer.diagnostics)
         return ModelPlan(
             view=self.view,
@@ -403,7 +475,9 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         compiled: compiler.CompiledViews, layout: PythonLayout
     ) -> Result[PythonPlan, DiagnosticsError[PlanDiagnostic]]:
         """The plan, or every diagnostic. Each diagnostic is reported once, even
-        when both a model and a mapping function run into it."""
+        when both a model and a mapping function run into it. A type a model field
+        cannot import is reported for that field only, not again for the mapping
+        function that looks it up."""
         diagnostics: dict[PlanDiagnostic, None] = {}
         models: dict[ModulePath, list[ModelPlan]] = {}
         functions: dict[ModulePath, list[FunctionPlan]] = {}
@@ -416,11 +490,23 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                     continue
                 case mappings:
                     pass
-            match _function(view, model.plan, mappings(view)):
+            match FunctionPlan.of(view, model.plan, mappings(view)):
                 case Ok(function):
                     functions.setdefault(function.symbol.module, []).append(function)
                 case Err(error):
-                    diagnostics.update(dict.fromkeys(error.diagnostics))
+                    unimportable_fields = {
+                        diagnostic.annotation
+                        for diagnostic in model.diagnostics
+                        if isinstance(diagnostic, Unimportable)
+                    }
+                    diagnostics.update(
+                        dict.fromkeys(
+                            diagnostic
+                            for diagnostic in error.diagnostics
+                            if not isinstance(diagnostic, Unimportable)
+                            or diagnostic.annotation not in unimportable_fields
+                        )
+                    )
         plan = PythonPlan(
             models={module: tuple(planned) for module, planned in models.items()},
             functions={module: tuple(planned) for module, planned in functions.items()},
@@ -441,7 +527,9 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                 )
                 for symbol in model.uses:
                     if symbol.module != module:
-                        namespace.refer(symbol.bound_name(), symbol.describe())
+                        namespace.refer(
+                            symbol.bound_name(), symbol.imported().describe()
+                        )
             yield from namespace.clashes()
         for module, functions in self.functions.items():
             namespace = _Namespace(Scope(module.root))
@@ -517,67 +605,3 @@ class _Namespace:
                     name=name,
                     origins=tuple(sorted(origins, key=lambda text: text.root)),
                 )
-
-
-def _function(
-    view: compiler.CompiledView, model: ModelPlan, module: ModulePath
-) -> Result[FunctionPlan, DiagnosticsError[PlanDiagnostic]]:
-    """The View's mapping function, generated into `module`."""
-    lookups = view.relation.lookups()
-    match _symbols(
-        view.name,
-        (
-            view.source,
-            *(t for lookup in lookups for t in (lookup.target, lookup.id_type)),
-        ),
-    ):
-        case Ok(symbols):
-            pass
-        case Err(error):
-            return Err(DiagnosticsError(error.diagnostics))
-    function = FunctionPlan(
-        view=view.name,
-        symbol=Symbol(module=module, qualname=(Identifier(view.names.function.root),)),
-        source=symbols[view.source],
-        model=model,
-        lookups=tuple(
-            LookupParameter(
-                name=LookupParameter.name_for(lookup.target),
-                entity=lookup.target,
-                target=symbols[lookup.target],
-                id_type=symbols[lookup.id_type],
-            )
-            for lookup in lookups
-        ),
-    )
-    defined = sorted(
-        {symbol.describe() for symbol in symbols.values() if symbol.module == module},
-        key=lambda text: text.root,
-    )
-    return DiagnosticsError.or_ok(
-        [
-            GeneratedIntoDefiningModule(
-                view=view.name, module=module, defined=tuple(defined)
-            )
-        ]
-        if defined
-        else [],
-        lambda: function,
-    )
-
-
-def _symbols(
-    view: ViewName, named: Sequence[type]
-) -> Result[Mapping[type, Symbol], DiagnosticsError[Unimportable]]:
-    """How generated source imports each of `named`, or each that it cannot."""
-    symbols: dict[type, Symbol] = {}
-    unimportable: list[Unimportable] = []
-    for item in named:
-        match Symbol.of(item):
-            case Ok(symbol):
-                symbols[item] = symbol
-            case Err():
-                unimportable.append(
-                    Unimportable(view=view, annotation=AnnotationText.of(item))
-                )
-    return DiagnosticsError.or_ok(unimportable, lambda: symbols)

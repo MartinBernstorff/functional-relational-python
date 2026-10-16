@@ -1,19 +1,12 @@
+import types
+from collections.abc import Mapping
+
 import pydantic
 import pytest
-from hypothesis import given
-from hypothesis import strategies as st
 
-from functional_relational_python.compiler import compiler
-from functional_relational_python.compiler.test_compiler import (
-    Depth,
-    models,
-    new_model,
-    pipelines,
-)
 from functional_relational_python.domain.entity_graph import FieldName, Optionality
 from functional_relational_python.domain.id import Id
 from functional_relational_python.language import ir
-from functional_relational_python.language.views import View, ViewName
 
 
 class Text(pydantic.RootModel[str], frozen=True):
@@ -63,6 +56,22 @@ def lookup(
         target=target,
         optionality=optionality,
     )
+
+
+def new_model(
+    name: ir.SourceName, fields: Mapping[FieldName, ir.RuntimeAnnotation]
+) -> type[pydantic.BaseModel]:
+    annotations = {field.root: annotation for field, annotation in fields.items()}
+    model = types.new_class(
+        name.root,
+        (pydantic.BaseModel,),
+        {"frozen": True},
+        lambda namespace: namespace.update(
+            {"__module__": __name__, "__annotations__": annotations}
+        ),
+    )
+    assert issubclass(model, pydantic.BaseModel)
+    return model
 
 
 def own_field(name: FieldName, annotation: ir.RuntimeAnnotation) -> ir.Field:
@@ -156,50 +165,3 @@ def test_lookups_are_one_per_entity_nested_included_in_first_use_order() -> None
 
 def test_a_relation_of_own_fields_has_no_lookups() -> None:
     assert ir.Relation.of(ir.FromSource(source=Employee)).lookups() == ()
-
-
-@st.composite
-def compiled_views(draw: st.DrawFn) -> compiler.CompiledView:
-    """A valid View over a generated Entity, compiled."""
-    drawn = draw(models())
-    graph = drawn.graph()
-    source = draw(st.sampled_from(drawn.entities))
-    step = draw(pipelines(graph, source, Depth(2)))
-    view = View(name=ViewName.fake(), source=source, step=step)
-    return compiler.compile_views(graph, [view]).unwrap().views[0]
-
-
-def resolved_fields(
-    relation: ir.Relation,
-) -> tuple[tuple[ir.RelationField, ir.Lookup], ...]:
-    """Every field holding a looked-up Entity, nested ones included."""
-    found: list[tuple[ir.RelationField, ir.Lookup]] = []
-    for field in relation.fields:
-        match field:
-            case ir.Field(value=ir.Lookup() as value):
-                found.append((field, value))
-            case ir.NestedField(value=value, relation=nested):
-                found.extend(((field, value), *resolved_fields(nested)))
-            case ir.Field():
-                pass
-    return tuple(found)
-
-
-@given(compiled_views())
-def test_a_resolved_field_is_optional_iff_its_lookup_is(
-    view: compiler.CompiledView,
-) -> None:
-    for field, value in resolved_fields(view.relation):
-        assert field.optionality() == value.optionality
-
-
-@given(compiled_views())
-def test_lookups_name_each_looked_up_entity_once(
-    view: compiler.CompiledView,
-) -> None:
-    targets = [found.target for found in view.relation.lookups()]
-
-    assert sorted(targets, key=lambda target: target.__name__) == sorted(
-        {value.target for _, value in resolved_fields(view.relation)},
-        key=lambda target: target.__name__,
-    )

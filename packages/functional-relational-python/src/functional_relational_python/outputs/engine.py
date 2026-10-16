@@ -21,6 +21,7 @@ from functional_relational_python.language.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,
+    DiagnosticsError,
 )
 
 
@@ -80,17 +81,6 @@ class DanglingReference(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class DanglingReferenceError(Exception):
-    """A View resolves References to Entities that are not stored.
-
-    `dangling` has one entry per Entity and field, each with every missing ID.
-    """
-
-    def __init__(self, dangling: tuple[DanglingReference, ...]) -> None:
-        self.dangling = dangling
-        super().__init__("\n".join(d.describe().root for d in dangling))
-
-
 type FieldValue = object
 """A View result's field value: the Entity's own value, an Entity, or a ViewRow."""
 
@@ -109,6 +99,7 @@ class _Missing:
             missing.append(id_value)
 
     def dangling(self) -> tuple[DanglingReference, ...]:
+        """One per Entity and field, each with every missing ID."""
         return tuple(
             DanglingReference(entity=entity, field=field, missing=tuple(ids))
             for (entity, field), ids in self.ids.items()
@@ -143,7 +134,7 @@ class InMemoryViewEngine:
         self, view: ViewName
     ) -> Result[
         tuple[ViewRow, ...],
-        UnknownViewError | NonEntitySourceError | DanglingReferenceError,
+        UnknownViewError | NonEntitySourceError | DiagnosticsError[DanglingReference],
     ]:
         """The View's results, or every Reference that points to a missing Entity.
 
@@ -161,9 +152,7 @@ class InMemoryViewEngine:
             self._row(compiled.relation, entity, missing)
             for entity in self._entities.get(compiled.source, {}).values()
         )
-        if dangling := missing.dangling():
-            return Err(DanglingReferenceError(dangling))
-        return Ok(rows)
+        return DiagnosticsError.or_ok(missing.dangling(), lambda: rows)
 
     def _row(
         self, relation: ir.Relation, subject: pydantic.BaseModel, missing: _Missing

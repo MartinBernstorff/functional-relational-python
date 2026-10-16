@@ -4,6 +4,7 @@ Everything here is pure: it builds file contents and touches no filesystem.
 `generated_files` writes and checks them.
 """
 
+import typing
 from collections.abc import Sequence
 
 from functional_relational_python.outputs.python.plan import ModelPlan, PythonPlan
@@ -20,26 +21,32 @@ from functional_relational_python.support.identifier import Identifier
 
 
 class ModelsRenderer:
-    """Writes the source of every planned View model. The entry point is `render`."""
+    """Writes the source of every planned View model."""
+
+    header: typing.ClassVar[FileText] = FileText(
+        f"{GeneratedFiles.header.root}"
+        "# Regenerate with `frp generate`; `frp check` fails when this is stale.\n"
+    )
 
     @staticmethod
-    def render(plan: PythonPlan) -> GeneratedFiles:
-        """One file per module, in module order."""
-        return GeneratedFiles(
-            files=tuple(
-                GeneratedFile(
-                    path=module.file_path(),
-                    text=ModelsRenderer._module(
-                        module,
-                        tuple(
-                            model
-                            for view in plan.models[module]
-                            for model in view.with_nested()
-                        ),
+    def files(plan: PythonPlan) -> tuple[GeneratedFile, ...]:
+        """One file per module, in module order.
+
+        `render.PythonRenderer` writes them together with the mapping functions.
+        """
+        return tuple(
+            GeneratedFile(
+                path=module.file_path(),
+                text=ModelsRenderer._module(
+                    module,
+                    tuple(
+                        model
+                        for view in plan.models[module]
+                        for model in view.with_nested()
                     ),
-                )
-                for module in sorted(plan.models, key=lambda module: module.root)
+                ),
             )
+            for module in sorted(plan.models, key=lambda module: module.root)
         )
 
     @staticmethod
@@ -75,4 +82,4 @@ class ModelsRenderer:
             )
             for model in models
         )
-        return FileText(f"{GeneratedFiles.header.root}\n{imports}\n\n\n{classes}")
+        return FileText(f"{ModelsRenderer.header.root}\n{imports}\n\n\n{classes}")
