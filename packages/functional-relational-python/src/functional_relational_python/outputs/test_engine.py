@@ -8,6 +8,7 @@ from functional_relational_python.domain.id import Id
 from functional_relational_python.language import ir, steps
 from functional_relational_python.language.views import View, ViewName
 from functional_relational_python.outputs import engine
+from functional_relational_python.support.diagnostic import DiagnosticsError
 
 
 class Text(pydantic.RootModel[str], frozen=True):
@@ -305,8 +306,8 @@ def test_every_dangling_reference_is_reported_with_every_missing_id() -> None:
         view_engine.put(entity).unwrap()
 
     match view_engine.read(view.name):
-        case Err(engine.DanglingReferenceError() as error):
-            assert error.dangling == (
+        case Err(DiagnosticsError() as error):
+            assert error.diagnostics == (
                 engine.DanglingReference(
                     entity=Employee,
                     field=FieldName("department_id"),
@@ -324,7 +325,7 @@ def test_every_dangling_reference_is_reported_with_every_missing_id() -> None:
                 ),
             )
         case result:
-            pytest.fail(f"expected DanglingReferenceError, got {result}")
+            pytest.fail(f"expected dangling References, got {result}")
 
 
 def test_a_dangling_reference_names_the_entity_the_field_and_the_ids() -> None:
