@@ -111,6 +111,13 @@ class Symbol(pydantic.BaseModel, frozen=True):
     def bound_name(self) -> Identifier:
         return self.qualname[0]
 
+    def imported(self) -> Symbol:
+        """What source imports to refer to this Symbol: `Outer` for `Outer.Inner`.
+
+        Symbols nested in one class import the same thing, so they share a name.
+        """
+        return Symbol(module=self.module, qualname=(self.bound_name(),))
+
     def describe(self) -> AnnotationText:
         return AnnotationText(
             ".".join([self.module.root, *(part.root for part in self.qualname)])

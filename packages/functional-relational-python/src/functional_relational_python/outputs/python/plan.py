@@ -441,7 +441,9 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                 )
                 for symbol in model.uses:
                     if symbol.module != module:
-                        namespace.refer(symbol.bound_name(), symbol.describe())
+                        namespace.refer(
+                            symbol.bound_name(), symbol.imported().describe()
+                        )
             yield from namespace.clashes()
         for module, functions in self.functions.items():
             namespace = _Namespace(Scope(module.root))

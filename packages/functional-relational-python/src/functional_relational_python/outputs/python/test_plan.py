@@ -279,6 +279,29 @@ def test_a_clash_names_everything_bound_to_the_name() -> None:
     )
 
 
+class Outer:
+    class First(pydantic.RootModel[str], frozen=True):
+        pass
+
+    class Second(pydantic.RootModel[str], frozen=True):
+        pass
+
+
+class UsesNestedClasses(pydantic.BaseModel, frozen=True):
+    first: Outer.First
+    second: Outer.Second
+
+
+def test_two_classes_nested_in_one_imported_class_do_not_clash() -> None:
+    view = View(name=ViewName.fake(), source=UsesNestedClasses, step=steps.pipeline())
+
+    plan = plan_of(
+        compile_all([view]), PythonLayout.models_only(into(ModulePath.fake()))
+    )
+
+    assert len(plan.models) == 1
+
+
 def test_one_name_in_different_modules_is_allowed() -> None:
     views = [company_view(ViewName("Same")), company_view(ViewName("Same"))]
     modules = iter([ModulePath("app.one"), ModulePath("app.two")])
