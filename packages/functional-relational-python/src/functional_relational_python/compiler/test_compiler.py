@@ -678,6 +678,16 @@ def test_resolving_a_field_that_is_not_a_reference_is_a_diagnostic() -> None:
     )
 
 
+def test_resolving_the_primary_key_is_a_diagnostic() -> None:
+    assert resolve_diagnostics(Employee, steps.resolve(named(FieldName("id")))) == (
+        diagnostics.NotAReference(
+            view=ViewName.fake(),
+            source=ir.SourceName("Employee"),
+            field=FieldName("id"),
+        ),
+    )
+
+
 def test_resolving_to_a_name_no_model_field_can_have_is_a_diagnostic() -> None:
     assert resolve_diagnostics(Keyworded, steps.hydrate()) == (
         diagnostics.InvalidFieldName(
@@ -1250,6 +1260,46 @@ def test_unreferenced_entities_and_entity_order_do_not_change_the_result(
     for view in original:
         event(f"view: {type(view).__name__}")
     assert shapes(varied) == shapes(original)
+
+
+class PipelineCase(pydantic.BaseModel, frozen=True):
+    """A valid pipeline over one of the generated Entities."""
+
+    models: Models
+    source: type[pydantic.BaseModel]
+    step: steps.Step
+
+
+@st.composite
+def pipeline_cases(draw: st.DrawFn) -> PipelineCase:
+    drawn_models = draw(models())
+    source = draw(st.sampled_from(drawn_models.entities))
+    step = draw(pipelines(drawn_models.graph(), source, Depth(1)))
+    return PipelineCase(models=drawn_models, source=source, step=step)
+
+
+@given(pipeline_cases())
+def test_resolve_accepts_exactly_the_fields_is_reference_selects(
+    case: PipelineCase,
+) -> None:
+    def compile_step(step: steps.Step) -> compiler.CompiledView | None:
+        match compiler.compile_views(
+            case.models.graph(),
+            [View(name=ViewName.fake(), source=case.source, step=step)],
+        ):
+            case Ok(compiled):
+                return compiled.views[0]
+            case Err():
+                return None
+
+    compiled = compile_step(case.step)
+    assert compiled is not None
+    for field in compiled.relation.fields:
+        resolved = compile_step(
+            steps.pipeline(case.step, steps.resolve(named(field.name)))
+        )
+        event(f"is_reference: {steps.is_reference(field)}")
+        assert steps.is_reference(field) == (resolved is not None)
 
 
 class RoundTripCase(pydantic.BaseModel, frozen=True):
