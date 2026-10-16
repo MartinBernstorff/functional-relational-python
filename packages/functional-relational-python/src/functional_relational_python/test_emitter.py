@@ -15,6 +15,7 @@ from functional_relational_python import compiler, emitter, engine, ir, steps
 from functional_relational_python.codegen import Codegen, ModulePath
 from functional_relational_python.entity_graph import EntityGraph, FieldName
 from functional_relational_python.id import Id
+from functional_relational_python.test_compiler import Depth, pipelines
 from functional_relational_python.views import View, ViewName
 
 
@@ -517,60 +518,6 @@ class DifferentialCase(pydantic.BaseModel, frozen=True):
     entities: tuple[pydantic.BaseModel, ...]
 
 
-class Depth(pydantic.RootModel[int], frozen=True):
-    """How many more levels of nested pipelines a pipeline may contain."""
-
-
-@st.composite
-def pipelines(
-    draw: st.DrawFn, source: type[pydantic.BaseModel], depth: Depth
-) -> steps.Step:
-    """A valid pipeline of omits, renames, projects and resolves over `source`.
-
-    Each step names only fields the earlier steps kept, and each rename gets a name
-    no field has, so it never collides. A resolve selects Reference fields only,
-    and its nested pipeline is drawn the same way over the referenced Entity.
-    """
-    fields = list(map(FieldName, source.model_fields))
-    references = {
-        reference.field: reference.target
-        for reference in entity_graph().entities[source].references
-    }
-    drawn: list[steps.Step] = []
-    for index in range(draw(st.integers(min_value=0, max_value=len(fields)))):
-        if not fields:
-            break
-        field = draw(st.sampled_from(fields))
-        match draw(st.sampled_from(["omit", "rename", "project", "resolve"])):
-            case "omit":
-                fields.remove(field)
-                drawn.append(steps.omit(field))
-            case "rename":
-                new = FieldName(f"renamed_{index}")
-                fields[fields.index(field)] = new
-                if field in references:
-                    references[new] = references.pop(field)
-                drawn.append(steps.rename(field, new))
-            case "project":
-                projected = draw(st.lists(st.sampled_from(fields), unique=True))
-                fields = [kept for kept in fields if kept in projected]
-                drawn.append(steps.project(projected))
-            case _:
-                resolved = [kept for kept in fields if kept in references]
-                if not resolved or depth.root == 0:
-                    continue
-                target = references[draw(st.sampled_from(resolved))]
-                chosen = [name for name in resolved if references[name] is target]
-                nested = draw(pipelines(target, Depth(depth.root - 1)))
-                for name in chosen:
-                    del references[name]
-                    fields[fields.index(name)] = FieldName(
-                        name.root.removesuffix("_id")
-                    )
-                drawn.append(steps.resolve(named(*chosen), nested))
-    return steps.pipeline(*drawn)
-
-
 @st.composite
 def differential_cases(draw: st.DrawFn) -> DifferentialCase:
     """Views over a pool of Sources, each with a random pipeline."""
@@ -581,7 +528,7 @@ def differential_cases(draw: st.DrawFn) -> DifferentialCase:
             View(
                 name=ViewName(f"View{index}"),
                 source=source,
-                step=draw(pipelines(source, Depth(2))),
+                step=draw(pipelines(entity_graph(), source, Depth(2))),
             )
         )
     return DifferentialCase(views=tuple(views), entities=draw(entities()))
