@@ -31,6 +31,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # setuptools_scm and semantic-release both need full tag history
+          # semantic-release needs a checked-out branch, not a detached HEAD.
+          ref: main
+
+      # Release the commit ci tested, not whatever main points to now. On a manual
+      # dispatch, github.sha is the main tip the run was started from.
+      - name: Reset main to the tested commit
+        env:
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: git reset --hard "$TESTED_SHA"
 
       - name: Python Semantic Release
         id: release
