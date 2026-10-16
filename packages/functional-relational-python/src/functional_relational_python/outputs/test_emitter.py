@@ -171,7 +171,7 @@ def emit(views: Iterable[View]) -> emitter.EmittedModule:
             pytest.fail(f"expected an emitted module, got {error}")
 
 
-def emit_diagnostics(views: Iterable[View]) -> tuple[emitter.Diagnostic, ...]:
+def emit_diagnostics(views: Iterable[View]) -> tuple[emitter.EmitDiagnostic, ...]:
     match emitter.PythonEmitter.emit(compile_all(views), this_module):
         case Ok(emitted):
             pytest.fail(f"expected diagnostics, got {emitted.root}")
@@ -354,7 +354,7 @@ def test_a_view_model_module_named_like_a_lookup_parameter_is_a_diagnostic() -> 
 
 def hydrated_diagnostics(
     entities: Iterable[type[pydantic.BaseModel]], source: type[pydantic.BaseModel]
-) -> tuple[emitter.Diagnostic, ...]:
+) -> tuple[emitter.EmitDiagnostic, ...]:
     graph = EntityGraph.build(entities).unwrap()
     view = View(name=ViewName.fake(), source=source, step=steps.hydrate())
     match emitter.PythonEmitter.emit(
@@ -458,7 +458,7 @@ def test_a_looked_up_entity_that_cannot_be_imported_is_a_diagnostic() -> None:
     ],
 )
 def test_a_diagnostic_message_names_the_offending_values(
-    diagnostic: emitter.Diagnostic, message: str
+    diagnostic: emitter.EmitDiagnostic, message: str
 ) -> None:
     assert diagnostic.describe().root == message
 

@@ -7,6 +7,7 @@ from safe_result import Err, Ok, Result
 
 from functional_relational_python.domain import entity_graph
 from functional_relational_python.domain.id import Id
+from functional_relational_python.support.diagnostic import DiagnosticsError
 
 
 class DepartmentId(Id[int]):
@@ -86,7 +87,7 @@ def _diagnostics(
         case Ok(graph):
             pytest.fail(f"Expected diagnostics, got {graph}")
         case Err(error):
-            return error.diagnostics
+            return frozenset(error.diagnostics)
 
 
 def test_references_resolve_to_the_entity_owning_their_id_type() -> None:
@@ -259,10 +260,12 @@ def test_reordering_the_entities_gives_the_same_result(
 
 
 def _comparable(
-    result: Result[entity_graph.EntityGraph, entity_graph.EntityGraphError],
+    result: Result[
+        entity_graph.EntityGraph, DiagnosticsError[entity_graph.EntityGraphDiagnostic]
+    ],
 ) -> entity_graph.EntityGraph | frozenset[entity_graph.EntityGraphDiagnostic]:
     match result:
         case Ok(graph):
             return graph
         case Err(error):
-            return error.diagnostics
+            return frozenset(error.diagnostics)

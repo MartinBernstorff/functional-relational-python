@@ -11,7 +11,6 @@ from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
 from functional_relational_python.domain.entity_graph import (
-    DiagnosticMessage,
     EntityGraph,
     EntityNode,
     FieldName,
@@ -19,6 +18,10 @@ from functional_relational_python.domain.entity_graph import (
 from functional_relational_python.domain.id import IdValue
 from functional_relational_python.language import ir
 from functional_relational_python.language.views import ViewName
+from functional_relational_python.support.diagnostic import (
+    Diagnostic,
+    DiagnosticMessage,
+)
 
 
 class ViewRow(pydantic.RootModel[Mapping[FieldName, object]], frozen=True):
@@ -62,7 +65,7 @@ class NonEntitySourceError(Exception):
         )
 
 
-class DanglingReference(pydantic.BaseModel, frozen=True):
+class DanglingReference(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Reference field whose IDs key no stored Entity."""
 
     entity: type[pydantic.BaseModel]

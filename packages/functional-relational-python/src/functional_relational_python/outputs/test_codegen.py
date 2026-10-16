@@ -15,7 +15,7 @@ from functional_relational_python.language import steps
 from functional_relational_python.language.views import View, ViewName
 from functional_relational_python.outputs.codegen import (
     Codegen,
-    Diagnostic,
+    CodegenDiagnostic,
     DuplicateModelName,
     GeneratedIntoDefiningModule,
     InvalidModelName,
@@ -84,7 +84,7 @@ def generate(views: list[View], layout: ModuleLayout | None = None) -> Generated
 
 def diagnostics_of(
     views: list[View], layout: ModuleLayout | None = None
-) -> tuple[Diagnostic, ...]:
+) -> tuple[CodegenDiagnostic, ...]:
     match Codegen.generate(
         compile_views(views), layout or single_module(ModulePath.fake())
     ):

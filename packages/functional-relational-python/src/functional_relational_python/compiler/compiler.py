@@ -22,10 +22,11 @@ from functional_relational_python.domain.entity_graph import (
 )
 from functional_relational_python.language import ir
 from functional_relational_python.language.views import View, ViewName
+from functional_relational_python.support.diagnostic import DiagnosticsError
 from functional_relational_python.support.identifier import Identifier
 
 type Diagnostics = Annotated[
-    tuple[diagnostics.Diagnostic, ...], pydantic.Field(min_length=1)
+    tuple[diagnostics.CompileDiagnostic, ...], pydantic.Field(min_length=1)
 ]
 
 
@@ -57,35 +58,24 @@ class CompiledViews(pydantic.BaseModel, frozen=True):
     views: tuple[CompiledView, ...]
 
 
-class CompileError(Exception):
-    def __init__(self, diagnostics: tuple[diagnostics.Diagnostic, ...]) -> None:
-        self.diagnostics = diagnostics
-        super().__init__(
-            "\n".join(diagnostic.describe().root for diagnostic in diagnostics)
-        )
-
-
 def compile_views(
     entity_graph: EntityGraph, views: Iterable[View], /
-) -> Result[CompiledViews, CompileError]:
+) -> Result[CompiledViews, DiagnosticsError[diagnostics.CompileDiagnostic]]:
     """Compiles every View, or returns every diagnostic from all of them.
 
     `entity_graph` is what References are resolved against.
     """
     checked = check(entity_graph, views)
-    poisoned = [view for view in checked if isinstance(view, PoisonedView)]
-    if poisoned:
-        return Err(
-            CompileError(
-                tuple(
-                    diagnostic for view in poisoned for diagnostic in view.diagnostics
-                )
-            )
-        )
-    return Ok(
-        CompiledViews(
+    return DiagnosticsError.or_ok(
+        (
+            diagnostic
+            for view in checked
+            if isinstance(view, PoisonedView)
+            for diagnostic in view.diagnostics
+        ),
+        lambda: CompiledViews(
             views=tuple(view for view in checked if isinstance(view, CompiledView))
-        )
+        ),
     )
 
 
@@ -163,7 +153,7 @@ def _check_rename(
     view: ViewName, node: ir.Rename, relation: ir.Relation
 ) -> ir.Relation | Poisoned:
     names = relation.field_names()
-    reported: list[diagnostics.Diagnostic] = []
+    reported: list[diagnostics.CompileDiagnostic] = []
     if node.field not in names:
         reported.append(
             diagnostics.UnknownField(
@@ -209,7 +199,7 @@ def _recovered_rename(node: ir.Rename, relation: ir.Relation) -> ir.Relation:
 
 def _field_name_diagnostics(
     view: ViewName, relation: ir.Relation, name: FieldName
-) -> tuple[diagnostics.Diagnostic, ...]:
+) -> tuple[diagnostics.CompileDiagnostic, ...]:
     """Reports `name` unless a View model can have a field of that name."""
     if (
         isinstance(Identifier.of(name), Ok)
@@ -250,7 +240,7 @@ class _CheckedField(pydantic.BaseModel, frozen=True):
     """
 
     field: ir.RelationField
-    diagnostics: tuple[diagnostics.Diagnostic, ...]
+    diagnostics: tuple[diagnostics.CompileDiagnostic, ...]
 
 
 def _check_resolve(
@@ -387,7 +377,7 @@ def _resolved(
 
 
 def _poison(
-    checked: ir.Relation | Poisoned, earlier: tuple[diagnostics.Diagnostic, ...]
+    checked: ir.Relation | Poisoned, earlier: tuple[diagnostics.CompileDiagnostic, ...]
 ) -> Poisoned:
     """Carries diagnostics from a poisoned input onto the node built from it."""
     match checked:

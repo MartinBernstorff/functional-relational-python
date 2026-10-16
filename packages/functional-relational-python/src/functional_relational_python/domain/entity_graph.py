@@ -10,6 +10,11 @@ from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.domain.id import Id, IdType
+from functional_relational_python.support.diagnostic import (
+    Diagnostic,
+    DiagnosticMessage,
+    DiagnosticsError,
+)
 
 
 class FieldName(RootModel[str]):
@@ -18,10 +23,6 @@ class FieldName(RootModel[str]):
     @staticmethod
     def fake() -> FieldName:
         return FieldName("department_id")
-
-
-class DiagnosticMessage(RootModel[str]):
-    model_config = ConfigDict(frozen=True)
 
 
 class Optionality(StrEnum):
@@ -53,7 +54,7 @@ class EntityNode(BaseModel):
     references: tuple[Reference, ...]
 
 
-class DuplicatePrimaryKey(BaseModel):
+class DuplicatePrimaryKey(BaseModel, Diagnostic):
     """An ID type is the primary key of several Entities."""
 
     model_config = ConfigDict(frozen=True)
@@ -68,7 +69,7 @@ class DuplicatePrimaryKey(BaseModel):
         )
 
 
-class UnresolvedReference(BaseModel):
+class UnresolvedReference(BaseModel, Diagnostic):
     """A Reference whose ID type is the primary key of no Entity."""
 
     model_config = ConfigDict(frozen=True)
@@ -84,7 +85,7 @@ class UnresolvedReference(BaseModel):
         )
 
 
-class NotAnEntity(BaseModel):
+class NotAnEntity(BaseModel, Diagnostic):
     """A model given as an Entity has no `id` field typed with an `Id` subclass."""
 
     model_config = ConfigDict(frozen=True)
@@ -99,16 +100,6 @@ class NotAnEntity(BaseModel):
 
 
 type EntityGraphDiagnostic = DuplicatePrimaryKey | UnresolvedReference | NotAnEntity
-
-
-class EntityGraphError(Exception):
-    """Every problem found while building an EntityGraph."""
-
-    def __init__(self, diagnostics: frozenset[EntityGraphDiagnostic]) -> None:
-        self.diagnostics = diagnostics
-        super().__init__(
-            "\n".join(sorted(diagnostic.describe().root for diagnostic in diagnostics))
-        )
 
 
 class NotAnIdAnnotationError(Exception):
@@ -204,7 +195,7 @@ class EntityGraph(BaseModel):
     @staticmethod
     def build(
         entities: Iterable[type[BaseModel]],
-    ) -> Result[EntityGraph, EntityGraphError]:
+    ) -> Result[EntityGraph, DiagnosticsError[EntityGraphDiagnostic]]:
         """Build the graph, or return every diagnostic at once.
 
         The order of `entities` does not affect the result.
@@ -255,9 +246,11 @@ class EntityGraph(BaseModel):
                     model=model, id_type=id_type, references=tuple(references)
                 )
 
-        if diagnostics:
-            return Err(EntityGraphError(frozenset(diagnostics)))
-        return Ok(EntityGraph(entities=nodes))
+        # Sorted, so the order of `entities` does not affect the order reported.
+        return DiagnosticsError.or_ok(
+            sorted(diagnostics, key=lambda diagnostic: diagnostic.describe().root),
+            lambda: EntityGraph(entities=nodes),
+        )
 
     @staticmethod
     def _reference_fields(model: type[BaseModel]) -> Iterator[_ReferenceField]:

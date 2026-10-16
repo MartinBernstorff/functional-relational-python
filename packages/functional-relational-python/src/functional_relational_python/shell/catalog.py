@@ -8,16 +8,16 @@ import pydantic
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
-from functional_relational_python.domain.entity_graph import (
-    EntityGraph,
-    EntityGraphError,
-)
+from functional_relational_python.domain.entity_graph import EntityGraph
 from functional_relational_python.language.views import View
 from functional_relational_python.outputs.codegen import (
     Codegen,
-    CodegenError,
     ModuleLayout,
     ModulePath,
+)
+from functional_relational_python.support.diagnostic import (
+    Diagnostic,
+    DiagnosticsError,
 )
 from functional_relational_python.support.filesystem import Directory
 from functional_relational_python.support.generated_files import GeneratedFiles
@@ -40,9 +40,7 @@ class ViewCatalog(pydantic.BaseModel, frozen=True):
 
     def generate(
         self,
-    ) -> Result[
-        GeneratedFiles, EntityGraphError | compiler.CompileError | CodegenError
-    ]:
+    ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
         match EntityGraph.build(self.entities):
             case Err(graph_error):
                 return Err(graph_error)
