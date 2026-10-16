@@ -19,6 +19,7 @@ from functional_relational_python.entity_graph import (
     IdAnnotation,
     Optionality,
 )
+from functional_relational_python.identifier import Identifier
 from functional_relational_python.views import View, ViewName
 
 type Diagnostics = Annotated[
@@ -174,26 +175,49 @@ def _check_rename(
                 view=view, renamed=node.field, field=node.new
             )
         )
+    reported.extend(_field_name_diagnostics(view, relation, node.new))
     if not reported:
         return relation.renamed(node.field, node.new)
-    # Later steps may use the new name, so the recovered relation has it either
-    # way: the existing field if there is one, else a field of unknown type.
-    recovered = (
-        relation.without(node.field)
-        if node.new in names
-        else ir.Relation(
-            source=relation.source,
-            fields=(
-                *relation.fields,
-                ir.Field(
-                    name=node.new,
-                    info=FieldInfo(),
-                    value=ir.SourceField(field=node.field),
-                ),
-            ),
-        )
+    return Poisoned(
+        recovered=_recovered_rename(node, relation), diagnostics=tuple(reported)
     )
-    return Poisoned(recovered=recovered, diagnostics=tuple(reported))
+
+
+def _recovered_rename(node: ir.Rename, relation: ir.Relation) -> ir.Relation:
+    """The relation after a defective rename.
+
+    Later steps may use the new name, so it has a field of that name: the existing
+    field if there is one, else the renamed field, else a field of unknown type.
+    """
+    names = relation.field_names()
+    if node.new in names:
+        return relation.without(node.field)
+    if node.field in names:
+        return relation.renamed(node.field, node.new)
+    return ir.Relation(
+        source=relation.source,
+        fields=(
+            *relation.fields,
+            ir.Field(
+                name=node.new, info=FieldInfo(), value=ir.SourceField(field=node.field)
+            ),
+        ),
+    )
+
+
+def _field_name_diagnostics(
+    view: ViewName, relation: ir.Relation, name: FieldName
+) -> tuple[diagnostics.Diagnostic, ...]:
+    """Reports `name` unless a View model can have a field of that name."""
+    if (
+        isinstance(Identifier.of(name), Ok)
+        and not name.root.startswith("_")
+        and not hasattr(pydantic.BaseModel, name.root)
+    ):
+        return ()
+    return (
+        diagnostics.InvalidFieldName(view=view, source=relation.source, field=name),
+    )
 
 
 def _check_project(
@@ -268,6 +292,10 @@ def _resolve_field(
                 ),
             ),
         )
+    if name != field.name and (
+        invalid := _field_name_diagnostics(view, relation, name)
+    ):
+        return _CheckedField(field=field, diagnostics=invalid)
     return _resolved(entity_graph, view, node, name, lookup)
 
 

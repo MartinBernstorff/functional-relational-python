@@ -37,6 +37,21 @@ class RenameOntoExistingField(pydantic.BaseModel, frozen=True):
         )
 
 
+class InvalidFieldName(pydantic.BaseModel, frozen=True):
+    """A rename or resolve gives a field a name no View model field can have."""
+
+    view: ViewName
+    source: ir.SourceName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: '{self.field.root}' cannot be a field name. A field "
+            "name is a Python identifier that is not a keyword, does not start with "
+            "'_', and is not an attribute of pydantic.BaseModel."
+        )
+
+
 class NotAReference(pydantic.BaseModel, frozen=True):
     """`resolve` selected a field that is not typed with an Id, optional or not."""
 
@@ -85,6 +100,7 @@ class ResolvedNameCollision(pydantic.BaseModel, frozen=True):
 type Diagnostic = (
     UnknownField
     | RenameOntoExistingField
+    | InvalidFieldName
     | NotAReference
     | UnresolvableReference
     | ResolvedNameCollision
