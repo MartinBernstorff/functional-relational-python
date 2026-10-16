@@ -10,6 +10,7 @@ from functional_relational_python.entity_graph import EntityGraphError
 from functional_relational_python.filesystem import Directory, FilePath, FileSystem
 from functional_relational_python.generated_files import (
     GeneratedFiles,
+    NotGeneratedFilesError,
     StaleFilesError,
 )
 from functional_relational_python.project_config import ConfigFile, ConfigLoadError
@@ -51,13 +52,17 @@ def _generated(
 
 def generate(
     filesystem: FileSystem, start: Directory
-) -> Result[tuple[FilePath, ...], GenerateError]:
+) -> Result[tuple[FilePath, ...], GenerateError | NotGeneratedFilesError]:
     """Writes every View model module, and returns the paths written."""
     match _generated(filesystem, start):
         case Err(error):
             return Err(error)
         case Ok(generated):
-            generated.files.write(filesystem, generated.output)
+            pass
+    match generated.files.write(filesystem, generated.output):
+        case Err(write_error):
+            return Err(write_error)
+        case Ok(_):
             return Ok(
                 tuple(
                     generated.output.file(file.path) for file in generated.files.files

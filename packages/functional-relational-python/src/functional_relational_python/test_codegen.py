@@ -378,7 +378,7 @@ def test_generated_modules_pass_the_type_checker(tmp_path: Path) -> None:
         ],
         single_module(ModulePath("generated.views")),
     )
-    files.write(LocalFileSystem(), Directory(tmp_path))
+    files.write(LocalFileSystem(), Directory(tmp_path)).unwrap()
     source_root = Path(__file__).parent.parent
     _ = (tmp_path / "pyrefly.toml").write_text(
         f'search-path = ["{tmp_path}", "{source_root}"]\n'

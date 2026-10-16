@@ -17,13 +17,17 @@ from functional_relational_python.generated_files import (
 )
 
 
+def generated_text() -> FileText:
+    return FileText(f"{GeneratedFiles.header.root}{FileText.fake().root}")
+
+
 def two_files() -> GeneratedFiles:
     return GeneratedFiles(
         files=(
-            GeneratedFile(path=RelativePath.fake(), text=FileText.fake()),
+            GeneratedFile(path=RelativePath.fake(), text=generated_text()),
             GeneratedFile(
                 path=RelativePath(PurePosixPath("app/other.py")),
-                text=FileText.fake(),
+                text=generated_text(),
             ),
         )
     )
@@ -31,7 +35,7 @@ def two_files() -> GeneratedFiles:
 
 def test_written_files_are_up_to_date() -> None:
     filesystem, output, files = InMemoryFileSystem(), Directory.fake(), two_files()
-    files.write(filesystem, output)
+    files.write(filesystem, output).unwrap()
 
     assert files.check(filesystem, output) == Ok(None)
 
@@ -39,11 +43,37 @@ def test_written_files_are_up_to_date() -> None:
 def test_write_puts_each_file_under_the_output_directory() -> None:
     filesystem, output, files = InMemoryFileSystem(), Directory.fake(), two_files()
 
-    files.write(filesystem, output)
+    files.write(filesystem, output).unwrap()
 
     assert filesystem.files == {
         output.file(file.path): file.text for file in files.files
     }
+
+
+def test_write_replaces_a_file_it_generated_before() -> None:
+    filesystem, output, files = InMemoryFileSystem(), Directory.fake(), two_files()
+    first, _ = files.files
+    filesystem.write(
+        output.file(first.path), FileText(f"{first.text.root}# outdated\n")
+    )
+
+    files.write(filesystem, output).unwrap()
+
+    assert filesystem.files[output.file(first.path)] == first.text
+
+
+def test_write_refuses_to_overwrite_files_it_did_not_generate() -> None:
+    filesystem, output, files = InMemoryFileSystem(), Directory.fake(), two_files()
+    for file in files.files:
+        filesystem.write(output.file(file.path), FileText.fake())
+    before = dict(filesystem.files)
+
+    match files.write(filesystem, output):
+        case Ok(_):
+            pytest.fail("expected NotGeneratedFilesError")
+        case Err(error):
+            assert error.paths == tuple(output.file(file.path) for file in files.files)
+    assert filesystem.files == before
 
 
 def test_missing_and_outdated_files_are_all_stale() -> None:
