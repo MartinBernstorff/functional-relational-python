@@ -20,26 +20,27 @@ from functional_relational_python.support.identifier import Identifier
 
 
 class ModelsRenderer:
-    """Writes the source of every planned View model. The entry point is `render`."""
+    """Writes the source of every planned View model."""
 
     @staticmethod
-    def render(plan: PythonPlan) -> GeneratedFiles:
-        """One file per module, in module order."""
-        return GeneratedFiles(
-            files=tuple(
-                GeneratedFile(
-                    path=module.file_path(),
-                    text=ModelsRenderer._module(
-                        module,
-                        tuple(
-                            model
-                            for view in plan.models[module]
-                            for model in view.with_nested()
-                        ),
+    def files(plan: PythonPlan) -> tuple[GeneratedFile, ...]:
+        """One file per module, in module order.
+
+        `render.PythonRenderer` writes them together with the mapping functions.
+        """
+        return tuple(
+            GeneratedFile(
+                path=module.file_path(),
+                text=ModelsRenderer._module(
+                    module,
+                    tuple(
+                        model
+                        for view in plan.models[module]
+                        for model in view.with_nested()
                     ),
-                )
-                for module in sorted(plan.models, key=lambda module: module.root)
+                ),
             )
+            for module in sorted(plan.models, key=lambda module: module.root)
         )
 
     @staticmethod

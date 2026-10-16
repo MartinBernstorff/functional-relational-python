@@ -55,20 +55,20 @@ class Indent(pydantic.RootModel[int], frozen=True):
 
 
 class MappingsRenderer:
-    """Writes the source of every planned mapping function. The entry point is
-    `render`."""
+    """Writes the source of every planned mapping function."""
 
     @staticmethod
-    def render(plan: PythonPlan) -> GeneratedFiles:
-        """One file per module, in module order, with its functions in View order."""
-        return GeneratedFiles(
-            files=tuple(
-                GeneratedFile(
-                    path=module.file_path(),
-                    text=MappingsRenderer._module(plan.functions[module]),
-                )
-                for module in sorted(plan.functions, key=lambda module: module.root)
+    def files(plan: PythonPlan) -> tuple[GeneratedFile, ...]:
+        """One file per module, in module order, with its functions in View order.
+
+        `render.PythonRenderer` writes them together with the View models.
+        """
+        return tuple(
+            GeneratedFile(
+                path=module.file_path(),
+                text=MappingsRenderer._module(plan.functions[module]),
             )
+            for module in sorted(plan.functions, key=lambda module: module.root)
         )
 
     @staticmethod

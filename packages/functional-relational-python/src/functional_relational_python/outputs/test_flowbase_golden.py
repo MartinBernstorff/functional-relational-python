@@ -26,8 +26,8 @@ from functional_relational_python.domain.id import Id
 from functional_relational_python.language import ir, steps
 from functional_relational_python.language.views import View, ViewName
 from functional_relational_python.outputs import engine
-from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import PythonLayout, PythonPlan
+from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import ModulePath
 from functional_relational_python.support.filesystem import FileText
 
@@ -219,7 +219,7 @@ def test_golden_flowbase_view_models() -> None:
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
     ):
         case Ok(plan):
-            (file,) = ModelsRenderer.render(plan).files
+            (file,) = PythonRenderer.render(plan).files
         case Err(error):
             pytest.fail(f"expected View models, got {error}")
 
