@@ -9,7 +9,6 @@ from typing import Annotated
 import pydantic
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.domain.entity_graph import Optionality
 from functional_relational_python.language import ir
 from functional_relational_python.support.filesystem import RelativePath
 from functional_relational_python.support.identifier import Identifier
@@ -72,14 +71,6 @@ class UnimportableError(Exception):
 
 class TypeExpression(pydantic.RootModel[str], frozen=True):
     """An annotation as it is written in generated source."""
-
-    def optional(self, optionality: Optionality) -> TypeExpression:
-        """Written like `ir.Lookup.annotation`, for a model that only exists as source."""
-        match optionality:
-            case Optionality.REQUIRED:
-                return self
-            case Optionality.OPTIONAL:
-                return TypeExpression(f"{self.root} | None")
 
 
 class Symbol(pydantic.BaseModel, frozen=True):

@@ -383,7 +383,9 @@ class _ModelPlanner:
                     model = self.plan(names.nested_in(field), nested_relation)
                     nested[field.name] = model
                     uses.add(model.symbol)
-                    rendered = model.symbol.reference().optional(field.optionality())
+                    rendered = field.optionality().annotate_text(
+                        model.symbol.reference()
+                    )
             fields.append(ModelField(field=field, type=rendered))
             uses |= renderer.symbols
             self.defined_here |= {

@@ -5,28 +5,17 @@ and derives its Relation: the fields a View result will have, each with its type
 and the Value that computes it. Backends run the Relation, not the node tree.
 """
 
-import types
-import typing
 from collections.abc import Callable, Collection
 
 import pydantic
 from pydantic.fields import FieldInfo
 
-from functional_relational_python.domain.entity_graph import FieldName, Optionality
+from functional_relational_python.domain.entity_graph import (
+    FieldName,
+    Optionality,
+    RuntimeAnnotation,
+)
 from functional_relational_python.domain.id import IdType
-
-type RuntimeAnnotation = object
-"""A field's annotation as Python holds it at run time: a class, `None`, a generic
-alias such as `list[int]`, a union, a `type` alias, or a `Literal` argument."""
-
-
-def optionality_of(annotation: RuntimeAnnotation) -> Optionality:
-    """Whether `annotation` admits `None`, the inverse of `Lookup.annotation`."""
-    if typing.get_origin(annotation) is typing.Union and types.NoneType in (
-        typing.get_args(annotation)
-    ):
-        return Optionality.OPTIONAL
-    return Optionality.REQUIRED
 
 
 class SourceName(pydantic.RootModel[str], frozen=True):
@@ -104,13 +93,9 @@ class Lookup(pydantic.BaseModel, frozen=True):
     optionality: Optionality
 
     def annotation(self) -> type[pydantic.BaseModel | None]:
-        """The looked-up value's type: the target Entity, or `target | None` if
-        optional. This is the one place an optional field's type is built."""
-        match self.optionality:
-            case Optionality.REQUIRED:
-                return self.target
-            case Optionality.OPTIONAL:
-                return self.target | None
+        """The looked-up value's type: the target Entity, optional if the
+        Reference is."""
+        return self.optionality.annotate(self.target)
 
 
 type Value = SourceField | Lookup
@@ -137,7 +122,7 @@ class Field(pydantic.BaseModel, frozen=True):
         return self.info.annotation
 
     def optionality(self) -> Optionality:
-        return optionality_of(self.annotation())
+        return Optionality.of_annotation(self.annotation()).optionality
 
 
 class NestedField(pydantic.BaseModel, frozen=True):
