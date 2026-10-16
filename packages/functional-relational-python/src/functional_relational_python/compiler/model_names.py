@@ -189,46 +189,39 @@ class ViewModelNames(pydantic.BaseModel, frozen=True):
     ) -> Result[ViewModelNames, DiagnosticsError[ModelNameDiagnostic]]:
         """The names of the code generated for `view`, whose Relation is
         `relation`, or every reason they cannot be used."""
-        models: Result[ModelNames, DiagnosticsError[ModelNameDiagnostic]]
         match ViewModelNames.model_name(view):
-            case ModelName() as model:
-                match ModelNames.of(view, model, relation):
-                    case Ok(names):
-                        models = Ok(names)
-                    case Err(error):
-                        models = Err(DiagnosticsError(error.diagnostics))
-            case InvalidModelName() as invalid:
-                models = Err(DiagnosticsError((invalid,)))
-        match models:
-            case Ok(names):
-                return Ok(
-                    ViewModelNames(model=names, function=FunctionName.of(names.name))
-                )
             case Err(error):
-                return Err(error)
+                return Err(DiagnosticsError(error.diagnostics))
+            case Ok(model):
+                pass
+        match ModelNames.of(view, model, relation):
+            case Err(error):
+                return Err(DiagnosticsError(error.diagnostics))
+            case Ok(names):
+                return Ok(ViewModelNames(model=names, function=FunctionName.of(model)))
 
     @staticmethod
-    def view_diagnostics(
-        view: ViewName,
-    ) -> tuple[InvalidModelName, ...]:
+    def view_diagnostics(view: ViewName) -> tuple[InvalidModelName, ...]:
         """What is wrong with the names taken from the View's name alone.
 
         For a View that did not compile, whose nested models are unknown.
         """
         match ViewModelNames.model_name(view):
-            case ModelName():
+            case Err(error):
+                return error.diagnostics
+            case Ok(_):
                 return ()
-            case InvalidModelName() as invalid:
-                return (invalid,)
 
     @staticmethod
-    def model_name(view: ViewName) -> ModelName | InvalidModelName:
-        """The name of the View's model: the View's name."""
-        match Identifier.of(view):
-            case Ok():
-                return ModelName(view.root)
-            case Err():
-                return InvalidModelName(view=view)
+    def model_name(
+        view: ViewName,
+    ) -> Result[ModelName, DiagnosticsError[InvalidModelName]]:
+        """The name of the View's model: the View's name. Every rule a View's name
+        must follow is checked here."""
+        reported: list[InvalidModelName] = []
+        if isinstance(Identifier.of(view), Err):
+            reported.append(InvalidModelName(view=view))
+        return DiagnosticsError.or_ok(reported, lambda: ModelName(view.root))
 
     @staticmethod
     def check_field(
