@@ -24,7 +24,7 @@ from functional_relational_python.domain.entity_graph import (
 )
 from functional_relational_python.language import ir
 from functional_relational_python.language.views import ViewName
-from functional_relational_python.outputs.codegen import (
+from functional_relational_python.outputs.python.plan import (
     Codegen,
     ModuleLayout,
     ModulePath,

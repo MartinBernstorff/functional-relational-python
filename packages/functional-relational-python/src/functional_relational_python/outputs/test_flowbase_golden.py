@@ -26,7 +26,7 @@ from functional_relational_python.domain.id import Id
 from functional_relational_python.language import ir, steps
 from functional_relational_python.language.views import View, ViewName
 from functional_relational_python.outputs import engine
-from functional_relational_python.outputs.codegen import Codegen, ModulePath
+from functional_relational_python.outputs.python.plan import Codegen, ModulePath
 from functional_relational_python.support.filesystem import FileText
 
 

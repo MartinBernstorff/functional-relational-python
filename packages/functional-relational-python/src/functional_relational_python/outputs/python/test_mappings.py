@@ -17,8 +17,9 @@ from functional_relational_python.domain.entity_graph import EntityGraph, FieldN
 from functional_relational_python.domain.id import Id
 from functional_relational_python.language import ir, steps
 from functional_relational_python.language.views import View, ViewName
-from functional_relational_python.outputs import emitter, engine
-from functional_relational_python.outputs.codegen import Codegen, ModulePath
+from functional_relational_python.outputs import engine
+from functional_relational_python.outputs.python import mappings as emitter
+from functional_relational_python.outputs.python.plan import Codegen, ModulePath
 
 
 class Text(pydantic.RootModel[str], frozen=True):
@@ -232,7 +233,7 @@ def test_the_emitted_module_matches_the_golden_file() -> None:
 
     To regenerate it, write `emit(golden_views()).root` to the file.
     """
-    golden = Path(__file__).with_name("test_emitter_golden.py")
+    golden = Path(__file__).with_name("test_mappings_golden.py")
 
     assert emit(golden_views()).root == golden.read_text()
 

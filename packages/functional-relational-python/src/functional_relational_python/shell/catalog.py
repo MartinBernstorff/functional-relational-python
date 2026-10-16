@@ -10,7 +10,7 @@ from safe_result import Err, Ok, Result
 from functional_relational_python.compiler import compiler
 from functional_relational_python.domain.entity_graph import EntityGraph
 from functional_relational_python.language.views import View
-from functional_relational_python.outputs.codegen import (
+from functional_relational_python.outputs.python.plan import (
     Codegen,
     ModuleLayout,
     ModulePath,
