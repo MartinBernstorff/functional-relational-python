@@ -11,9 +11,7 @@ compiled Relation, so the two backends agree (the differential test in
 `test_emitter.py` checks this).
 """
 
-import keyword
 import re
-import sys
 import typing
 from collections.abc import Callable
 
@@ -23,11 +21,12 @@ from safe_result import Err, Ok, Result
 from functional_relational_python import compiler, ir
 from functional_relational_python.codegen import (
     Codegen,
-    Identifier,
     ModuleLayout,
     ModulePath,
+    Symbol,
 )
 from functional_relational_python.entity_graph import DiagnosticMessage, Optionality
+from functional_relational_python.identifier import Identifier
 from functional_relational_python.views import ViewName
 
 
@@ -37,9 +36,6 @@ class BoundName(pydantic.RootModel[str], frozen=True):
     @staticmethod
     def fake() -> BoundName:
         return BoundName("company_summary")
-
-    def is_valid(self) -> bool:
-        return self.root.isidentifier() and not keyword.iskeyword(self.root)
 
 
 class PascalCase(pydantic.RootModel[str], frozen=True):
@@ -56,10 +52,6 @@ class EmittedModule(pydantic.RootModel[str], frozen=True):
 
 class EmittedFunction(pydantic.RootModel[str], frozen=True):
     """The source text of one mapping function."""
-
-
-class LineLength(pydantic.RootModel[int], frozen=True):
-    """The longest line emitted source aims for, in characters."""
 
 
 class UnimportableSource(pydantic.BaseModel, frozen=True):
@@ -187,7 +179,6 @@ class PythonEmitter:
 
     parameter: typing.ClassVar[BoundName] = BoundName("source")
     mapping: typing.ClassVar[ModulePath] = ModulePath("collections.abc")
-    line_length: typing.ClassVar[LineLength] = LineLength(88)
 
     @staticmethod
     def emit(
@@ -202,19 +193,14 @@ class PythonEmitter:
         diagnostics = PythonEmitter._diagnostics(compiled, view_models)
         if diagnostics:
             return Err(EmitError(diagnostics))
-        modules = {
+        modules = (
             module
             for view in compiled.views
             for module in PythonEmitter._imports(view, view_models(view))
-        }
-        # Standard library imports first, then the rest, like isort.
+        )
         imports = "\n".join(
             "".join(f"import {module.root}\n" for module in section)
-            for section in (
-                sorted((m for m in modules if m.is_stdlib()), key=lambda m: m.root),
-                sorted((m for m in modules if not m.is_stdlib()), key=lambda m: m.root),
-            )
-            if section
+            for section in ModulePath.import_sections(modules)
         )
         functions = "".join(
             f"\n\n{PythonEmitter._function(view, view_models(view)).root}"
@@ -308,13 +294,6 @@ class PythonEmitter:
         )
 
     @staticmethod
-    def _importable(model: type[pydantic.BaseModel]) -> bool:
-        reachable: object = sys.modules.get(model.__module__)
-        for part in model.__qualname__.split("."):
-            reachable = getattr(reachable, part, None)
-        return reachable is model
-
-    @staticmethod
     def _diagnostics(
         compiled: compiler.CompiledViews, view_models: ModuleLayout
     ) -> tuple[Diagnostic, ...]:
@@ -326,13 +305,13 @@ class PythonEmitter:
         }
         views_by_function: dict[BoundName, list[ViewName]] = {}
         for view in compiled.views:
-            if not PythonEmitter._importable(view.source):
+            if isinstance(Symbol.of(view.source), Err):
                 diagnostics.append(
                     UnimportableSource(view=view.name, source=view.source)
                 )
             diagnostics.extend(PythonEmitter._parameter_diagnostics(view, view_models))
             function = PythonEmitter.function_name(view.name)
-            if not function.is_valid():
+            if isinstance(Identifier.of(function), Err):
                 diagnostics.append(
                     InvalidFunctionName(view=view.name, function=function)
                 )
@@ -361,7 +340,7 @@ class PythonEmitter:
             UnimportableReferencedModel(view=view.name, model=model)
             for lookup in lookups
             for model in (lookup.target, lookup.id_type)
-            if not PythonEmitter._importable(model)
+            if isinstance(Symbol.of(model), Err)
         )
         entities_by_parameter: dict[BoundName, list[type[pydantic.BaseModel]]] = {}
         for lookup in lookups:
@@ -467,7 +446,7 @@ class _Construction:
         reference = f"{subject.root}.{lookup.reference.field.root}"
         inline = f"None if {reference} is None else {present(self).root}"
         line = f"{self.indent.pad().root}{field.name.root}={inline},"
-        if "\n" not in inline and len(line) <= PythonEmitter.line_length.root:
+        if "\n" not in inline and len(line) <= Codegen.line_length.root:
             return Expression(inline)
         inner = _Construction(self.module, self.indent.deeper())
         pad = inner.indent.pad().root

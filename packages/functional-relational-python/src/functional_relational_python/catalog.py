@@ -11,13 +11,13 @@ from functional_relational_python import compiler
 from functional_relational_python.codegen import (
     Codegen,
     CodegenError,
-    Identifier,
     ModuleLayout,
     ModulePath,
 )
 from functional_relational_python.entity_graph import EntityGraph, EntityGraphError
 from functional_relational_python.filesystem import Directory
 from functional_relational_python.generated_files import GeneratedFiles
+from functional_relational_python.identifier import Identifier
 from functional_relational_python.views import View
 
 

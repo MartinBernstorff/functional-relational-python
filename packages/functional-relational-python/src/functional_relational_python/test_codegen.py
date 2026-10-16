@@ -13,7 +13,6 @@ from functional_relational_python.codegen import (
     Codegen,
     Diagnostic,
     DuplicateModelName,
-    Identifier,
     InvalidModelName,
     ModuleLayout,
     ModulePath,
@@ -29,6 +28,7 @@ from functional_relational_python.filesystem import (
 )
 from functional_relational_python.generated_files import GeneratedFiles
 from functional_relational_python.id import Id
+from functional_relational_python.identifier import Identifier
 from functional_relational_python.views import View, ViewName
 
 

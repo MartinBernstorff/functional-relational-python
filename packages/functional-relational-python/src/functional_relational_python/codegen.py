@@ -11,7 +11,6 @@ more `ViewModel` in the plan: the planner names it, and the name checks and
 rendering treat it like any other.
 """
 
-import keyword
 import sys
 import types
 import typing
@@ -30,27 +29,12 @@ from functional_relational_python.entity_graph import (
 )
 from functional_relational_python.filesystem import FileText, RelativePath
 from functional_relational_python.generated_files import GeneratedFile, GeneratedFiles
+from functional_relational_python.identifier import Identifier
 from functional_relational_python.views import ViewName
 
 type RuntimeAnnotation = object
 """A field's annotation as Python holds it at run time: a class, `None`, a generic
 alias such as `list[int]`, a union, a `type` alias, or a `Literal` argument."""
-
-
-class Identifier(pydantic.RootModel[str], frozen=True):
-    """A Python name that is not a keyword, e.g. a class or module name."""
-
-    @pydantic.field_validator("root")
-    @classmethod
-    def _not_keyword(cls, root: str) -> str:
-        if not root.isidentifier() or keyword.iskeyword(root):
-            msg = f"'{root}' is not a Python identifier"
-            raise ValueError(msg)
-        return root
-
-    @staticmethod
-    def fake() -> Identifier:
-        return Identifier("CompanySummary")
 
 
 class ModulePath(pydantic.RootModel[str], frozen=True):
@@ -74,8 +58,22 @@ class ModulePath(pydantic.RootModel[str], frozen=True):
         """The name `import <this module>` binds."""
         return Identifier(self.root.split(".")[0])
 
-    def is_stdlib(self) -> bool:
-        return self.root.split(".")[0] in sys.stdlib_module_names
+    @staticmethod
+    def import_sections(
+        modules: Iterable[ModulePath],
+    ) -> tuple[tuple[ModulePath, ...], ...]:
+        """`modules` grouped like isort: the standard library, then the rest.
+
+        Each section is sorted, and an empty one is left out.
+        """
+        ordered = sorted(set(modules), key=lambda module: module.root)
+        stdlib = tuple(
+            module
+            for module in ordered
+            if module.top_level().root in sys.stdlib_module_names
+        )
+        rest = tuple(module for module in ordered if module not in stdlib)
+        return tuple(section for section in (stdlib, rest) if section)
 
 
 type ModuleLayout = Callable[[compiler.CompiledView], ModulePath]
@@ -172,6 +170,14 @@ class CodegenError(Exception):
         )
 
 
+class UnimportableError(Exception):
+    """A class or `type` alias cannot be imported by its module and name."""
+
+    def __init__(self, named: RuntimeAnnotation) -> None:
+        self.named = named
+        super().__init__(f"{named!r} cannot be imported by its module and name")
+
+
 class Symbol(pydantic.BaseModel, frozen=True):
     """A module-level object generated source refers to, e.g. `pydantic.BaseModel`.
 
@@ -180,6 +186,23 @@ class Symbol(pydantic.BaseModel, frozen=True):
 
     module: ModulePath
     qualname: Annotated[tuple[Identifier, ...], pydantic.Field(min_length=1)]
+
+    @staticmethod
+    def of(named: RuntimeAnnotation) -> Result[Symbol, UnimportableError]:
+        """How source imports `named`, a class or `type` alias, by its module and
+        qualified name. That fails when `named` is not reachable that way, e.g. for
+        a class defined in a function."""
+        module = getattr(named, "__module__", "")
+        parts = getattr(named, "__qualname__", "").split(".")
+        reachable = sys.modules.get(module)
+        for part in parts:
+            reachable = getattr(reachable, part, None)
+        if reachable is not named:
+            # Also covers `<locals>` in the qualname: no attribute has that name.
+            return Err(UnimportableError(named))
+        return Ok(
+            Symbol(module=ModulePath(module), qualname=tuple(map(Identifier, parts)))
+        )
 
     def bound_name(self) -> Identifier:
         return self.qualname[0]
@@ -273,26 +296,19 @@ class _FieldRenderer:
         return TypeExpression(f"{self.render(origin).root}[{rendered}]")
 
     def _named(self, annotation: RuntimeAnnotation) -> TypeExpression:
-        module = getattr(annotation, "__module__", "")
-        parts = getattr(annotation, "__qualname__", "").split(".")
-        reachable = sys.modules.get(module)
-        for part in parts:
-            reachable = getattr(reachable, part, None)
-        if reachable is not annotation:
-            # Also covers `<locals>` in the qualname: no attribute has that name.
-            self.diagnostics.append(
-                UnimportableType(
-                    view=self.view,
-                    field=self.field,
-                    annotation=AnnotationText(repr(annotation)),
+        match Symbol.of(annotation):
+            case Ok(symbol):
+                self.symbols.add(symbol)
+                return symbol.reference()
+            case Err():
+                self.diagnostics.append(
+                    UnimportableType(
+                        view=self.view,
+                        field=self.field,
+                        annotation=AnnotationText(repr(annotation)),
+                    )
                 )
-            )
-            return TypeExpression(repr(annotation))
-        symbol = Symbol(
-            module=ModulePath(module), qualname=tuple(map(Identifier, parts))
-        )
-        self.symbols.add(symbol)
-        return symbol.reference()
+                return TypeExpression(repr(annotation))
 
     def _unsupported(self, annotation: RuntimeAnnotation) -> TypeExpression:
         self.diagnostics.append(
@@ -406,13 +422,13 @@ class Codegen:
     ) -> list[ViewModel] | list[Diagnostic]:
         """The View's model, after the nested models it refers to."""
         planner = _ModelPlanner(view.name, module)
-        name = view.name.root
-        if name.isidentifier() and not keyword.iskeyword(name):
-            planner.plan(Identifier(name), view.relation)
-        else:
-            planner.diagnostics.append(InvalidModelName(view=view.name))
-            # Planned only for its field diagnostics; the name is never used.
-            planner.plan(Identifier("InvalidModelName"), view.relation)
+        match Identifier.of(view.name):
+            case Ok(name):
+                planner.plan(name, view.relation)
+            case Err():
+                planner.diagnostics.append(InvalidModelName(view=view.name))
+                # Planned only for its field diagnostics; the name is never used.
+                planner.plan(Identifier("InvalidModelName"), view.relation)
         if planner.diagnostics:
             return planner.diagnostics
         return planner.models
@@ -457,16 +473,18 @@ class Codegen:
                 if symbol.module.root != "builtins" and symbol.module != module:
                     imported.setdefault(symbol.module, set()).add(symbol.bound_name())
 
-        # Standard library imports first, then the rest, like isort.
-        sections: dict[bool, list[str]] = {True: [], False: []}
-        for source in sorted(imported, key=lambda source: source.root):
-            names = sorted(name.root for name in imported[source])
-            line = f"from {source.root} import {', '.join(names)}"
-            if len(line) > Codegen.line_length.root:
-                listed = "".join(f"    {name},\n" for name in names)
-                line = f"from {source.root} import (\n{listed})"
-            sections[source.is_stdlib()].append(line)
-        imports = "\n\n".join("\n".join(lines) for lines in sections.values() if lines)
+        sections: list[list[str]] = []
+        for section in ModulePath.import_sections(imported):
+            lines: list[str] = []
+            for source in section:
+                names = sorted(name.root for name in imported[source])
+                line = f"from {source.root} import {', '.join(names)}"
+                if len(line) > Codegen.line_length.root:
+                    listed = "".join(f"    {name},\n" for name in names)
+                    line = f"from {source.root} import (\n{listed})"
+                lines.append(line)
+            sections.append(lines)
+        imports = "\n\n".join("\n".join(lines) for lines in sections)
 
         base = Codegen.base.reference().root
         classes = "\n\n".join(
