@@ -86,3 +86,7 @@ so **the PR title is the release note** and must be a conventional commit:
 Merging to `main` runs `ci`; on success, `release` tags, creates the GitHub Release,
 builds the library, and publishes to PyPI via trusted publishing (no API token).
 To cut a release from an unchanged `main`, dispatch `release` manually.
+
+Publishing needs a PyPI trusted publisher, and dependency updates need the Renovate
+GitHub app. Both are one-time steps only a logged-in human can do:
+`bash scripts/wizard.sh` walks through them.
