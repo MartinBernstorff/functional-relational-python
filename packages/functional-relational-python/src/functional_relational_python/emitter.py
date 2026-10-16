@@ -12,41 +12,14 @@ import keyword
 import re
 import sys
 import typing
-from collections.abc import Callable
 
 import pydantic
 from safe_result import Err, Ok, Result
 
 from functional_relational_python import compiler, ir
+from functional_relational_python.codegen import ModuleLayout, ModulePath
 from functional_relational_python.entity_graph import DiagnosticMessage, FieldName
 from functional_relational_python.views import ViewName
-
-
-class ModulePath(pydantic.RootModel[str], frozen=True):
-    """A dotted Python module path, e.g. `myapp.views.company`."""
-
-    @pydantic.field_validator("root")
-    @classmethod
-    def _dotted_identifiers(cls, root: str) -> str:
-        if not all(
-            part.isidentifier() and not keyword.iskeyword(part)
-            for part in root.split(".")
-        ):
-            msg = f"'{root}' is not a dotted path of Python identifiers"
-            raise ValueError(msg)
-        return root
-
-    @staticmethod
-    def fake() -> ModulePath:
-        return ModulePath("app.views")
-
-    def top_level(self) -> BoundName:
-        """The name `import <this module>` binds."""
-        return BoundName(self.root.split(".")[0])
-
-
-type ViewModelLayout = Callable[[compiler.CompiledView], ModulePath]
-"""Maps each compiled View to the module its View model is generated into."""
 
 
 class BoundName(pydantic.RootModel[str], frozen=True):
@@ -154,7 +127,7 @@ class PythonEmitter:
 
     @staticmethod
     def emit(
-        compiled: compiler.CompiledViews, view_models: ViewModelLayout
+        compiled: compiler.CompiledViews, view_models: ModuleLayout
     ) -> Result[EmittedModule, EmitError]:
         """Emits a function per View, in View order, or returns every diagnostic.
 
@@ -193,7 +166,7 @@ class PythonEmitter:
         match node:
             case ir.FromSource():
                 return node.source
-            case ir.Omit() | ir.Rename():
+            case ir.Omit() | ir.Rename() | ir.Project():
                 return PythonEmitter.source(node.input)
 
     @staticmethod
@@ -225,6 +198,12 @@ class PythonEmitter:
                     else assignment
                     for assignment in PythonEmitter.assignments(node.input)
                 )
+            case ir.Project():
+                return tuple(
+                    assignment
+                    for assignment in PythonEmitter.assignments(node.input)
+                    if assignment.field in node.fields
+                )
 
     @staticmethod
     def _function(view: compiler.CompiledView, module: ModulePath) -> EmittedFunction:
@@ -245,10 +224,12 @@ class PythonEmitter:
 
     @staticmethod
     def _diagnostics(
-        compiled: compiler.CompiledViews, view_models: ViewModelLayout
+        compiled: compiler.CompiledViews, view_models: ModuleLayout
     ) -> tuple[Diagnostic, ...]:
         diagnostics: list[Diagnostic] = []
-        imported = {view_models(view).top_level() for view in compiled.views}
+        imported = {
+            BoundName(view_models(view).top_level().root) for view in compiled.views
+        }
         views_by_function: dict[BoundName, list[ViewName]] = {}
         for view in compiled.views:
             source = PythonEmitter.source(view.node)
@@ -256,7 +237,7 @@ class PythonEmitter:
             for part in source.__qualname__.split("."):
                 reachable = getattr(reachable, part, None)
             if reachable is source:
-                imported.add(ModulePath(source.__module__).top_level())
+                imported.add(BoundName(ModulePath(source.__module__).top_level().root))
             else:
                 diagnostics.append(UnimportableSource(view=view.name, source=source))
             function = PythonEmitter.function_name(view.name)
@@ -265,7 +246,7 @@ class PythonEmitter:
                     InvalidFunctionName(view=view.name, function=function)
                 )
             views_by_function.setdefault(function, []).append(view.name)
-            if view_models(view).top_level() == PythonEmitter.parameter:
+            if view_models(view).top_level().root == PythonEmitter.parameter.root:
                 diagnostics.append(
                     ShadowedModule(view=view.name, name=PythonEmitter.parameter)
                 )

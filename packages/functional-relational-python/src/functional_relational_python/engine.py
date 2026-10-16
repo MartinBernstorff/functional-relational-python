@@ -4,7 +4,7 @@ It runs compiled Views over Entities held in memory. Users can use it as a
 stateful fake in their own tests, and every other backend is compared against it.
 """
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 import pydantic
 from safe_result import Err, Ok, Result
@@ -32,6 +32,11 @@ class ViewRow(pydantic.RootModel[Mapping[FieldName, object]], frozen=True):
     def without(self, field: FieldName) -> ViewRow:
         return ViewRow(
             {name: value for name, value in self.root.items() if name != field}
+        )
+
+    def keeping(self, fields: Collection[FieldName]) -> ViewRow:
+        return ViewRow(
+            {name: value for name, value in self.root.items() if name in fields}
         )
 
 
@@ -92,3 +97,5 @@ class InMemoryViewEngine:
                 return tuple(
                     row.renamed(node.field, node.new) for row in self._run(node.input)
                 )
+            case ir.Project():
+                return tuple(row.keeping(node.fields) for row in self._run(node.input))

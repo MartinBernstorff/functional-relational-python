@@ -4,6 +4,8 @@ Steps only build nodes; nothing here is checked. The compiler checks a node tree
 and derives its Relation (the fields a View result will have).
 """
 
+from collections.abc import Collection
+
 import pydantic
 from pydantic.fields import FieldInfo
 
@@ -39,7 +41,14 @@ class Rename(pydantic.BaseModel, frozen=True):
     new: FieldName
 
 
-type Node = FromSource | Omit | Rename
+class Project(pydantic.BaseModel, frozen=True):
+    """Keeps only `fields`, in the input's field order: the complement of Omit."""
+
+    input: Node
+    fields: tuple[FieldName, ...]
+
+
+type Node = FromSource | Omit | Rename | Project
 
 
 class Field(pydantic.BaseModel, frozen=True):
@@ -82,4 +91,10 @@ class Relation(pydantic.BaseModel, frozen=True):
         return Relation(
             source=self.source,
             fields=tuple(field for field in self.fields if field.name != name),
+        )
+
+    def keeping(self, names: Collection[FieldName]) -> Relation:
+        return Relation(
+            source=self.source,
+            fields=tuple(field for field in self.fields if field.name in names),
         )

@@ -11,6 +11,7 @@ from hypothesis import strategies as st
 from safe_result import Err, Ok
 
 from functional_relational_python import compiler, emitter, engine, steps
+from functional_relational_python.codegen import ModulePath
 from functional_relational_python.entity_graph import EntityGraph, FieldName
 from functional_relational_python.id import Id
 from functional_relational_python.views import View, ViewName
@@ -64,6 +65,10 @@ class CompanyTitle(pydantic.BaseModel, frozen=True):
     title: Text
 
 
+class CompanySecret(pydantic.BaseModel, frozen=True):
+    secret: Text
+
+
 def empty_graph() -> EntityGraph:
     return EntityGraph.build([]).unwrap()
 
@@ -76,8 +81,8 @@ def compile_all(views: Iterable[View]) -> compiler.CompiledViews:
             pytest.fail(f"expected compiled views, got {error}")
 
 
-def this_module(_view: compiler.CompiledView) -> emitter.ModulePath:
-    return emitter.ModulePath(__name__)
+def this_module(_view: compiler.CompiledView) -> ModulePath:
+    return ModulePath(__name__)
 
 
 def emit(views: Iterable[View]) -> emitter.EmittedModule:
@@ -120,6 +125,11 @@ def test_the_emitted_module_matches_the_golden_file() -> None:
                 steps.omit(FieldName("secret")),
                 steps.rename(FieldName("name"), FieldName("title")),
             ),
+        ),
+        View(
+            name=ViewName("CompanySecret"),
+            source=Company,
+            step=steps.project([FieldName("secret")]),
         ),
     ]
 
@@ -197,9 +207,7 @@ def test_a_view_model_module_named_like_the_parameter_is_a_diagnostic() -> None:
 
     match emitter.PythonEmitter.emit(
         compile_all([view]),
-        lambda _view: emitter.ModulePath(
-            f"{emitter.PythonEmitter.parameter.root}.views"
-        ),
+        lambda _view: ModulePath(f"{emitter.PythonEmitter.parameter.root}.views"),
     ):
         case Ok(emitted):
             pytest.fail(f"expected diagnostics, got {emitted.root}")
@@ -285,21 +293,29 @@ class DifferentialCase(pydantic.BaseModel, frozen=True):
 
 @st.composite
 def pipelines(draw: st.DrawFn, source: type[pydantic.BaseModel]) -> steps.Step:
-    """A valid pipeline of omits and renames over `source`.
+    """A valid pipeline of omits, renames and projects over `source`.
 
-    Each rename gets a name no field has, so it never collides.
+    Each step names only fields the earlier steps kept, and each rename gets a name
+    no field has, so it never collides.
     """
     fields = list(map(FieldName, source.model_fields))
     drawn: list[steps.Step] = []
     for index in range(draw(st.integers(min_value=0, max_value=len(fields)))):
+        if not fields:
+            break
         field = draw(st.sampled_from(fields))
-        if draw(st.booleans()):
-            fields.remove(field)
-            drawn.append(steps.omit(field))
-        else:
-            new = FieldName(f"renamed_{index}")
-            fields[fields.index(field)] = new
-            drawn.append(steps.rename(field, new))
+        match draw(st.sampled_from(["omit", "rename", "project"])):
+            case "omit":
+                fields.remove(field)
+                drawn.append(steps.omit(field))
+            case "rename":
+                new = FieldName(f"renamed_{index}")
+                fields[fields.index(field)] = new
+                drawn.append(steps.rename(field, new))
+            case _:
+                projected = draw(st.lists(st.sampled_from(fields), unique=True))
+                fields = [kept for kept in fields if kept in projected]
+                drawn.append(steps.project(projected))
     return steps.pipeline(*drawn)
 
 
@@ -354,7 +370,7 @@ def emitted_module(compiled: compiler.CompiledViews) -> Generator[types.ModuleTy
     sys.modules[view_models.__name__] = view_models
     try:
         match emitter.PythonEmitter.emit(
-            compiled, lambda _view: emitter.ModulePath(view_models.__name__)
+            compiled, lambda _view: ModulePath(view_models.__name__)
         ):
             case Ok(emitted):
                 module = types.ModuleType(f"{__name__}_emitted")

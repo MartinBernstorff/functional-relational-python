@@ -56,6 +56,58 @@ def test_omit_removes_the_field_from_the_source() -> None:
     assert field_names(view) == names(Text("name"), Text("revenue"))
 
 
+def test_project_keeps_only_the_listed_fields_in_source_order() -> None:
+    view = compile_one(steps.project([FieldName("revenue"), FieldName("name")]))
+
+    assert field_names(view) == names(Text("name"), Text("revenue"))
+
+
+def test_each_unknown_projected_field_is_a_diagnostic() -> None:
+    unknown = [FieldName("revnue"), FieldName("nme")]
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.project([FieldName("secret"), *unknown]),
+    )
+
+    assert diagnostics_of([view]) == tuple(
+        diagnostics.UnknownField(
+            view=view.name,
+            source=ir.SourceName("Company"),
+            field=field,
+            valid=tuple(map(FieldName, Company.model_fields)),
+        )
+        for field in unknown
+    )
+
+
+def test_steps_after_a_defective_project_are_checked_against_its_known_fields() -> None:
+    unknown = FieldName("revnue")
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.pipeline(
+            steps.project([FieldName("name"), unknown]),
+            steps.omit(FieldName("secret")),
+        ),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.UnknownField(
+            view=view.name,
+            source=ir.SourceName("Company"),
+            field=unknown,
+            valid=tuple(map(FieldName, Company.model_fields)),
+        ),
+        diagnostics.UnknownField(
+            view=view.name,
+            source=ir.SourceName("Company"),
+            field=FieldName("secret"),
+            valid=(FieldName("name"),),
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     "step",
     [
@@ -333,3 +385,36 @@ def test_only_defective_views_are_poisoned_and_each_names_its_diagnostics(
     for view in poisoned:
         assert view.diagnostics
         assert all(d.view == view.name for d in view.diagnostics)
+
+
+class Projection(pydantic.BaseModel, frozen=True):
+    source: type[pydantic.BaseModel]
+    kept: tuple[FieldName, ...]
+
+
+@st.composite
+def projections(draw: st.DrawFn) -> Projection:
+    source = draw(st.sampled_from([Company, Wide]))
+    kept = draw(st.lists(st.sampled_from(list(source.model_fields)), unique=True))
+    return Projection(source=source, kept=tuple(map(FieldName, kept)))
+
+
+@given(projections())
+def test_project_equals_omitting_every_other_field(case: Projection) -> None:
+    def compile_relation(step: steps.Step) -> ir.Relation:
+        view = View(name=ViewName.fake(), source=case.source, step=step)
+        match compiler.compile_views(empty_graph(), [view]):
+            case Ok(compiled):
+                return compiled.views[0].relation
+            case Err(error):
+                pytest.fail(f"expected a compiled view, got {error}")
+
+    others = [
+        FieldName(name)
+        for name in case.source.model_fields
+        if FieldName(name) not in case.kept
+    ]
+
+    assert compile_relation(steps.project(case.kept)) == compile_relation(
+        steps.pipeline(*map(steps.omit, others))
+    )

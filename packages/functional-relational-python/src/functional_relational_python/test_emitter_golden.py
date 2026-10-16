@@ -37,3 +37,11 @@ def company_title(
         id=source.id,
         title=source.name,
     )
+
+
+def company_secret(
+    source: functional_relational_python.test_emitter.Company,
+) -> functional_relational_python.test_emitter.CompanySecret:
+    return functional_relational_python.test_emitter.CompanySecret(
+        secret=source.secret,
+    )

@@ -97,18 +97,25 @@ def _check_node(view: ViewName, node: ir.Node) -> ir.Relation | Poisoned:
     match node:
         case ir.FromSource():
             return ir.Relation.of(node)
+        case ir.Omit() | ir.Rename() | ir.Project():
+            match _check_node(view, node.input):
+                case ir.Relation() as relation:
+                    return _check_step(view, node, relation)
+                case Poisoned(recovered=recovered, diagnostics=earlier):
+                    return _poison(_check_step(view, node, recovered), earlier)
+
+
+def _check_step(
+    view: ViewName, node: ir.Omit | ir.Rename | ir.Project, relation: ir.Relation
+) -> ir.Relation | Poisoned:
+    """Checks one step against the relation its input has."""
+    match node:
         case ir.Omit():
-            match _check_node(view, node.input):
-                case ir.Relation() as relation:
-                    return _check_omit(view, node, relation)
-                case Poisoned(recovered=recovered, diagnostics=earlier):
-                    return _poison(_check_omit(view, node, recovered), earlier)
+            return _check_omit(view, node, relation)
         case ir.Rename():
-            match _check_node(view, node.input):
-                case ir.Relation() as relation:
-                    return _check_rename(view, node, relation)
-                case Poisoned(recovered=recovered, diagnostics=earlier):
-                    return _poison(_check_rename(view, node, recovered), earlier)
+            return _check_rename(view, node, relation)
+        case ir.Project():
+            return _check_project(view, node, relation)
 
 
 def _check_omit(
@@ -161,6 +168,26 @@ def _check_rename(
         )
     )
     return Poisoned(recovered=recovered, diagnostics=tuple(reported))
+
+
+def _check_project(
+    view: ViewName, node: ir.Project, relation: ir.Relation
+) -> ir.Relation | Poisoned:
+    kept = relation.keeping(node.fields)
+    unknown = tuple(
+        diagnostics.UnknownField(
+            view=view,
+            source=relation.source,
+            field=field,
+            valid=relation.field_names(),
+        )
+        for field in node.fields
+        if field not in relation.field_names()
+    )
+    if not unknown:
+        return kept
+    # The known fields are kept, so later steps are checked against them.
+    return Poisoned(recovered=kept, diagnostics=unknown)
 
 
 def _poison(
