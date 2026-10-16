@@ -13,6 +13,7 @@ from functional_relational_python.codegen import (
     Codegen,
     Diagnostic,
     DuplicateModelName,
+    GeneratedIntoDefiningModule,
     InvalidModelName,
     ModuleLayout,
     ModulePath,
@@ -336,6 +337,28 @@ def test_model_named_like_an_imported_type_is_a_clash() -> None:
                 "origins": (
                     f"{module.root}.{Text.__name__}",
                     f"{Text.__module__}.{Text.__name__}",
+                ),
+            }
+        ),
+    )
+
+
+def test_generating_into_a_module_that_defines_a_used_type_is_a_diagnostic() -> None:
+    module = ModulePath(__name__)
+    summary = View(
+        name=ViewName("CompanySummary"),
+        source=Company,
+        step=steps.project([FieldName("name")]),
+    )
+
+    assert diagnostics_of([summary], single_module(module)) == (
+        GeneratedIntoDefiningModule.model_validate(
+            {
+                "view": summary.name,
+                "module": module,
+                "defined": (
+                    f"{__name__}.{Company.__name__}",
+                    f"{__name__}.{Text.__name__}",
                 ),
             }
         ),

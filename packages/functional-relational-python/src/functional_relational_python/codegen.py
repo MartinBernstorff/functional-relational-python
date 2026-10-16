@@ -95,6 +95,22 @@ class InvalidModelName(pydantic.BaseModel, frozen=True):
         )
 
 
+class GeneratedIntoDefiningModule(pydantic.BaseModel, frozen=True):
+    """A View model would be generated into a module that defines classes the
+    View uses, overwriting their definitions."""
+
+    view: ViewName
+    module: ModulePath
+    defined: tuple[AnnotationText, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        defined = ", ".join(text.root for text in self.defined)
+        return DiagnosticMessage(
+            f"{self.view.root}: generating into {self.module.root} would overwrite "
+            f"the module defining {defined}. Generate into another module."
+        )
+
+
 class DuplicateModelName(pydantic.BaseModel, frozen=True):
     """Several Views generate a model of the same name into the same module."""
 
@@ -156,6 +172,7 @@ class NameClash(pydantic.BaseModel, frozen=True):
 type Diagnostic = (
     InvalidModelName
     | DuplicateModelName
+    | GeneratedIntoDefiningModule
     | UnsupportedAnnotation
     | UnimportableType
     | NameClash
@@ -332,6 +349,16 @@ class _ModelPlanner:
         self.module = module
         self.models: list[ViewModel] = []
         self.diagnostics: list[Diagnostic] = []
+        # Classes the View uses that `module` defines, so generating would
+        # overwrite their definitions.
+        self.defined_here: set[AnnotationText] = set()
+
+    def use(self, model: type) -> None:
+        """Records that the View uses `model`, without generated code naming it."""
+        if model.__module__ == self.module.root:
+            self.defined_here.add(
+                AnnotationText(f"{model.__module__}.{model.__qualname__}")
+            )
 
     def plan(self, name: Identifier, relation: ir.Relation) -> None:
         fields: list[ModelField] = []
@@ -343,9 +370,10 @@ class _ModelPlanner:
                     rendered = renderer.render(info.annotation)
                 case ir.NestedField(value=lookup, relation=nested):
                     nested_name = Codegen.nested_model_name(name, field.name)
+                    self.use(lookup.target)
                     self.plan(nested_name, nested)
                     symbol = Symbol(module=self.module, qualname=(nested_name,))
-                    renderer.symbols.add(symbol)
+                    symbols.add(symbol)
                     rendered = TypeExpression(
                         symbol.reference().root
                         if lookup.optionality is Optionality.REQUIRED
@@ -353,6 +381,11 @@ class _ModelPlanner:
                     )
             fields.append(ModelField(name=field.name, type=rendered))
             symbols |= renderer.symbols
+            self.defined_here |= {
+                symbol.describe()
+                for symbol in renderer.symbols
+                if symbol.module == self.module
+            }
             self.diagnostics.extend(renderer.diagnostics)
         self.models.append(
             ViewModel(
@@ -422,6 +455,7 @@ class Codegen:
     ) -> list[ViewModel] | list[Diagnostic]:
         """The View's model, after the nested models it refers to."""
         planner = _ModelPlanner(view.name, module)
+        planner.use(view.source)
         match Identifier.of(view.name):
             case Ok(name):
                 planner.plan(name, view.relation)
@@ -429,6 +463,16 @@ class Codegen:
                 planner.diagnostics.append(InvalidModelName(view=view.name))
                 # Planned only for its field diagnostics; the name is never used.
                 planner.plan(Identifier("InvalidModelName"), view.relation)
+        if planner.defined_here:
+            planner.diagnostics.append(
+                GeneratedIntoDefiningModule(
+                    view=view.name,
+                    module=module,
+                    defined=tuple(
+                        sorted(planner.defined_here, key=lambda text: text.root)
+                    ),
+                )
+            )
         if planner.diagnostics:
             return planner.diagnostics
         return planner.models
