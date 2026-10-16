@@ -1,15 +1,18 @@
 import pydantic
 
 from functional_relational_python.domain.entity_graph import (
-    DiagnosticMessage,
     FieldName,
 )
 from functional_relational_python.domain.id import IdType
 from functional_relational_python.language import ir
 from functional_relational_python.language.views import ViewName
+from functional_relational_python.support.diagnostic import (
+    Diagnostic,
+    DiagnosticMessage,
+)
 
 
-class UnknownField(pydantic.BaseModel, frozen=True):
+class UnknownField(pydantic.BaseModel, Diagnostic, frozen=True):
     """A step names a field the relation does not have at that point."""
 
     view: ViewName
@@ -25,7 +28,7 @@ class UnknownField(pydantic.BaseModel, frozen=True):
         )
 
 
-class RenameOntoExistingField(pydantic.BaseModel, frozen=True):
+class RenameOntoExistingField(pydantic.BaseModel, Diagnostic, frozen=True):
     """A rename's new name is a field the relation already has at that point."""
 
     view: ViewName
@@ -40,7 +43,7 @@ class RenameOntoExistingField(pydantic.BaseModel, frozen=True):
         )
 
 
-class InvalidFieldName(pydantic.BaseModel, frozen=True):
+class InvalidFieldName(pydantic.BaseModel, Diagnostic, frozen=True):
     """A rename or resolve gives a field a name no View model field can have."""
 
     view: ViewName
@@ -55,7 +58,7 @@ class InvalidFieldName(pydantic.BaseModel, frozen=True):
         )
 
 
-class NotAReference(pydantic.BaseModel, frozen=True):
+class NotAReference(pydantic.BaseModel, Diagnostic, frozen=True):
     """`resolve` selected a field that is not typed with an Id, optional or not."""
 
     view: ViewName
@@ -69,7 +72,7 @@ class NotAReference(pydantic.BaseModel, frozen=True):
         )
 
 
-class UnresolvableReference(pydantic.BaseModel, frozen=True):
+class UnresolvableReference(pydantic.BaseModel, Diagnostic, frozen=True):
     """`resolve` selected a Reference whose ID type keys no Entity."""
 
     view: ViewName
@@ -84,7 +87,7 @@ class UnresolvableReference(pydantic.BaseModel, frozen=True):
         )
 
 
-class ResolvedNameCollision(pydantic.BaseModel, frozen=True):
+class ResolvedNameCollision(pydantic.BaseModel, Diagnostic, frozen=True):
     """A resolved field's new name is a field the relation already has."""
 
     view: ViewName
@@ -100,7 +103,7 @@ class ResolvedNameCollision(pydantic.BaseModel, frozen=True):
         )
 
 
-type Diagnostic = (
+type CompileDiagnostic = (
     UnknownField
     | RenameOntoExistingField
     | InvalidFieldName

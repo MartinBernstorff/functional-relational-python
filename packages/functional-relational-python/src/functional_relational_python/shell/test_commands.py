@@ -6,7 +6,7 @@ from functional_relational_python.compiler import compiler
 from functional_relational_python.domain.id import Id
 from functional_relational_python.language import steps
 from functional_relational_python.language.views import View, ViewName
-from functional_relational_python.outputs.codegen import CodegenError, ModulePath
+from functional_relational_python.outputs.codegen import ModulePath
 from functional_relational_python.shell import commands
 from functional_relational_python.shell.catalog import (
     CatalogAttributeMissingError,
@@ -16,6 +16,7 @@ from functional_relational_python.shell.catalog import (
     ViewCatalog,
 )
 from functional_relational_python.shell.project_config import ConfigFile, ProjectConfig
+from functional_relational_python.support.diagnostic import DiagnosticsError
 from functional_relational_python.support.filesystem import (
     Directory,
     FileText,
@@ -102,7 +103,7 @@ def test_check_reports_an_edited_file() -> None:
         (ImportPath("no_such_module_for_frp:catalog"), CatalogModuleNotFoundError),
         (in_this_module(Text("no_such_attribute")), CatalogAttributeMissingError),
         (in_this_module(Text("not_a_catalog")), NotACatalogError),
-        (in_this_module(Text("invalid_catalog")), CodegenError),
+        (in_this_module(Text("invalid_catalog")), DiagnosticsError),
     ],
 )
 def test_generate_reports_why_it_cannot_run(

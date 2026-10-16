@@ -53,7 +53,7 @@ def compile_one(step: steps.Step) -> compiler.CompiledView:
             pytest.fail(f"expected a compiled view, got {error}")
 
 
-def diagnostics_of(views: list[View]) -> tuple[diagnostics.Diagnostic, ...]:
+def diagnostics_of(views: list[View]) -> tuple[diagnostics.CompileDiagnostic, ...]:
     match compiler.compile_views(empty_graph(), views):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
@@ -530,7 +530,7 @@ def compile_resolving(
 
 def resolve_diagnostics(
     source: type[pydantic.BaseModel], step: steps.Step
-) -> tuple[diagnostics.Diagnostic, ...]:
+) -> tuple[diagnostics.CompileDiagnostic, ...]:
     match compiler.compile_views(
         hr_graph(), [View(name=ViewName.fake(), source=source, step=step)]
     ):
@@ -796,7 +796,7 @@ def test_building_a_resolve_checks_nothing() -> None:
     ids=["not-a-reference", "unresolvable", "collision", "invalid-field-name"],
 )
 def test_a_resolve_diagnostic_message_names_the_offending_values(
-    diagnostic: diagnostics.Diagnostic, message: str
+    diagnostic: diagnostics.CompileDiagnostic, message: str
 ) -> None:
     assert diagnostic.describe().root == message
 

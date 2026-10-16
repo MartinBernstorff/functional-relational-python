@@ -23,12 +23,16 @@ from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
 from functional_relational_python.domain.entity_graph import (
-    DiagnosticMessage,
     FieldName,
     Optionality,
 )
 from functional_relational_python.language import ir
 from functional_relational_python.language.views import ViewName
+from functional_relational_python.support.diagnostic import (
+    Diagnostic,
+    DiagnosticMessage,
+    DiagnosticsError,
+)
 from functional_relational_python.support.filesystem import FileText, RelativePath
 from functional_relational_python.support.generated_files import (
     GeneratedFile,
@@ -88,7 +92,7 @@ class AnnotationText(pydantic.RootModel[str], frozen=True):
     """How an annotation or name reads in a diagnostic, e.g. `Annotated[int, 0]`."""
 
 
-class InvalidModelName(pydantic.BaseModel, frozen=True):
+class InvalidModelName(pydantic.BaseModel, Diagnostic, frozen=True):
     """A View's name cannot be used as a class name."""
 
     view: ViewName
@@ -99,7 +103,7 @@ class InvalidModelName(pydantic.BaseModel, frozen=True):
         )
 
 
-class GeneratedIntoDefiningModule(pydantic.BaseModel, frozen=True):
+class GeneratedIntoDefiningModule(pydantic.BaseModel, Diagnostic, frozen=True):
     """A View model would be generated into a module that defines classes the
     View uses, overwriting their definitions."""
 
@@ -115,7 +119,7 @@ class GeneratedIntoDefiningModule(pydantic.BaseModel, frozen=True):
         )
 
 
-class DuplicateModelName(pydantic.BaseModel, frozen=True):
+class DuplicateModelName(pydantic.BaseModel, Diagnostic, frozen=True):
     """Several Views generate a model of the same name into the same module."""
 
     module: ModulePath
@@ -130,7 +134,7 @@ class DuplicateModelName(pydantic.BaseModel, frozen=True):
         )
 
 
-class UnsupportedAnnotation(pydantic.BaseModel, frozen=True):
+class UnsupportedAnnotation(pydantic.BaseModel, Diagnostic, frozen=True):
     """A field's type has a form the generator cannot write out."""
 
     view: ViewName
@@ -144,7 +148,7 @@ class UnsupportedAnnotation(pydantic.BaseModel, frozen=True):
         )
 
 
-class UnimportableType(pydantic.BaseModel, frozen=True):
+class UnimportableType(pydantic.BaseModel, Diagnostic, frozen=True):
     """A field's type cannot be imported by its module and name, e.g. a local class."""
 
     view: ViewName
@@ -158,7 +162,7 @@ class UnimportableType(pydantic.BaseModel, frozen=True):
         )
 
 
-class NameClash(pydantic.BaseModel, frozen=True):
+class NameClash(pydantic.BaseModel, Diagnostic, frozen=True):
     """Several different things would be bound to one name in a generated module."""
 
     module: ModulePath
@@ -173,7 +177,7 @@ class NameClash(pydantic.BaseModel, frozen=True):
         )
 
 
-type Diagnostic = (
+type CodegenDiagnostic = (
     InvalidModelName
     | DuplicateModelName
     | GeneratedIntoDefiningModule
@@ -181,14 +185,6 @@ type Diagnostic = (
     | UnimportableType
     | NameClash
 )
-
-
-class CodegenError(Exception):
-    def __init__(self, diagnostics: tuple[Diagnostic, ...]) -> None:
-        self.diagnostics = diagnostics
-        super().__init__(
-            "\n".join(diagnostic.describe().root for diagnostic in diagnostics)
-        )
 
 
 class UnimportableError(Exception):
@@ -278,7 +274,7 @@ class _FieldRenderer:
         self.view = view
         self.field = field
         self.symbols: set[Symbol] = set()
-        self.diagnostics: list[Diagnostic] = []
+        self.diagnostics: list[CodegenDiagnostic] = []
 
     def render(self, annotation: RuntimeAnnotation) -> TypeExpression:
         origin = typing.get_origin(annotation)
@@ -352,7 +348,7 @@ class _ModelPlanner:
         self.view = view
         self.module = module
         self.models: list[ViewModel] = []
-        self.diagnostics: list[Diagnostic] = []
+        self.diagnostics: list[CodegenDiagnostic] = []
         # Classes the View uses that `module` defines, so generating would
         # overwrite their definitions.
         self.defined_here: set[AnnotationText] = set()
@@ -413,9 +409,9 @@ class Codegen:
     @staticmethod
     def generate(
         compiled: compiler.CompiledViews, layout: ModuleLayout
-    ) -> Result[GeneratedFiles, CodegenError]:
+    ) -> Result[GeneratedFiles, DiagnosticsError[CodegenDiagnostic]]:
         """Generates one file per module, or returns every diagnostic."""
-        diagnostics: list[Diagnostic] = []
+        diagnostics: list[CodegenDiagnostic] = []
         by_module: dict[ModulePath, list[ViewModel]] = {}
         for view in compiled.views:
             planned = Codegen._plan(view, layout(view))
@@ -428,10 +424,9 @@ class Codegen:
         for module, models in by_module.items():
             diagnostics.extend(Codegen._name_diagnostics(module, models))
 
-        if diagnostics:
-            return Err(CodegenError(tuple(diagnostics)))
-        return Ok(
-            GeneratedFiles(
+        return DiagnosticsError.or_ok(
+            diagnostics,
+            lambda: GeneratedFiles(
                 files=tuple(
                     GeneratedFile(
                         path=module.file_path(),
@@ -439,7 +434,7 @@ class Codegen:
                     )
                     for module in sorted(by_module, key=lambda module: module.root)
                 )
-            )
+            ),
         )
 
     @staticmethod
@@ -452,7 +447,7 @@ class Codegen:
     @staticmethod
     def _plan(
         view: compiler.CompiledView, module: ModulePath
-    ) -> list[ViewModel] | list[Diagnostic]:
+    ) -> list[ViewModel] | list[CodegenDiagnostic]:
         """The View's model, after the nested models it refers to."""
         planner = _ModelPlanner(view.name, module)
         planner.use(view.source)
@@ -480,7 +475,7 @@ class Codegen:
     @staticmethod
     def _name_diagnostics(
         module: ModulePath, models: Sequence[ViewModel]
-    ) -> Iterable[Diagnostic]:
+    ) -> Iterable[CodegenDiagnostic]:
         views_by_name: dict[Identifier, list[ViewName]] = {}
         for model in models:
             views_by_name.setdefault(model.name, []).append(model.view)

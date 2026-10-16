@@ -20,7 +20,6 @@ from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
 from functional_relational_python.domain.entity_graph import (
-    DiagnosticMessage,
     Optionality,
 )
 from functional_relational_python.language import ir
@@ -31,6 +30,11 @@ from functional_relational_python.outputs.codegen import (
     ModuleLayout,
     ModulePath,
     Symbol,
+)
+from functional_relational_python.support.diagnostic import (
+    Diagnostic,
+    DiagnosticMessage,
+    DiagnosticsError,
 )
 from functional_relational_python.support.identifier import Identifier
 
@@ -59,7 +63,7 @@ class EmittedFunction(pydantic.RootModel[str], frozen=True):
     """The source text of one mapping function."""
 
 
-class UnimportableSource(pydantic.BaseModel, frozen=True):
+class UnimportableSource(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Source the emitted module cannot import, e.g. a class defined in a function."""
 
     view: ViewName
@@ -73,7 +77,7 @@ class UnimportableSource(pydantic.BaseModel, frozen=True):
         )
 
 
-class UnimportableReferencedModel(pydantic.BaseModel, frozen=True):
+class UnimportableReferencedModel(pydantic.BaseModel, Diagnostic, frozen=True):
     """An Entity a View looks up, or its ID type, cannot be imported."""
 
     view: ViewName
@@ -86,7 +90,7 @@ class UnimportableReferencedModel(pydantic.BaseModel, frozen=True):
         )
 
 
-class InvalidFunctionName(pydantic.BaseModel, frozen=True):
+class InvalidFunctionName(pydantic.BaseModel, Diagnostic, frozen=True):
     view: ViewName
     function: BoundName
 
@@ -97,7 +101,7 @@ class InvalidFunctionName(pydantic.BaseModel, frozen=True):
         )
 
 
-class DuplicateFunctionName(pydantic.BaseModel, frozen=True):
+class DuplicateFunctionName(pydantic.BaseModel, Diagnostic, frozen=True):
     """Several View names have the same snake_case form."""
 
     function: BoundName
@@ -110,7 +114,7 @@ class DuplicateFunctionName(pydantic.BaseModel, frozen=True):
         )
 
 
-class DuplicateLookupParameter(pydantic.BaseModel, frozen=True):
+class DuplicateLookupParameter(pydantic.BaseModel, Diagnostic, frozen=True):
     """A View looks up several Entities whose names give the same parameter."""
 
     view: ViewName
@@ -127,7 +131,7 @@ class DuplicateLookupParameter(pydantic.BaseModel, frozen=True):
         )
 
 
-class ShadowedModule(pydantic.BaseModel, frozen=True):
+class ShadowedModule(pydantic.BaseModel, Diagnostic, frozen=True):
     """A name a View's function binds hides a module the emitted module imports.
 
     The name is the function's own name, or one of its parameters when the View
@@ -144,7 +148,7 @@ class ShadowedModule(pydantic.BaseModel, frozen=True):
         )
 
 
-type Diagnostic = (
+type EmitDiagnostic = (
     UnimportableSource
     | InvalidModelName
     | UnimportableReferencedModel
@@ -153,14 +157,6 @@ type Diagnostic = (
     | DuplicateLookupParameter
     | ShadowedModule
 )
-
-
-class EmitError(Exception):
-    def __init__(self, diagnostics: tuple[Diagnostic, ...]) -> None:
-        self.diagnostics = diagnostics
-        super().__init__(
-            "\n".join(diagnostic.describe().root for diagnostic in diagnostics)
-        )
 
 
 class Expression(pydantic.RootModel[str], frozen=True):
@@ -189,7 +185,7 @@ class PythonEmitter:
     @staticmethod
     def emit(
         compiled: compiler.CompiledViews, view_models: ModuleLayout
-    ) -> Result[EmittedModule, EmitError]:
+    ) -> Result[EmittedModule, DiagnosticsError[EmitDiagnostic]]:
         """Emits a function per View, in View order, or returns every diagnostic.
 
         `view_models` gives the module each View's model is imported from. The
@@ -197,8 +193,11 @@ class PythonEmitter:
         module, named by `Codegen.nested_model_name`.
         """
         diagnostics = PythonEmitter._diagnostics(compiled, view_models)
-        if diagnostics:
-            return Err(EmitError(diagnostics))
+        match diagnostics:
+            case (first, *rest):
+                return Err(DiagnosticsError((first, *rest)))
+            case _:
+                pass
         modules = (
             module
             for view in compiled.views
@@ -302,8 +301,8 @@ class PythonEmitter:
     @staticmethod
     def _diagnostics(
         compiled: compiler.CompiledViews, view_models: ModuleLayout
-    ) -> tuple[Diagnostic, ...]:
-        diagnostics: list[Diagnostic] = []
+    ) -> tuple[EmitDiagnostic, ...]:
+        diagnostics: list[EmitDiagnostic] = []
         imported = {
             BoundName(module.top_level().root)
             for view in compiled.views
@@ -340,9 +339,9 @@ class PythonEmitter:
     @staticmethod
     def _parameter_diagnostics(
         view: compiler.CompiledView, view_models: ModuleLayout
-    ) -> list[Diagnostic]:
+    ) -> list[EmitDiagnostic]:
         """Problems with a View function's parameters and the types they name."""
-        diagnostics: list[Diagnostic] = []
+        diagnostics: list[EmitDiagnostic] = []
         lookups = PythonEmitter.lookups(view.relation)
         diagnostics.extend(
             UnimportableReferencedModel(view=view.name, model=model)
