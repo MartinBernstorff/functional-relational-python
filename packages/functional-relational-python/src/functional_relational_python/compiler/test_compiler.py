@@ -253,30 +253,6 @@ def test_renaming_a_field_to_its_own_name_changes_nothing() -> None:
     assert field_names(view) == names(Text("name"), Text("revenue"))
 
 
-@pytest.mark.parametrize(
-    "new",
-    ["_private", "class", "not-an-identifier", "json", "model_config"],
-    ids=["private", "keyword", "not-an-identifier", "shadows-basemodel", "reserved"],
-)
-def test_renaming_to_a_name_no_model_field_can_have_is_one_diagnostic(
-    new: str,
-) -> None:
-    invalid = FieldName(new)
-    view = View(
-        name=ViewName.fake(),
-        source=Company,
-        step=steps.pipeline(
-            steps.rename(FieldName("secret"), invalid), steps.omit(invalid)
-        ),
-    )
-
-    assert diagnostics_of([view]) == (
-        diagnostics.InvalidFieldName(
-            view=view.name, source=ir.SourceName("Company"), field=invalid
-        ),
-    )
-
-
 def test_a_renamed_field_can_be_omitted_by_its_new_name() -> None:
     new = FieldName("code")
 
@@ -410,7 +386,11 @@ def test_n_independent_defects_give_exactly_n_diagnostics(
         case Ok(_):
             assert case.unknown_fields == ()
         case Err(error):
-            assert sorted(d.field.root for d in error.diagnostics) == sorted(
+            unknown = [
+                d for d in error.diagnostics if isinstance(d, diagnostics.UnknownField)
+            ]
+            assert len(unknown) == len(error.diagnostics)
+            assert sorted(d.field.root for d in unknown) == sorted(
                 field.root for field in case.unknown_fields
             )
 
@@ -493,12 +473,6 @@ class Clash(pydantic.BaseModel):
 
 class ProjectId(Id[int]):
     """The primary key of no Entity in `hr_graph()`."""
-
-
-class Keyworded(pydantic.BaseModel):
-    """`class_id` would resolve to `class`, a keyword."""
-
-    class_id: DepartmentId
 
 
 class Memo(pydantic.BaseModel):
@@ -688,16 +662,6 @@ def test_resolving_the_primary_key_is_a_diagnostic() -> None:
     )
 
 
-def test_resolving_to_a_name_no_model_field_can_have_is_a_diagnostic() -> None:
-    assert resolve_diagnostics(Keyworded, steps.hydrate()) == (
-        diagnostics.InvalidFieldName(
-            view=ViewName.fake(),
-            source=ir.SourceName("Keyworded"),
-            field=FieldName("class"),
-        ),
-    )
-
-
 def test_a_reference_to_no_entity_is_a_diagnostic_and_others_still_resolve() -> None:
     match compiler.check(
         hr_graph(),
@@ -790,20 +754,8 @@ def test_building_a_resolve_checks_nothing() -> None:
                 "'department', but Clash already has a field 'department'."
             ),
         ),
-        (
-            diagnostics.InvalidFieldName(
-                view=ViewName("KeywordedView"),
-                source=ir.SourceName("Keyworded"),
-                field=FieldName("class"),
-            ),
-            (
-                "KeywordedView: 'class' cannot be a field name. A field name is a "
-                "Python identifier that is not a keyword, does not start with '_', "
-                "and is not an attribute of pydantic.BaseModel."
-            ),
-        ),
     ],
-    ids=["not-a-reference", "unresolvable", "collision", "invalid-field-name"],
+    ids=["not-a-reference", "unresolvable", "collision"],
 )
 def test_a_resolve_diagnostic_message_names_the_offending_values(
     diagnostic: diagnostics.CompileDiagnostic, message: str

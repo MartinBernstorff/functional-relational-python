@@ -18,7 +18,6 @@ from functional_relational_python.outputs.codegen import (
     CodegenDiagnostic,
     DuplicateModelName,
     GeneratedIntoDefiningModule,
-    InvalidModelName,
     ModuleLayout,
     ModulePath,
     NameClash,
@@ -287,14 +286,6 @@ def test_every_unsupported_annotation_is_reported() -> None:
         (UnsupportedAnnotation, FieldName(name))
         for name in WithUnsupported.model_fields
     ]
-
-
-def test_invalid_view_name_is_a_diagnostic() -> None:
-    name = ViewName("not a class")
-
-    assert diagnostics_of([View(name=name, source=Company, step=steps.pipeline())]) == (
-        InvalidModelName(view=name),
-    )
 
 
 def test_same_name_in_one_module_is_a_diagnostic() -> None:

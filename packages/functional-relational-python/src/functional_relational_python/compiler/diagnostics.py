@@ -1,5 +1,6 @@
 import pydantic
 
+from functional_relational_python.compiler import model_names
 from functional_relational_python.domain.entity_graph import (
     FieldName,
 )
@@ -40,21 +41,6 @@ class RenameOntoExistingField(pydantic.BaseModel, Diagnostic, frozen=True):
             f"{self.view.root}: cannot rename '{self.renamed.root}' to "
             f"'{self.field.root}', because the View already has a field "
             f"'{self.field.root}'."
-        )
-
-
-class InvalidFieldName(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A rename or resolve gives a field a name no View model field can have."""
-
-    view: ViewName
-    source: ir.SourceName
-    field: FieldName
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.view.root}: '{self.field.root}' cannot be a field name. A field "
-            "name is a Python identifier that is not a keyword, does not start with "
-            "'_', and is not an attribute of pydantic.BaseModel."
         )
 
 
@@ -106,7 +92,10 @@ class ResolvedNameCollision(pydantic.BaseModel, Diagnostic, frozen=True):
 type CompileDiagnostic = (
     UnknownField
     | RenameOntoExistingField
-    | InvalidFieldName
+    | model_names.InvalidFieldName
+    | model_names.InvalidModelName
+    | model_names.InvalidNestedModelName
+    | model_names.InvalidFunctionName
     | NotAReference
     | UnresolvableReference
     | ResolvedNameCollision

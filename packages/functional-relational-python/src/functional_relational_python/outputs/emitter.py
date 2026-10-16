@@ -11,7 +11,6 @@ compiled Relation, so the two backends agree (the differential test in
 `test_emitter.py` checks this).
 """
 
-import re
 import typing
 from collections.abc import Callable
 
@@ -19,6 +18,7 @@ import pydantic
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
+from functional_relational_python.compiler.model_names import ModelNames, PascalCase
 from functional_relational_python.domain.entity_graph import (
     Optionality,
 )
@@ -26,7 +26,6 @@ from functional_relational_python.language import ir
 from functional_relational_python.language.views import ViewName
 from functional_relational_python.outputs.codegen import (
     Codegen,
-    InvalidModelName,
     ModuleLayout,
     ModulePath,
     Symbol,
@@ -36,7 +35,6 @@ from functional_relational_python.support.diagnostic import (
     DiagnosticMessage,
     DiagnosticsError,
 )
-from functional_relational_python.support.identifier import Identifier
 
 
 class BoundName(pydantic.RootModel[str], frozen=True):
@@ -45,14 +43,6 @@ class BoundName(pydantic.RootModel[str], frozen=True):
     @staticmethod
     def fake() -> BoundName:
         return BoundName("company_summary")
-
-
-class PascalCase(pydantic.RootModel[str], frozen=True):
-    """A class-style name, such as a View's or an Entity's."""
-
-    def snake_case(self) -> BoundName:
-        """`CompanyPublic` is `company_public`."""
-        return BoundName(re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", self.root).lower())
 
 
 class EmittedModule(pydantic.RootModel[str], frozen=True):
@@ -87,17 +77,6 @@ class UnimportableReferencedModel(pydantic.BaseModel, Diagnostic, frozen=True):
         return DiagnosticMessage(
             f"{self.view.root}: {self.model.__module__}.{self.model.__qualname__} "
             "cannot be imported by its module and name. Define it at module level."
-        )
-
-
-class InvalidFunctionName(pydantic.BaseModel, Diagnostic, frozen=True):
-    view: ViewName
-    function: BoundName
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.view.root}: '{self.function.root}' is not a valid Python "
-            "function name."
         )
 
 
@@ -150,9 +129,7 @@ class ShadowedModule(pydantic.BaseModel, Diagnostic, frozen=True):
 
 type EmitDiagnostic = (
     UnimportableSource
-    | InvalidModelName
     | UnimportableReferencedModel
-    | InvalidFunctionName
     | DuplicateFunctionName
     | DuplicateLookupParameter
     | ShadowedModule
@@ -189,8 +166,8 @@ class PythonEmitter:
         """Emits a function per View, in View order, or returns every diagnostic.
 
         `view_models` gives the module each View's model is imported from. The
-        model's class name is the View's name. Nested View models are in the same
-        module, named by `Codegen.nested_model_name`.
+        View's models are named by `view.names`; nested ones are in the same
+        module.
         """
         diagnostics = PythonEmitter._diagnostics(compiled, view_models)
         match diagnostics:
@@ -219,9 +196,8 @@ class PythonEmitter:
         )
 
     @staticmethod
-    def function_name(view: ViewName) -> BoundName:
-        """The View's name in snake_case: `CompanyPublic` is `company_public`."""
-        return PascalCase(view.root).snake_case()
+    def function_name(view: compiler.CompiledView) -> BoundName:
+        return BoundName(view.names.function.root)
 
     @staticmethod
     def lookup_parameter(entity: type[pydantic.BaseModel]) -> BoundName:
@@ -282,15 +258,15 @@ class PythonEmitter:
             for lookup in PythonEmitter.lookups(view.relation)
         )
         keyword_only = f"    *,\n{lookups}" if lookups else ""
-        model = Expression(f"{module.root}.{view.name.root}")
+        model = Expression(f"{module.root}.{view.names.model.name.root}")
         call = _Construction(module=module, indent=Indent(4)).call(
             model,
-            Identifier(view.name.root),
+            view.names.model,
             view.relation,
             Expression(PythonEmitter.parameter.root),
         )
         return EmittedFunction(
-            f"def {PythonEmitter.function_name(view.name).root}(\n"
+            f"def {PythonEmitter.function_name(view).root}(\n"
             f"    {PythonEmitter.parameter.root}: "
             f"{PythonEmitter._qualified(view.source).root},\n"
             f"{keyword_only}"
@@ -315,13 +291,7 @@ class PythonEmitter:
                     UnimportableSource(view=view.name, source=view.source)
                 )
             diagnostics.extend(PythonEmitter._parameter_diagnostics(view, view_models))
-            if isinstance(Identifier.of(view.name), Err):
-                diagnostics.append(InvalidModelName(view=view.name))
-            function = PythonEmitter.function_name(view.name)
-            if isinstance(Identifier.of(function), Err):
-                diagnostics.append(
-                    InvalidFunctionName(view=view.name, function=function)
-                )
+            function = PythonEmitter.function_name(view)
             views_by_function.setdefault(function, []).append(view.name)
         diagnostics.extend(
             DuplicateFunctionName(function=function, views=tuple(views))
@@ -384,18 +354,18 @@ class _Construction:
     def call(
         self,
         model: Expression,
-        name: Identifier,
+        names: ModelNames,
         relation: ir.Relation,
         subject: Expression,
     ) -> Expression:
         """`model(...)`, with a keyword argument per field of `relation`.
 
-        `name` is the model's class name, which nested model names start with.
+        `names` names the model and the models nested in it.
         """
         inner = _Construction(self.module, self.indent.deeper())
         arguments = "".join(
             f"{inner.indent.pad().root}{field.name.root}="
-            f"{inner.value(name, field, subject).root},\n"
+            f"{inner.value(names, field, subject).root},\n"
             for field in relation.fields
         )
         if not arguments:
@@ -403,7 +373,7 @@ class _Construction:
         return Expression(f"{model.root}(\n{arguments}{self.indent.pad().root})")
 
     def value(
-        self, model: Identifier, field: ir.RelationField, subject: Expression
+        self, model: ModelNames, field: ir.RelationField, subject: Expression
     ) -> Expression:
         """The argument for `field` of `model`, on a line at this indentation."""
         match field:
@@ -415,13 +385,13 @@ class _Construction:
                         entity = self._entity(value, subject)
                         return self._optional(field, value, subject, lambda _: entity)
             case ir.NestedField(value=lookup, relation=relation):
-                nested = Codegen.nested_model_name(model, field.name)
+                nested = model.nested_in(field)
                 return self._optional(
                     field,
                     lookup,
                     subject,
                     lambda construction: construction.call(
-                        Expression(f"{self.module.root}.{nested.root}"),
+                        Expression(f"{self.module.root}.{nested.name.root}"),
                         nested,
                         relation,
                         self._entity(lookup, subject),

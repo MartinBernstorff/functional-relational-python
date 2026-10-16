@@ -13,6 +13,7 @@ from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import diagnostics
+from functional_relational_python.compiler.model_names import ViewModelNames
 from functional_relational_python.domain.entity_graph import (
     EntityGraph,
     FieldName,
@@ -23,7 +24,6 @@ from functional_relational_python.domain.entity_graph import (
 from functional_relational_python.language import ir
 from functional_relational_python.language.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticsError
-from functional_relational_python.support.identifier import Identifier
 
 type Diagnostics = Annotated[
     tuple[diagnostics.CompileDiagnostic, ...], pydantic.Field(min_length=1)
@@ -42,11 +42,13 @@ class Poisoned(pydantic.BaseModel, frozen=True):
 
 
 class CompiledView(pydantic.BaseModel, frozen=True):
-    """A checked View: its Source, and the Relation backends compute from it."""
+    """A checked View: its Source, the Relation backends compute from it, and the
+    names its generated code uses."""
 
     name: ViewName
     source: type[pydantic.BaseModel]
     relation: ir.Relation
+    names: ViewModelNames
 
 
 class PoisonedView(pydantic.BaseModel, frozen=True):
@@ -90,9 +92,20 @@ def _check_view(entity_graph: EntityGraph, view: View) -> CompiledView | Poisone
     node = view.step(ir.FromSource(source=view.source))
     match _check_node(entity_graph, view.name, node):
         case ir.Relation() as relation:
-            return CompiledView(name=view.name, source=view.source, relation=relation)
+            pass
         case Poisoned(diagnostics=reported):
-            return PoisonedView(name=view.name, diagnostics=reported)
+            # Nested model names depend on the Relation, which is only partly known.
+            return PoisonedView(
+                name=view.name,
+                diagnostics=(*reported, *ViewModelNames.view_diagnostics(view.name)),
+            )
+    match ViewModelNames.check(view.name, relation):
+        case Ok(names):
+            return CompiledView(
+                name=view.name, source=view.source, relation=relation, names=names
+            )
+        case Err(error):
+            return PoisonedView(name=view.name, diagnostics=error.diagnostics)
 
 
 def _check_node(
@@ -167,7 +180,7 @@ def _check_rename(
                 view=view, renamed=node.field, field=node.new
             )
         )
-    reported.extend(_field_name_diagnostics(view, relation, node.new))
+    reported.extend(ViewModelNames.check_field(view, relation.source, node.new))
     if not reported:
         return relation.renamed(node.field, node.new)
     return Poisoned(
@@ -194,21 +207,6 @@ def _recovered_rename(node: ir.Rename, relation: ir.Relation) -> ir.Relation:
                 name=node.new, info=FieldInfo(), value=ir.SourceField(field=node.field)
             ),
         ),
-    )
-
-
-def _field_name_diagnostics(
-    view: ViewName, relation: ir.Relation, name: FieldName
-) -> tuple[diagnostics.CompileDiagnostic, ...]:
-    """Reports `name` unless a View model can have a field of that name."""
-    if (
-        isinstance(Identifier.of(name), Ok)
-        and not name.root.startswith("_")
-        and not hasattr(pydantic.BaseModel, name.root)
-    ):
-        return ()
-    return (
-        diagnostics.InvalidFieldName(view=view, source=relation.source, field=name),
     )
 
 
@@ -285,7 +283,7 @@ def _resolve_field(
             ),
         )
     if name != field.name and (
-        invalid := _field_name_diagnostics(view, relation, name)
+        invalid := ViewModelNames.check_field(view, relation.source, name)
     ):
         return _CheckedField(field=field, diagnostics=invalid)
     return _resolved(entity_graph, view, node, name, lookup)
