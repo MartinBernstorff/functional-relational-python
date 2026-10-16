@@ -28,6 +28,8 @@ tasks:
       - 'actionlint'
     options:
       runInCI: false
+      # format rewrites files, so the checks must not read them at the same time.
+      runDepsInParallel: false
 
   # Every check, without fixing. `moon ci` runs this and everything it depends on.
   full:
@@ -128,3 +130,5 @@ tasks:
       - '@group(sources)'
       - '@group(manifests)'
       - 'packages/functional-relational-python/MANIFEST.in'
+      - 'packages/functional-relational-python/README.md'
+      - 'packages/functional-relational-python/src/**/py.typed'

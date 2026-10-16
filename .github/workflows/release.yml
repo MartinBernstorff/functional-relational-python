@@ -22,7 +22,7 @@ jobs:
     # Under workflow_run, github.ref is always the default branch regardless of
     # what triggered the run, so head_branch is the only reliable guard.
     if: >-
-      github.event_name == 'workflow_dispatch'
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
       || (github.event.workflow_run.conclusion == 'success'
           && github.event.workflow_run.event == 'push'
           && github.event.workflow_run.head_branch == 'main')

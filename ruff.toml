@@ -43,7 +43,6 @@ select = [
 ignore = ["E501"]
 
 [lint.per-file-ignores]
-"**/test_*.py" = ["PLR2004"]
 # A Typer command's bool parameter is a CLI flag, not a boolean trap.
 "packages/*/src/*/cli.py" = ["FBT001", "FBT002"]
 

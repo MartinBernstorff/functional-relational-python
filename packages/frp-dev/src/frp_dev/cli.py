@@ -26,17 +26,29 @@ app = typer.Typer(
 class ShellCommand(RootModel[tuple[str, ...]]):
     model_config = ConfigDict(frozen=True)
 
+    @staticmethod
+    def fake() -> ShellCommand:
+        return ShellCommand(("true",))
+
     def run(self, checkout: Checkout) -> Result[None, ShellCommandFailedError]:
         logging.getLogger(__name__).info("$ %s", " ".join(self.root))
         completed = subprocess.run(self.root, cwd=checkout.root, check=False)
         if completed.returncode != 0:
-            return Err(ShellCommandFailedError(self, completed.returncode))
+            return Err(ShellCommandFailedError(self, ExitCode(completed.returncode)))
         return Ok(None)
 
 
+class ExitCode(RootModel[int]):
+    model_config = ConfigDict(frozen=True)
+
+    @staticmethod
+    def fake() -> ExitCode:
+        return ExitCode(1)
+
+
 class ShellCommandFailedError(Exception):
-    def __init__(self, command: ShellCommand, exit_code: int) -> None:
-        super().__init__(f"`{' '.join(command.root)}` exited with {exit_code}")
+    def __init__(self, command: ShellCommand, exit_code: ExitCode) -> None:
+        super().__init__(f"`{' '.join(command.root)}` exited with {exit_code.root}")
         self.command = command
 
 
