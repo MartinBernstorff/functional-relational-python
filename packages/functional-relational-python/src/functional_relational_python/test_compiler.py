@@ -145,9 +145,117 @@ def test_building_a_pipeline_checks_nothing() -> None:
     unknown = FieldName("does_not_exist")
     root = ir.FromSource(source=Company)
 
-    node = steps.pipeline(steps.omit(unknown))(root)
+    node = steps.pipeline(steps.omit(unknown), steps.rename(unknown, unknown))(root)
 
-    assert node == ir.Omit(input=root, field=unknown)
+    assert node == ir.Rename(
+        input=ir.Omit(input=root, field=unknown), field=unknown, new=unknown
+    )
+
+
+def test_rename_keeps_the_field_in_place_with_its_type() -> None:
+    view = compile_one(steps.rename(FieldName("secret"), FieldName("code")))
+
+    assert [(field.name, field.info) for field in view.relation.fields] == [
+        (FieldName("code") if name == "secret" else FieldName(name), info)
+        for name, info in Company.model_fields.items()
+    ]
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [FieldName("name"), FieldName("secret")],
+    ids=["other-field", "itself"],
+)
+def test_renaming_onto_an_existing_field_is_a_diagnostic(
+    existing: FieldName,
+) -> None:
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.rename(FieldName("secret"), existing),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.RenameOntoExistingField(
+            view=view.name,
+            renamed=FieldName("secret"),
+            field=existing,
+        ),
+    )
+
+
+def test_a_renamed_field_can_be_omitted_by_its_new_name() -> None:
+    new = FieldName("code")
+
+    view = compile_one(
+        steps.pipeline(steps.rename(FieldName("secret"), new), steps.omit(new))
+    )
+
+    assert field_names(view) == names(Text("name"), Text("revenue"))
+
+
+@pytest.mark.parametrize(
+    "later",
+    [
+        steps.omit(FieldName("code")),
+        steps.rename(FieldName("code"), FieldName("other")),
+    ],
+    ids=["omit", "rename"],
+)
+def test_renaming_an_unknown_field_is_one_diagnostic_even_if_later_steps_use_it(
+    later: steps.Step,
+) -> None:
+    unknown = FieldName("secrt")
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.pipeline(steps.rename(unknown, FieldName("code")), later),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.UnknownField(
+            view=view.name,
+            source=ir.SourceName("Company"),
+            field=unknown,
+            valid=tuple(map(FieldName, Company.model_fields)),
+        ),
+    )
+
+
+def test_renaming_an_unknown_field_onto_an_existing_one_reports_both() -> None:
+    unknown = FieldName("secrt")
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.rename(unknown, FieldName("name")),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.UnknownField(
+            view=view.name,
+            source=ir.SourceName("Company"),
+            field=unknown,
+            valid=tuple(map(FieldName, Company.model_fields)),
+        ),
+        diagnostics.RenameOntoExistingField(
+            view=view.name,
+            renamed=unknown,
+            field=FieldName("name"),
+        ),
+    )
+
+
+def test_the_rename_onto_existing_field_message_contains_the_offending_values() -> None:
+    message = diagnostics.RenameOntoExistingField(
+        view=ViewName("CompanySummary"),
+        renamed=FieldName("secret"),
+        field=FieldName("name"),
+    ).describe()
+
+    assert message.root == (
+        "CompanySummary: cannot rename 'secret' to 'name', because the View "
+        "already has a field 'name'."
+    )
 
 
 # The prefix keeps these from ever being a field of `Company` or `Wide`.

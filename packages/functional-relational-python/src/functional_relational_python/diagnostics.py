@@ -21,4 +21,19 @@ class UnknownField(pydantic.BaseModel, frozen=True):
         )
 
 
-type Diagnostic = UnknownField
+class RenameOntoExistingField(pydantic.BaseModel, frozen=True):
+    """A rename's new name is a field the relation already has at that point."""
+
+    view: ViewName
+    renamed: FieldName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot rename '{self.renamed.root}' to "
+            f"'{self.field.root}', because the View already has a field "
+            f"'{self.field.root}'."
+        )
+
+
+type Diagnostic = UnknownField | RenameOntoExistingField

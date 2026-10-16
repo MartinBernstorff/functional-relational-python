@@ -24,6 +24,11 @@ class ViewRow(pydantic.RootModel[Mapping[FieldName, object]], frozen=True):
     def fake() -> ViewRow:
         return ViewRow({FieldName.fake(): ViewName.fake()})
 
+    def renamed(self, old: FieldName, new: FieldName) -> ViewRow:
+        return ViewRow(
+            {new if name == old else name: value for name, value in self.root.items()}
+        )
+
     def without(self, field: FieldName) -> ViewRow:
         return ViewRow(
             {name: value for name, value in self.root.items() if name != field}
@@ -83,3 +88,7 @@ class InMemoryViewEngine:
                 return tuple(self._entities.get(node.source, {}).values())
             case ir.Omit():
                 return tuple(row.without(node.field) for row in self._run(node.input))
+            case ir.Rename():
+                return tuple(
+                    row.renamed(node.field, node.new) for row in self._run(node.input)
+                )

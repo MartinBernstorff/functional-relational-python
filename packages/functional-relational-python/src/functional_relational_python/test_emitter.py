@@ -59,6 +59,11 @@ class CompanyName(pydantic.BaseModel, frozen=True):
     name: Text
 
 
+class CompanyTitle(pydantic.BaseModel, frozen=True):
+    id: CompanyId
+    title: Text
+
+
 def empty_graph() -> EntityGraph:
     return EntityGraph.build([]).unwrap()
 
@@ -106,6 +111,14 @@ def test_the_emitted_module_matches_the_golden_file() -> None:
             source=Company,
             step=steps.pipeline(
                 steps.omit(FieldName("secret")), steps.omit(FieldName("id"))
+            ),
+        ),
+        View(
+            name=ViewName("CompanyTitle"),
+            source=Company,
+            step=steps.pipeline(
+                steps.omit(FieldName("secret")),
+                steps.rename(FieldName("name"), FieldName("title")),
             ),
         ),
     ]
@@ -271,22 +284,39 @@ class DifferentialCase(pydantic.BaseModel, frozen=True):
 
 
 @st.composite
+def pipelines(draw: st.DrawFn, source: type[pydantic.BaseModel]) -> steps.Step:
+    """A valid pipeline of omits and renames over `source`.
+
+    Each rename gets a name no field has, so it never collides.
+    """
+    fields = list(map(FieldName, source.model_fields))
+    drawn: list[steps.Step] = []
+    for index in range(draw(st.integers(min_value=0, max_value=len(fields)))):
+        field = draw(st.sampled_from(fields))
+        if draw(st.booleans()):
+            fields.remove(field)
+            drawn.append(steps.omit(field))
+        else:
+            new = FieldName(f"renamed_{index}")
+            fields[fields.index(field)] = new
+            drawn.append(steps.rename(field, new))
+    return steps.pipeline(*drawn)
+
+
+@st.composite
 def differential_cases(draw: st.DrawFn) -> DifferentialCase:
-    """Views over a pool of Sources, each omitting a random subset of fields.
+    """Views over a pool of Sources, each with a random pipeline.
 
     IDs are distinct per Source, so no Entity replaces another in the engine.
     """
     views: list[View] = []
     for index in range(draw(st.integers(min_value=1, max_value=4))):
         source = draw(st.sampled_from([Company, Wide]))
-        omitted = draw(
-            st.lists(st.sampled_from(list(source.model_fields)), unique=True)
-        )
         views.append(
             View(
                 name=ViewName(f"View{index}"),
                 source=source,
-                step=steps.pipeline(*(steps.omit(FieldName(f)) for f in omitted)),
+                step=draw(pipelines(source)),
             )
         )
     return DifferentialCase(

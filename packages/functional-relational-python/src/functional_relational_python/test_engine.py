@@ -86,6 +86,22 @@ def test_a_view_returns_each_entity_without_the_omitted_fields(
     )
 
 
+def test_a_renamed_field_keeps_its_value_and_position_under_the_new_name() -> None:
+    new = FieldName("title")
+    view = view_of(steps.rename(FieldName("name"), new))
+    view_engine = make_engine(view)
+    company = Company.fake(CompanyId.fake())
+    view_engine.put(company).unwrap()
+
+    assert [list(row.root.items()) for row in read(view_engine, view.name)] == [
+        [
+            (FieldName("id"), company.id),
+            (new, company.name),
+            (FieldName("secret"), company.secret),
+        ]
+    ]
+
+
 def test_put_replaces_the_entity_with_the_same_id() -> None:
     view = view_of(steps.pipeline())
     view_engine = make_engine(view)

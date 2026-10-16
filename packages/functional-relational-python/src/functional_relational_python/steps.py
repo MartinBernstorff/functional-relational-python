@@ -19,6 +19,13 @@ def omit(field: ir.FieldName) -> Step:
     return step
 
 
+def rename(field: ir.FieldName, new: ir.FieldName) -> Step:
+    def step(node: ir.Node) -> ir.Node:
+        return ir.Rename(input=node, field=field, new=new)
+
+    return step
+
+
 def pipeline(*steps: Step) -> Step:
     """Applies `steps` left to right. An empty pipeline is the identity."""
 

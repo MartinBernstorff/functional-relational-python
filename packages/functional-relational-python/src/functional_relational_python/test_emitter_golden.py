@@ -28,3 +28,12 @@ def company_name(
     return functional_relational_python.test_emitter.CompanyName(
         name=source.name,
     )
+
+
+def company_title(
+    source: functional_relational_python.test_emitter.Company,
+) -> functional_relational_python.test_emitter.CompanyTitle:
+    return functional_relational_python.test_emitter.CompanyTitle(
+        id=source.id,
+        title=source.name,
+    )

@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from typing import Annotated
 
 import pydantic
+from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
 from functional_relational_python import diagnostics, ir
@@ -102,6 +103,12 @@ def _check_node(view: ViewName, node: ir.Node) -> ir.Relation | Poisoned:
                     return _check_omit(view, node, relation)
                 case Poisoned(recovered=recovered, diagnostics=earlier):
                     return _poison(_check_omit(view, node, recovered), earlier)
+        case ir.Rename():
+            match _check_node(view, node.input):
+                case ir.Relation() as relation:
+                    return _check_rename(view, node, relation)
+                case Poisoned(recovered=recovered, diagnostics=earlier):
+                    return _poison(_check_rename(view, node, recovered), earlier)
 
 
 def _check_omit(
@@ -122,6 +129,38 @@ def _check_omit(
             ),
         ),
     )
+
+
+def _check_rename(
+    view: ViewName, node: ir.Rename, relation: ir.Relation
+) -> ir.Relation | Poisoned:
+    names = relation.field_names()
+    reported: list[diagnostics.Diagnostic] = []
+    if node.field not in names:
+        reported.append(
+            diagnostics.UnknownField(
+                view=view, source=relation.source, field=node.field, valid=names
+            )
+        )
+    if node.new in names:
+        reported.append(
+            diagnostics.RenameOntoExistingField(
+                view=view, renamed=node.field, field=node.new
+            )
+        )
+    if not reported:
+        return relation.renamed(node.field, node.new)
+    # Later steps may use the new name, so the recovered relation has it either
+    # way: the existing field if there is one, else a field of unknown type.
+    recovered = (
+        relation.without(node.field)
+        if node.new in names
+        else ir.Relation(
+            source=relation.source,
+            fields=(*relation.fields, ir.Field(name=node.new, info=FieldInfo())),
+        )
+    )
+    return Poisoned(recovered=recovered, diagnostics=tuple(reported))
 
 
 def _poison(

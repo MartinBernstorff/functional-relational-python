@@ -193,7 +193,7 @@ class PythonEmitter:
         match node:
             case ir.FromSource():
                 return node.source
-            case ir.Omit():
+            case ir.Omit() | ir.Rename():
                 return PythonEmitter.source(node.input)
 
     @staticmethod
@@ -217,6 +217,13 @@ class PythonEmitter:
                     assignment
                     for assignment in PythonEmitter.assignments(node.input)
                     if assignment.field != node.field
+                )
+            case ir.Rename():
+                return tuple(
+                    Assignment(field=node.new, value=assignment.value)
+                    if assignment.field == node.field
+                    else assignment
+                    for assignment in PythonEmitter.assignments(node.input)
                 )
 
     @staticmethod

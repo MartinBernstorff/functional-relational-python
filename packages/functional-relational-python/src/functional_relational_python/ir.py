@@ -33,7 +33,13 @@ class Omit(pydantic.BaseModel, frozen=True):
     field: FieldName
 
 
-type Node = FromSource | Omit
+class Rename(pydantic.BaseModel, frozen=True):
+    input: Node
+    field: FieldName
+    new: FieldName
+
+
+type Node = FromSource | Omit | Rename
 
 
 class Field(pydantic.BaseModel, frozen=True):
@@ -61,6 +67,16 @@ class Relation(pydantic.BaseModel, frozen=True):
 
     def field_names(self) -> tuple[FieldName, ...]:
         return tuple(field.name for field in self.fields)
+
+    def renamed(self, old: FieldName, new: FieldName) -> Relation:
+        """Renames `old` to `new` in place, keeping its type."""
+        return Relation(
+            source=self.source,
+            fields=tuple(
+                Field(name=new, info=field.info) if field.name == old else field
+                for field in self.fields
+            ),
+        )
 
     def without(self, name: FieldName) -> Relation:
         return Relation(
