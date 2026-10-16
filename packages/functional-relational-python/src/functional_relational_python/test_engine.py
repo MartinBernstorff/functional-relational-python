@@ -86,6 +86,17 @@ def test_a_view_returns_each_entity_without_the_omitted_fields(
     )
 
 
+def test_a_projected_view_returns_each_entity_with_only_the_listed_fields() -> None:
+    view = view_of(steps.project([FieldName("name")]))
+    view_engine = make_engine(view)
+    company = Company.fake(CompanyId.fake())
+    view_engine.put(company).unwrap()
+
+    assert read(view_engine, view.name) == (
+        engine.ViewRow({FieldName("name"): company.name}),
+    )
+
+
 def test_put_replaces_the_entity_with_the_same_id() -> None:
     view = view_of(steps.pipeline())
     view_engine = make_engine(view)

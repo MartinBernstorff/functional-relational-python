@@ -59,6 +59,10 @@ class CompanyName(pydantic.BaseModel, frozen=True):
     name: Text
 
 
+class CompanySecret(pydantic.BaseModel, frozen=True):
+    secret: Text
+
+
 def empty_graph() -> EntityGraph:
     return EntityGraph.build([]).unwrap()
 
@@ -107,6 +111,11 @@ def test_the_emitted_module_matches_the_golden_file() -> None:
             step=steps.pipeline(
                 steps.omit(FieldName("secret")), steps.omit(FieldName("id"))
             ),
+        ),
+        View(
+            name=ViewName("CompanySecret"),
+            source=Company,
+            step=steps.project([FieldName("secret")]),
         ),
     ]
 
@@ -272,21 +281,30 @@ class DifferentialCase(pydantic.BaseModel, frozen=True):
 
 @st.composite
 def differential_cases(draw: st.DrawFn) -> DifferentialCase:
-    """Views over a pool of Sources, each omitting a random subset of fields.
+    """Views over a pool of Sources, each omitting and projecting random fields.
 
     IDs are distinct per Source, so no Entity replaces another in the engine.
     """
     views: list[View] = []
     for index in range(draw(st.integers(min_value=1, max_value=4))):
         source = draw(st.sampled_from([Company, Wide]))
-        omitted = draw(
-            st.lists(st.sampled_from(list(source.model_fields)), unique=True)
+        fields = list(map(FieldName, source.model_fields))
+        omitted = draw(st.lists(st.sampled_from(fields), unique=True))
+        kept = [field for field in fields if field not in omitted]
+        # `project` may only name fields the omits kept.
+        projected = draw(
+            st.none() | st.lists(st.sampled_from(kept), unique=True)
+            if kept
+            else st.none()
         )
         views.append(
             View(
                 name=ViewName(f"View{index}"),
                 source=source,
-                step=steps.pipeline(*(steps.omit(FieldName(f)) for f in omitted)),
+                step=steps.pipeline(
+                    *map(steps.omit, omitted),
+                    *([] if projected is None else [steps.project(projected)]),
+                ),
             )
         )
     return DifferentialCase(
