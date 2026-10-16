@@ -167,7 +167,8 @@ def _check_rename(
                 view=view, source=relation.source, field=node.field, valid=names
             )
         )
-    if node.new in names:
+    # Renaming a field to its own name changes nothing, so it is no defect.
+    if node.new in names and node.new != node.field:
         reported.append(
             diagnostics.RenameOntoExistingField(
                 view=view, renamed=node.field, field=node.new

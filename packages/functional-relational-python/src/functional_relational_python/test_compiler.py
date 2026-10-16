@@ -226,14 +226,8 @@ def test_rename_keeps_the_field_in_place_with_its_type() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "existing",
-    [FieldName("name"), FieldName("secret")],
-    ids=["other-field", "itself"],
-)
-def test_renaming_onto_an_existing_field_is_a_diagnostic(
-    existing: FieldName,
-) -> None:
+def test_renaming_onto_an_existing_field_is_a_diagnostic() -> None:
+    existing = FieldName("name")
     view = View(
         name=ViewName.fake(),
         source=Company,
@@ -247,6 +241,14 @@ def test_renaming_onto_an_existing_field_is_a_diagnostic(
             field=existing,
         ),
     )
+
+
+def test_renaming_a_field_to_its_own_name_changes_nothing() -> None:
+    field = FieldName("secret")
+
+    view = compile_one(steps.pipeline(steps.rename(field, field), steps.omit(field)))
+
+    assert field_names(view) == names(Text("name"), Text("revenue"))
 
 
 def test_a_renamed_field_can_be_omitted_by_its_new_name() -> None:
