@@ -10,11 +10,13 @@ from safe_result import Err, Ok, Result
 from functional_relational_python.compiler import compiler
 from functional_relational_python.domain.entity_graph import EntityGraph
 from functional_relational_python.language.views import View
-from functional_relational_python.outputs.codegen import (
-    Codegen,
+from functional_relational_python.outputs.python.models import ModelsRenderer
+from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
-    ModulePath,
+    PythonLayout,
+    PythonPlan,
 )
+from functional_relational_python.outputs.python.symbols import ModulePath
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticsError,
@@ -50,7 +52,12 @@ class ViewCatalog(pydantic.BaseModel, frozen=True):
             case Err(compile_error):
                 return Err(compile_error)
             case Ok(compiled):
-                return Codegen.generate(compiled, self.layout)
+                pass
+        match PythonPlan.of(compiled, PythonLayout.models_only(self.layout)):
+            case Err(plan_error):
+                return Err(plan_error)
+            case Ok(plan):
+                return Ok(ModelsRenderer.render(plan))
 
 
 class ImportPath(pydantic.RootModel[str], frozen=True):
