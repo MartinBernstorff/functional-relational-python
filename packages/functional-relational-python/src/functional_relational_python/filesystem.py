@@ -58,6 +58,17 @@ class FileSystem(abc.ABC):
     def exists(self, path: FilePath) -> bool:
         """Whether a file or directory exists at `path`."""
 
+    @abc.abstractmethod
+    def delete(self, path: FilePath) -> None:
+        """Deletes the file at `path`, if there is one."""
+
+    @abc.abstractmethod
+    def python_files(self, directory: Directory) -> tuple[FilePath, ...]:
+        """Every `.py` file under `directory`, in path order.
+
+        Hidden directories, such as `.venv` and `.git`, are skipped.
+        """
+
 
 class LocalFileSystem(FileSystem):
     def read(self, path: FilePath) -> Result[FileText, FileMissingError]:
@@ -72,6 +83,18 @@ class LocalFileSystem(FileSystem):
 
     def exists(self, path: FilePath) -> bool:
         return path.root.exists()
+
+    def delete(self, path: FilePath) -> None:
+        path.root.unlink(missing_ok=True)
+
+    def python_files(self, directory: Directory) -> tuple[FilePath, ...]:
+        found: list[FilePath] = []
+        for root, directories, files in directory.root.walk():
+            directories[:] = [name for name in directories if not name.startswith(".")]
+            found.extend(
+                FilePath(root / name) for name in files if name.endswith(".py")
+            )
+        return tuple(sorted(found, key=lambda path: path.root))
 
 
 class InMemoryFileSystem(FileSystem):
@@ -91,4 +114,24 @@ class InMemoryFileSystem(FileSystem):
     def exists(self, path: FilePath) -> bool:
         return path in self.files or any(
             path.root in file.root.parents for file in self.files
+        )
+
+    def delete(self, path: FilePath) -> None:
+        _ = self.files.pop(path, None)
+
+    def python_files(self, directory: Directory) -> tuple[FilePath, ...]:
+        return tuple(
+            sorted(
+                (
+                    path
+                    for path in self.files
+                    if path.root.is_relative_to(directory.root)
+                    and path.root.suffix == ".py"
+                    and not any(
+                        part.startswith(".")
+                        for part in path.root.relative_to(directory.root).parent.parts
+                    )
+                ),
+                key=lambda path: path.root,
+            )
         )

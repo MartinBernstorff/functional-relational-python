@@ -93,3 +93,29 @@ def test_missing_and_outdated_files_are_all_stale() -> None:
                 ),
                 StaleFile(path=output.file(missing.path), staleness=Staleness.MISSING),
             )
+
+
+def test_check_reports_a_generated_file_that_is_no_longer_generated() -> None:
+    filesystem, output, files = InMemoryFileSystem(), Directory.fake(), two_files()
+    files.write(filesystem, output).unwrap()
+    kept, removed = files.files
+
+    match GeneratedFiles(files=(kept,)).check(filesystem, output):
+        case Ok(_):
+            pytest.fail("expected stale files")
+        case Err(error):
+            assert error.stale == (
+                StaleFile(path=output.file(removed.path), staleness=Staleness.LEFTOVER),
+            )
+
+
+def test_write_deletes_generated_files_that_are_no_longer_generated() -> None:
+    filesystem, output, files = InMemoryFileSystem(), Directory.fake(), two_files()
+    files.write(filesystem, output).unwrap()
+    users_own = output.file(RelativePath(PurePosixPath("app/models.py")))
+    filesystem.write(users_own, FileText.fake())
+    kept, _ = files.files
+
+    GeneratedFiles(files=(kept,)).write(filesystem, output).unwrap()
+
+    assert set(filesystem.files) == {output.file(kept.path), users_own}

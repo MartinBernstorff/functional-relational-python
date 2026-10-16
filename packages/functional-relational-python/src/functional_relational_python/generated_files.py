@@ -23,6 +23,7 @@ class GeneratedFile(pydantic.BaseModel, frozen=True):
 class Staleness(enum.StrEnum):
     MISSING = "missing"
     OUTDATED = "outdated"
+    LEFTOVER = "no longer generated"
 
 
 class StaleFile(pydantic.BaseModel, frozen=True):
@@ -75,7 +76,11 @@ class GeneratedFiles(pydantic.BaseModel, frozen=True):
     def write(
         self, filesystem: FileSystem, output: Directory
     ) -> Result[None, NotGeneratedFilesError]:
-        """Writes every file, unless that would overwrite a file not generated."""
+        """Writes every file, unless that would overwrite a file not generated.
+
+        Generated files that are no longer generated, e.g. those of a removed View,
+        are deleted.
+        """
         not_generated: list[FilePath] = []
         for file in self.files:
             path = output.file(file.path)
@@ -86,9 +91,27 @@ class GeneratedFiles(pydantic.BaseModel, frozen=True):
                     pass
         if not_generated:
             return Err(NotGeneratedFilesError(tuple(not_generated)))
+        for path in self.leftovers(filesystem, output):
+            filesystem.delete(path)
         for file in self.files:
             filesystem.write(output.file(file.path), file.text)
         return Ok(None)
+
+    def leftovers(
+        self, filesystem: FileSystem, output: Directory
+    ) -> tuple[FilePath, ...]:
+        """Generated files under `output` that are not among these files."""
+        expected = {output.file(file.path) for file in self.files}
+        leftovers: list[FilePath] = []
+        for path in filesystem.python_files(output):
+            if path in expected:
+                continue
+            match filesystem.read(path):
+                case Ok(text) if GeneratedFiles.is_generated(text):
+                    leftovers.append(path)
+                case Ok(_) | Err(_):
+                    pass
+        return tuple(leftovers)
 
     @staticmethod
     def is_generated(text: FileText) -> bool:
@@ -97,7 +120,8 @@ class GeneratedFiles(pydantic.BaseModel, frozen=True):
     def check(
         self, filesystem: FileSystem, output: Directory
     ) -> Result[None, StaleFilesError]:
-        """Ok when every file on disk matches what would be generated."""
+        """Ok when every file on disk matches what would be generated, and no
+        generated file is left over from an earlier generation."""
         stale: list[StaleFile] = []
         for file in self.files:
             path = output.file(file.path)
@@ -108,6 +132,10 @@ class GeneratedFiles(pydantic.BaseModel, frozen=True):
                     stale.append(StaleFile(path=path, staleness=Staleness.OUTDATED))
                 case Err(_):
                     stale.append(StaleFile(path=path, staleness=Staleness.MISSING))
+        stale.extend(
+            StaleFile(path=path, staleness=Staleness.LEFTOVER)
+            for path in self.leftovers(filesystem, output)
+        )
         if stale:
             return Err(StaleFilesError(tuple(stale)))
         return Ok(None)
