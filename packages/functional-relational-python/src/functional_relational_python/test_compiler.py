@@ -553,6 +553,45 @@ def test_resolve_leaves_unselected_references_alone() -> None:
     )
 
 
+def department_lookup() -> ir.Lookup:
+    """How an Employee's `department_id` is resolved."""
+    return ir.Lookup(
+        reference=ir.SourceField(field=FieldName("department_id")),
+        id_type=DepartmentId,
+        target=Department,
+        optionality=Optionality.REQUIRED,
+    )
+
+
+def test_hydrate_leaves_a_renamed_primary_key_alone() -> None:
+    view = compile_resolving(
+        Employee,
+        steps.pipeline(
+            steps.project([FieldName("id"), FieldName("department_id")]),
+            steps.rename(FieldName("id"), FieldName("key")),
+            steps.hydrate(),
+        ),
+    )
+
+    assert values(view) == {
+        FieldName("key"): ir.SourceField(field=FieldName("id")),
+        FieldName("department"): department_lookup(),
+    }
+
+
+def test_hydrate_resolves_a_reference_renamed_to_id() -> None:
+    view = compile_resolving(
+        Employee,
+        steps.pipeline(
+            steps.project([FieldName("department_id")]),
+            steps.rename(FieldName("department_id"), FieldName("id")),
+            steps.hydrate(),
+        ),
+    )
+
+    assert values(view) == {FieldName("id"): department_lookup()}
+
+
 def test_a_nested_pipeline_types_the_field_by_its_relation() -> None:
     view = compile_resolving(
         Employee,

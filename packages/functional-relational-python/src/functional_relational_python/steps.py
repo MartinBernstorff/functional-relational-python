@@ -47,11 +47,13 @@ def select(predicate: ir.FieldPredicate) -> ir.Select:
 def is_reference(field: ir.RelationField) -> bool:
     """Whether `field` is a Reference: typed `X` or `X | None` for an Id `X`.
 
-    The primary key `id` is not a Reference.
+    The primary key is not a Reference, under whatever name it has been renamed to.
+    It is told apart by where its value comes from, the subject's `id` field.
     """
     match field:
-        case ir.Field(name=name, info=info):
-            return name != FieldName("id") and isinstance(IdAnnotation.of(info), Ok)
+        case ir.Field(info=info, value=value):
+            primary_key = ir.SourceField(field=FieldName("id"))
+            return value != primary_key and isinstance(IdAnnotation.of(info), Ok)
         case ir.NestedField():
             return False
 
