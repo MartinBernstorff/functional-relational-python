@@ -16,7 +16,8 @@ from functional_relational_python.compiler import diagnostics
 from functional_relational_python.domain.entity_graph import (
     EntityGraph,
     FieldName,
-    IdAnnotation,
+    NoEntityError,
+    NotAReferenceError,
 )
 from functional_relational_python.language import ir
 from functional_relational_python.language.views import View, ViewName
@@ -315,17 +316,24 @@ def _lookup(
         ),
     )
     match field:
-        case ir.Field(info=info, value=ir.SourceField() as reference):
+        case ir.Field(info=info, value=ir.SourceField(field=source)):
             pass
         case ir.Field() | ir.NestedField():
             return not_a_reference
-    match IdAnnotation.of(info):
-        case Err():
-            return not_a_reference
-        case Ok(annotation):
+    match entity_graph.reference_of(source, info):
+        case Ok(reference):
+            return ir.Lookup(
+                reference=ir.SourceField(field=reference.field),
+                id_type=reference.id_type,
+                target=reference.target,
+                optionality=reference.optionality,
+            )
+        case Err(error):
             pass
-    match entity_graph.entity_keyed_by(annotation.id_type):
-        case Err():
+    match error:
+        case NotAReferenceError():
+            return not_a_reference
+        case NoEntityError(id_type=id_type):
             return _CheckedField(
                 field=field,
                 diagnostics=(
@@ -333,16 +341,9 @@ def _lookup(
                         view=view,
                         source=relation.source,
                         field=field.name,
-                        id_type=annotation.id_type,
+                        id_type=id_type,
                     ),
                 ),
-            )
-        case Ok(target):
-            return ir.Lookup(
-                reference=reference,
-                id_type=annotation.id_type,
-                target=target,
-                optionality=annotation.optionality,
             )
 
 
