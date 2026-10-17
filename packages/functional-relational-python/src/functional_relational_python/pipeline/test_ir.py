@@ -4,9 +4,12 @@ from collections.abc import Mapping
 import pydantic
 import pytest
 
-from functional_relational_python.domain.entity_graph import FieldName, Optionality
-from functional_relational_python.domain.id import Id
-from functional_relational_python.language import ir
+from functional_relational_python.entity_graph.entity_graph import (
+    FieldName,
+    Optionality,
+)
+from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.pipeline import ir
 
 
 class Text(pydantic.RootModel[str], frozen=True):

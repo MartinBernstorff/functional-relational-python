@@ -16,8 +16,7 @@ from collections.abc import Callable, Sequence
 
 import pydantic
 
-from functional_relational_python.domain.entity_graph import Optionality
-from functional_relational_python.language import ir
+from functional_relational_python.entity_graph.entity_graph import Optionality
 from functional_relational_python.outputs.python.plan import (
     FunctionPlan,
     ModelPlan,
@@ -27,6 +26,7 @@ from functional_relational_python.outputs.python.symbols import (
     LineLength,
     ModulePath,
 )
+from functional_relational_python.pipeline import ir
 from functional_relational_python.support.filesystem import FileText
 from functional_relational_python.support.generated_files import (
     GeneratedFile,

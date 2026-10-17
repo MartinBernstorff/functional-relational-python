@@ -14,14 +14,14 @@ from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import diagnostics
 from functional_relational_python.compiler.model_names import ViewModelNames
-from functional_relational_python.domain.entity_graph import (
+from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
     NoEntityError,
     NotAReferenceError,
 )
-from functional_relational_python.language import ir
-from functional_relational_python.language.views import View, ViewName
+from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
 type Diagnostics = Annotated[

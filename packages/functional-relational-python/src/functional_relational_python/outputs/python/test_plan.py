@@ -5,10 +5,11 @@ import pytest
 from safe_result import Err, Ok
 
 from functional_relational_python.compiler import compiler
-from functional_relational_python.domain.entity_graph import EntityGraph, FieldName
-from functional_relational_python.domain.id import Id
-from functional_relational_python.language import steps
-from functional_relational_python.language.views import View, ViewName
+from functional_relational_python.entity_graph.entity_graph import (
+    EntityGraph,
+    FieldName,
+)
+from functional_relational_python.entity_graph.id import Id
 from functional_relational_python.outputs.python.plan import (
     FunctionPlan,
     GeneratedIntoDefiningModule,
@@ -41,6 +42,8 @@ from functional_relational_python.outputs.python.test_mappings import (
     named,
 )
 from functional_relational_python.outputs.python.test_models import WithUnsupported
+from functional_relational_python.pipeline import steps
+from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.identifier import Identifier
 
 

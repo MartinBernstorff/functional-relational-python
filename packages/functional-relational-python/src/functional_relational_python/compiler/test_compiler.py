@@ -8,14 +8,14 @@ from hypothesis import strategies as st
 from safe_result import Err, Ok
 
 from functional_relational_python.compiler import compiler, diagnostics
-from functional_relational_python.domain.entity_graph import (
+from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
     Optionality,
 )
-from functional_relational_python.domain.id import Id, IdType
-from functional_relational_python.language import ir, steps, test_ir
-from functional_relational_python.language.views import View, ViewName
+from functional_relational_python.entity_graph.id import Id, IdType
+from functional_relational_python.pipeline import ir, steps, test_ir
+from functional_relational_python.pipeline.views import View, ViewName
 
 
 class Text(pydantic.RootModel[str], frozen=True):

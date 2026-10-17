@@ -14,10 +14,11 @@ from safe_result import Err, Ok
 
 from functional_relational_python.compiler import compiler
 from functional_relational_python.compiler.test_compiler import Depth, pipelines
-from functional_relational_python.domain.entity_graph import EntityGraph, FieldName
-from functional_relational_python.domain.id import Id
-from functional_relational_python.language import ir, steps
-from functional_relational_python.language.views import View, ViewName
+from functional_relational_python.entity_graph.entity_graph import (
+    EntityGraph,
+    FieldName,
+)
+from functional_relational_python.entity_graph.id import Id
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.python.mappings import MappingsRenderer
 from functional_relational_python.outputs.python.models import ModelsRenderer
@@ -28,6 +29,8 @@ from functional_relational_python.outputs.python.plan import (
 )
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import ModulePath
+from functional_relational_python.pipeline import ir, steps
+from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.filesystem import (
     Directory,
     FileText,

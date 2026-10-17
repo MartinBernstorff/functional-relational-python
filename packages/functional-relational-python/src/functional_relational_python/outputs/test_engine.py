@@ -5,11 +5,14 @@ from hypothesis import strategies as st
 from safe_result import Err, Ok
 
 from functional_relational_python.compiler import compiler, test_compiler
-from functional_relational_python.domain.entity_graph import EntityGraph, FieldName
-from functional_relational_python.domain.id import Id
-from functional_relational_python.language import ir, steps
-from functional_relational_python.language.views import View, ViewName
+from functional_relational_python.entity_graph.entity_graph import (
+    EntityGraph,
+    FieldName,
+)
+from functional_relational_python.entity_graph.id import Id
 from functional_relational_python.outputs import engine
+from functional_relational_python.pipeline import ir, steps
+from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
 

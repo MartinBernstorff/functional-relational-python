@@ -19,15 +19,15 @@ from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
 from functional_relational_python.compiler.model_names import ModelNames, PascalCase
-from functional_relational_python.domain.entity_graph import FieldName
-from functional_relational_python.language import ir
-from functional_relational_python.language.views import ViewName
+from functional_relational_python.entity_graph.entity_graph import FieldName
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     ModulePath,
     Symbol,
     TypeExpression,
 )
+from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,

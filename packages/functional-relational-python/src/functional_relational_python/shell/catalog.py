@@ -8,8 +8,7 @@ import pydantic
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
-from functional_relational_python.domain.entity_graph import EntityGraph
-from functional_relational_python.language.views import View
+from functional_relational_python.entity_graph.entity_graph import EntityGraph
 from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
     PythonLayout,
@@ -17,6 +16,7 @@ from functional_relational_python.outputs.python.plan import (
 )
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import ModulePath
+from functional_relational_python.pipeline.views import View
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticsError,

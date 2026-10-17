@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, RootModel
 from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.domain.id import Id, IdType
+from functional_relational_python.entity_graph.id import Id, IdType
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,

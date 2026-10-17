@@ -9,7 +9,7 @@ from typing import Annotated
 import pydantic
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.language import ir
+from functional_relational_python.pipeline import ir
 from functional_relational_python.support.filesystem import RelativePath
 from functional_relational_python.support.identifier import Identifier
 

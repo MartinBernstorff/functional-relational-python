@@ -1,12 +1,12 @@
 import pydantic
 
 from functional_relational_python.compiler import model_names
-from functional_relational_python.domain.entity_graph import (
+from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
 )
-from functional_relational_python.domain.id import IdType
-from functional_relational_python.language import ir
-from functional_relational_python.language.views import ViewName
+from functional_relational_python.entity_graph.id import IdType
+from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,

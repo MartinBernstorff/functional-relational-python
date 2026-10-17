@@ -13,10 +13,13 @@ from functional_relational_python.compiler.model_names import (
     ModelNames,
     ViewModelNames,
 )
-from functional_relational_python.domain.entity_graph import EntityGraph, FieldName
-from functional_relational_python.domain.id import Id
-from functional_relational_python.language import ir, steps
-from functional_relational_python.language.views import View, ViewName
+from functional_relational_python.entity_graph.entity_graph import (
+    EntityGraph,
+    FieldName,
+)
+from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.pipeline import ir, steps
+from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticMessage
 
 

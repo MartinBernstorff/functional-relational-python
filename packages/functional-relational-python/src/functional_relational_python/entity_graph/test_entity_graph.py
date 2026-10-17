@@ -5,8 +5,8 @@ import pytest
 from pydantic import BaseModel, RootModel
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.domain import entity_graph
-from functional_relational_python.domain.id import Id
+from functional_relational_python.entity_graph import entity_graph
+from functional_relational_python.entity_graph.id import Id
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
 
