@@ -15,8 +15,8 @@ class DocsSource(RootModel[Path]):
         return DocsSource(
             home.root
             / "Git"
-            / "functional-relational-python-docs"
-            / "functional-relational-python-docs"
+            / "personal-projects-docs"
+            / "functional-relational-python"
         )
 
     @staticmethod

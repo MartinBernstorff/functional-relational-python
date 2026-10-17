@@ -19,7 +19,7 @@ dependencies = [
 Repository = "https://github.com/MartinBernstorff/functional-relational-python"
 
 [project.scripts]
-frp = "functional_relational_python.cli:app"
+frp = "functional_relational_python.shell.cli:app"
 
 [build-system]
 requires = ["setuptools>=80", "setuptools-scm>=9"]
