@@ -13,31 +13,9 @@ A uv workspace with two members:
 
 The library never imports `frp_dev`; `tach` enforces this.
 
-## Setup
-
-A fresh clone or worktree needs `uv` and [proto](https://moonrepo.dev/docs/proto/install). Then:
-
-```
-uv run frp-dev setup      # proto install, uv sync, lefthook install, symlink docs/
-uv run frp-dev teardown   # removes the docs/ symlink before deleting a worktree
-```
-
-Orca runs both automatically (`orca.yaml`). `setup` symlinks the docs folder in as
-`docs/` (gitignored). It reads the docs folder from `$FRP_DOCS_SOURCE`, falling back to
-`~/Git/functional-relational-python-docs/functional-relational-python-docs`.
-
 ## Python
 
 Follow the conventions in `CODE-CONVENTIONS.md`, referenced by ID (e.g. TE-9c).
-
-- **No `tests/` folder.** Tests live next to the code they test, as `test_<module>.py`. They are excluded from the published distribution (`MANIFEST.in`), which `moon run :smoke` checks.
-- **Never use primitives as function parameters, fields or return types.** Wrap them in a Pydantic `RootModel`. Enforced by `moon run :noprim`. The only exemption is `bool` options on Typer commands.
-- **Return errors as values** with [safe-result](https://github.com/overflowy/safe-result). The CLI turns an error into a message and a non-zero exit.
-
-## CLIs
-
-- Built with Typer. Every CLI takes `--quiet`, which sets the log level.
-- Secrets come from environment variables or `~/.config/<app>/`. Developer config lives in `~/.config/<app>/`. Project config is found by searching from `$PWD` upward, stopping at the directory containing `.git`.
 
 ## Moon
 
@@ -58,12 +36,6 @@ Always run tasks through moon, never the tool directly: `moon run :test`, not `p
 | `moon run :smoke` | builds the library's sdist and wheel, checks no tests ship, installs it into a clean venv |
 
 A task's `inputs` must include every file it reads. Otherwise moon replays a stale cached result.
-
-## Tooling
-
-- Tool settings live in each tool's own file (`ruff.toml`, `pyrefly.toml`, `tach.toml`, `pytest.toml`, `noprim.toml`, `releaserc.toml`), not in `pyproject.toml`.
-- Commits are checked by lefthook pre-commit hooks (`lefthook.yml`), which run `moon run :phase-1`.
-- Renovate opens and auto-merges dependency updates on weekday mornings.
 
 ## Workflow
 
