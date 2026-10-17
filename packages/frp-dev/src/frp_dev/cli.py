@@ -70,7 +70,7 @@ def setup() -> None:
     Installs the pinned toolchain (moon, Python, uv) with proto, syncs the
     virtualenv, installs the lefthook git hooks, and symlinks the docs folder in
     as `docs/`. The docs folder is read from $FRP_DOCS_SOURCE, falling back to
-    ~/Git/functional-relational-python-docs/functional-relational-python-docs.
+    ~/Git/personal-projects-docs/functional-relational-python.
     """
     logger = logging.getLogger(__name__)
     checkout = Checkout(Path.cwd())
