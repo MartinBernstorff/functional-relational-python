@@ -2395,34 +2395,139 @@ def test_steps_after_a_defective_where_are_still_checked() -> None:
     ]
 
 
-def test_where_in_a_payload_is_a_diagnostic() -> None:
+def test_each_where_in_a_payload_is_a_diagnostic() -> None:
+    where = steps.where(conditions.is_null(conditions.field(FieldName("nickname"))))
     payload = Payload(
-        name=PayloadName.fake(),
-        source=Deal,
-        step=steps.where(conditions.is_null(conditions.field(FieldName("nickname")))),
+        name=PayloadName.fake(), source=Deal, step=steps.pipeline(where, where)
     )
 
     match compile_catalog([], [payload]):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
-            assert error.diagnostics == (diagnostics.WhereInPayload(view=payload.name),)
+            assert (
+                error.diagnostics
+                == (diagnostics.WhereInPayload(view=payload.name),) * 2
+            )
 
 
-def test_where_in_a_nested_pipeline_is_a_diagnostic() -> None:
+def test_each_where_in_a_nested_pipeline_is_a_diagnostic() -> None:
+    where = steps.where(conditions.is_null(conditions.field(FieldName("mentor_id"))))
+
     reported = resolve_diagnostics(
         Employee,
-        steps.resolve(
-            named(FieldName("mentor_id")),
-            steps.where(conditions.is_null(conditions.field(FieldName("mentor_id")))),
+        steps.resolve(named(FieldName("mentor_id")), where, where),
+    )
+
+    assert (
+        reported
+        == (
+            diagnostics.WhereInNestedPipeline(
+                view=ViewName.fake(), source=ir.SourceName("Employee")
+            ),
+        )
+        * 2
+    )
+
+
+type MaybeScore = Score | None
+
+
+class Rival(pydantic.BaseModel):
+    """A Source whose optional field is typed by a `type` alias."""
+
+    score: MaybeScore
+
+
+@pytest.mark.parametrize(
+    ("condition", "outcome"),
+    [
+        (
+            conditions.eq(conditions.field(FieldName("score")), None),
+            ir.FilterIsNull(field=ir.SourceField(field=FieldName("score"))),
+        ),
+        (
+            conditions.gt(conditions.field(FieldName("score")), Score(1)),
+            diagnostics.OrderingOnOptionalField(
+                view=ViewName.fake(),
+                source=ir.SourceName("Rival"),
+                field=FieldName("score"),
+                operator=ir.ComparisonOperator.GT,
+            ),
+        ),
+    ],
+    ids=["eq-none", "ordering"],
+)
+def test_a_field_typed_by_an_optional_alias_is_optional(
+    condition: ir.Condition, outcome: ir.Filter | diagnostics.CompileDiagnostic
+) -> None:
+    match compiler.compile_views(
+        empty_graph(),
+        [View(name=ViewName.fake(), source=Rival, step=steps.where(condition))],
+    ):
+        case Ok(compiled):
+            assert compiled.views[0].relation.filters == (outcome,)
+        case Err(error):
+            assert error.diagnostics == (outcome,)
+
+
+type Ratio = float
+type Tally = int
+
+
+class Measure(pydantic.BaseModel):
+    ratio: Ratio
+    count: Tally
+
+
+def measure_view(field: FieldName, value: ir.UncheckedLiteral) -> View:
+    return View(
+        name=ViewName.fake(),
+        source=Measure,
+        step=steps.where(conditions.eq(conditions.field(field), value)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [(FieldName("ratio"), 1), (FieldName("ratio"), 0.5), (FieldName("count"), 1)],
+    ids=["int-for-float", "float-for-float", "int-for-int"],
+)
+def test_a_number_of_the_fields_kind_is_a_literal_of_its_type(
+    field: FieldName, value: ir.UncheckedLiteral
+) -> None:
+    view = compile_view_of(measure_view(field, value))
+
+    assert len(view.relation.filters) == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [(FieldName("count"), True), (FieldName("ratio"), True), (FieldName("count"), 0.5)],
+    ids=["bool-for-int", "bool-for-float", "float-for-int"],
+)
+def test_a_bool_or_float_for_a_narrower_number_field_is_a_diagnostic(
+    field: FieldName, value: ir.UncheckedLiteral
+) -> None:
+    view = measure_view(field, value)
+
+    assert diagnostics_of([view]) == (
+        diagnostics.LiteralTypeMismatch(
+            view=view.name,
+            source=ir.SourceName("Measure"),
+            field=field,
+            annotation=Measure.model_fields[field.root].annotation,
+            value=diagnostics.LiteralText.of(value),
         ),
     )
 
-    assert reported == (
-        diagnostics.WhereInNestedPipeline(
-            view=ViewName.fake(), source=ir.SourceName("Employee")
-        ),
-    )
+
+def compile_view_of(view: View) -> compiler.CompiledView:
+    match compiler.compile_views(empty_graph(), [view]):
+        case Ok(compiled):
+            return compiled.views[0]
+        case Err(error):
+            pytest.fail(f"expected a compiled view, got {error}")
 
 
 def test_building_a_where_checks_nothing() -> None:

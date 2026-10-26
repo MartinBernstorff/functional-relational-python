@@ -507,6 +507,10 @@ class Relation(pydantic.BaseModel, frozen=True):
             source=self.source, fields=self.fields, filters=(*self.filters, kept)
         )
 
+    def unfiltered(self) -> Relation:
+        """This relation without its Filters, keeping every row."""
+        return Relation(source=self.source, fields=self.fields, filters=())
+
     def renamed(self, names: Mapping[FieldName, FieldName]) -> Relation:
         """Renames each key of `names` to its value in place, keeping its type."""
         return self.with_fields(
