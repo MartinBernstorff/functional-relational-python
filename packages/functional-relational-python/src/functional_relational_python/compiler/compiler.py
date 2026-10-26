@@ -5,7 +5,9 @@ recovers with the best relation it can build, so later steps and other Views and
 Payloads are still checked and independent defects are all reported, once each.
 """
 
-from collections.abc import Callable, Iterable
+import enum
+import typing
+from collections.abc import Callable, Iterable, Mapping
 from typing import Annotated
 
 import pydantic
@@ -21,6 +23,7 @@ from functional_relational_python.compiler import (
 from functional_relational_python.compiler.model_names import (
     ModelNames,
     PascalCase,
+    UnionModelNames,
     ViewModelNames,
 )
 from functional_relational_python.entity_graph.entity_graph import (
@@ -38,6 +41,7 @@ from functional_relational_python.pipeline.payloads import (
     Payload,
     PayloadName,
 )
+from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
@@ -75,8 +79,48 @@ class PoisonedView(pydantic.BaseModel, frozen=True):
     diagnostics: Diagnostics
 
 
+class CompiledUnion(pydantic.BaseModel, frozen=True):
+    """A checked Union: the Source its Variants read, its Discriminator, its
+    checked Variants, and the names its generated code uses.
+
+    Every View among its leaves has the Discriminator, typed by a Tag no other
+    Variant has; a nested Union's leaves share theirs.
+    """
+
+    name: UnionName
+    source: type[pydantic.BaseModel]
+    discriminator: FieldName
+    variants: tuple[CompiledView | CompiledUnion, ...]
+    names: UnionModelNames
+
+    def leaves(self) -> tuple[CompiledView, ...]:
+        """The Views a Source row may be a result of, in the order they are tried:
+        the first whose Filters keep the row gives the result."""
+        return tuple(
+            leaf
+            for variant in self.variants
+            for leaf in (
+                variant.leaves() if isinstance(variant, CompiledUnion) else (variant,)
+            )
+        )
+
+
+class PoisonedUnion(pydantic.BaseModel, frozen=True):
+    name: UnionName
+    diagnostics: Diagnostics
+
+
+class BlockedUnion(pydantic.BaseModel, frozen=True):
+    """A Union with no defect of its own that is not compiled, because the
+    Variants `blocked_by` did not compile. Their diagnostics are reported."""
+
+    name: UnionName
+    blocked_by: tuple[ViewName | UnionName, ...]
+
+
 class CompiledViews(pydantic.BaseModel, frozen=True):
     views: tuple[CompiledView, ...]
+    unions: tuple[CompiledUnion, ...]
 
 
 class CompiledPayload(pydantic.BaseModel, frozen=True):
@@ -94,24 +138,33 @@ class CompiledPayload(pydantic.BaseModel, frozen=True):
 
 
 class CompiledCatalog(pydantic.BaseModel, frozen=True):
-    """Every View and Payload of a Catalog, checked, and the Entity graph's
-    `OneToOneMarker`, which generated models leave out."""
+    """Every View, Payload and Union of a Catalog, checked, and the Entity graph's
+    `OneToOneMarker`, which generated models leave out.
+
+    `views` has every View a Union has as a Variant, and `unions` every Union
+    nested in another, after the Unions nested in it.
+    """
 
     views: tuple[CompiledView, ...]
     payloads: tuple[CompiledPayload, ...]
+    unions: tuple[CompiledUnion, ...]
     one_to_one_marker: OneToOneMarker
 
 
 def compile_views(
-    entity_graph: EntityGraph, views: Iterable[View], /
+    entity_graph: EntityGraph,
+    views: Iterable[View],
+    unions: Iterable[Union] = (),
+    /,
 ) -> Result[CompiledViews, DiagnosticsError[diagnostics.CompileDiagnostic]]:
-    """Compiles every View, or returns every diagnostic from all of them.
+    """Compiles every View and Union, or returns every diagnostic from all of
+    them.
 
     `entity_graph` is what References are resolved against.
     """
-    match compile_catalog(entity_graph, views, ()):
+    match compile_catalog(entity_graph, views, (), unions):
         case Ok(compiled):
-            return Ok(CompiledViews(views=compiled.views))
+            return Ok(CompiledViews(views=compiled.views, unions=compiled.unions))
         case Err(error):
             return Err(error)
 
@@ -120,13 +173,29 @@ def compile_catalog(
     entity_graph: EntityGraph,
     views: Iterable[View],
     payloads: Iterable[Payload],
+    unions: Iterable[Union],
     /,
 ) -> Result[CompiledCatalog, DiagnosticsError[diagnostics.CompileDiagnostic]]:
-    """Compiles every View and Payload, or returns every diagnostic from all of
-    them, including one per name a View and a Payload share."""
-    checked_views = check(entity_graph, views)
+    """Compiles every View, Payload and Union, or returns every diagnostic from
+    all of them, including one per name a View and a Payload share.
+
+    A Union's Variants are compiled as if `views` listed them, and the Unions
+    nested in it as if `unions` did. A View or Union listed or nested more than
+    once is compiled once.
+    """
+    unions = tuple(unions)
+    all_unions = tuple(
+        dict.fromkeys(nested for union in unions for nested in union.unions())
+    )
+    all_views = tuple(
+        dict.fromkeys((*views, *(view for union in unions for view in union.views())))
+    )
+    checked_views = check(entity_graph, all_views)
     checked_payloads = tuple(
         _check_payload(entity_graph, payload) for payload in payloads
+    )
+    checked_unions = _check_unions(
+        all_unions, dict(zip(all_views, checked_views, strict=True))
     )
     payload_names = {payload.name.root for payload in checked_payloads}
     # One diagnostic per shared name, however many Views and Payloads have it.
@@ -137,8 +206,8 @@ def compile_catalog(
         (
             *(
                 diagnostic
-                for checked in (*checked_views, *checked_payloads)
-                if isinstance(checked, PoisonedView | PoisonedPayload)
+                for checked in (*checked_views, *checked_payloads, *checked_unions)
+                if isinstance(checked, PoisonedView | PoisonedPayload | PoisonedUnion)
                 for diagnostic in checked.diagnostics
             ),
             *(diagnostics.SharedModelName(view=name) for name in shared_names),
@@ -148,6 +217,7 @@ def compile_catalog(
             payloads=tuple(
                 p for p in checked_payloads if isinstance(p, CompiledPayload)
             ),
+            unions=tuple(u for u in checked_unions if isinstance(u, CompiledUnion)),
             one_to_one_marker=entity_graph.one_to_one_marker,
         ),
     )
@@ -1124,3 +1194,205 @@ def _poison(
                 recovered=checked.recovered,
                 diagnostics=(*earlier, *checked.diagnostics),
             )
+
+
+type _CheckedUnion = CompiledUnion | PoisonedUnion | BlockedUnion
+
+
+def _check_unions(
+    unions: Iterable[Union],
+    views: Mapping[View, CompiledView | PoisonedView],
+) -> tuple[_CheckedUnion, ...]:
+    """Checks every Union against its checked Variants. `unions` has each Union
+    nested in another before it, and `views` every View among their Variants."""
+    checked: dict[Union, _CheckedUnion] = {}
+    for union in unions:
+        checked[union] = _check_union(union, views, checked)
+    return tuple(checked.values())
+
+
+def _check_union(
+    union: Union,
+    views: Mapping[View, CompiledView | PoisonedView],
+    unions: Mapping[Union, _CheckedUnion],
+) -> _CheckedUnion:
+    """Checks the Union's name, that its Variants are Views or Unions of them over
+    one Source, and their Tags.
+
+    A Variant that did not compile is left out of the checks, so the Variants
+    that did are still checked.
+    """
+    reported: list[diagnostics.CompileDiagnostic] = []
+    names: UnionModelNames | None
+    match UnionModelNames.check(union.name):
+        case Ok(names):
+            pass
+        case Err(error):
+            names = None
+            reported.extend(error.diagnostics)
+    variants = _SortedVariants.of(union, views, unions)
+    reported.extend(variants.kind_diagnostics(union))
+    reported.extend(_tag_diagnostics(union, variants.compiled))
+    sources = tuple(variant.source for variant in variants.compiled)
+    if len(set(sources)) > 1:
+        reported.append(
+            diagnostics.VariantSourcesDiffer(
+                view=union.name,
+                variants=tuple(variant.name for variant in variants.compiled),
+                sources=tuple(ir.SourceName(source.__name__) for source in sources),
+            )
+        )
+    if reported:
+        return PoisonedUnion(name=union.name, diagnostics=tuple(reported))
+    if variants.failed or names is None:
+        return BlockedUnion(name=union.name, blocked_by=variants.failed)
+    return CompiledUnion(
+        name=union.name,
+        source=sources[0],
+        discriminator=union.discriminator,
+        variants=variants.compiled,
+        names=names,
+    )
+
+
+class _SortedVariants(pydantic.BaseModel, frozen=True):
+    """A Union's Variants by kind: the names of the Views and Unions, and of the
+    Payloads; the checked Views and Unions that compiled, and the names of those
+    that did not."""
+
+    read_models: tuple[ViewName | UnionName, ...]
+    payloads: tuple[PayloadName, ...]
+    compiled: tuple[CompiledView | CompiledUnion, ...]
+    failed: tuple[ViewName | UnionName, ...]
+
+    @staticmethod
+    def of(
+        union: Union,
+        views: Mapping[View, CompiledView | PoisonedView],
+        unions: Mapping[Union, _CheckedUnion],
+    ) -> _SortedVariants:
+        read_models: list[ViewName | UnionName] = []
+        payloads: list[PayloadName] = []
+        compiled: list[CompiledView | CompiledUnion] = []
+        failed: list[ViewName | UnionName] = []
+        for variant in union.variants:
+            checked: CompiledView | PoisonedView | _CheckedUnion
+            match variant:
+                case View():
+                    checked = views[variant]
+                case Union():
+                    checked = unions[variant]
+                case Payload():
+                    payloads.append(variant.name)
+                    continue
+            read_models.append(variant.name)
+            match checked:
+                case CompiledView() | CompiledUnion():
+                    compiled.append(checked)
+                case PoisonedView() | PoisonedUnion() | BlockedUnion():
+                    failed.append(variant.name)
+        return _SortedVariants(
+            read_models=tuple(read_models),
+            payloads=tuple(payloads),
+            compiled=tuple(compiled),
+            failed=tuple(failed),
+        )
+
+    def kind_diagnostics(
+        self, union: Union
+    ) -> tuple[diagnostics.ViewsMixedWithPayloads | diagnostics.PayloadUnion, ...]:
+        """Why the Variants are not all Views or Unions of them, if they are not."""
+        if not self.payloads:
+            return ()
+        if self.read_models:
+            return (
+                diagnostics.ViewsMixedWithPayloads(
+                    view=union.name, views=self.read_models, payloads=self.payloads
+                ),
+            )
+        return (diagnostics.PayloadUnion(view=union.name),)
+
+
+type Tag = enum.Enum | str | int
+"""The one value a Variant's Discriminator is typed a `Literal` of."""
+
+
+def _tag_diagnostics(
+    union: Union, variants: Iterable[CompiledView | CompiledUnion]
+) -> tuple[diagnostics.CompileDiagnostic, ...]:
+    """A diagnostic per View with no Tag for the Union's Discriminator, per
+    nested Union whose Views have several, and per Tag several Variants share."""
+    reported: list[diagnostics.CompileDiagnostic] = []
+    tagged: dict[Tag, list[ViewName | UnionName]] = {}
+    for variant in variants:
+        leaves = variant.leaves() if isinstance(variant, CompiledUnion) else (variant,)
+        found: list[Tag] = []
+        for leaf in leaves:
+            match _tag(union, leaf):
+                case (
+                    diagnostics.VariantWithoutDiscriminator()
+                    | diagnostics.UntaggedVariant() as untagged
+                ):
+                    reported.append(untagged)
+                case tag:
+                    found.append(tag)
+        distinct = tuple(dict.fromkeys(found))
+        if len(distinct) > 1 and isinstance(variant, CompiledUnion):
+            reported.append(
+                diagnostics.NestedUnionTagsDiffer(
+                    view=union.name,
+                    nested=variant.name,
+                    discriminator=union.discriminator,
+                    tags=tuple(diagnostics.TagText.of(tag) for tag in distinct),
+                )
+            )
+        elif len(found) == len(leaves) and len(distinct) == 1:
+            tagged.setdefault(distinct[0], []).append(variant.name)
+    reported.extend(
+        diagnostics.SharedTag(
+            view=union.name,
+            discriminator=union.discriminator,
+            tag=diagnostics.TagText.of(tag),
+            variants=tuple(sharing),
+        )
+        for tag, sharing in tagged.items()
+        if len(sharing) > 1
+    )
+    return tuple(reported)
+
+
+def _tag(
+    union: Union, view: CompiledView
+) -> Tag | diagnostics.VariantWithoutDiscriminator | diagnostics.UntaggedVariant:
+    """The Tag `view` has for the Union's Discriminator: the one value the field's
+    type is a `Literal` of."""
+    fields = {field.name: field for field in view.relation.fields}
+    match fields.get(union.discriminator):
+        case None:
+            return diagnostics.VariantWithoutDiscriminator(
+                view=union.name, variant=view.name, discriminator=union.discriminator
+            )
+        case ir.Field() as field:
+            annotation = field.annotation()
+        case ir.NestedField(value=found):
+            annotation = found.annotation()
+    split = narrowing.split(annotation)
+    values = typing.get_args(split.required)
+    if (
+        split.optionality is Optionality.REQUIRED
+        and typing.get_origin(split.required) is typing.Literal
+        and len(values) == 1
+    ):
+        match values[0]:
+            case bool():
+                pass
+            case enum.Enum() | str() | int() as tag:
+                return tag
+            case _:
+                pass
+    return diagnostics.UntaggedVariant(
+        view=union.name,
+        variant=view.name,
+        discriminator=union.discriminator,
+        annotation=annotation,
+    )

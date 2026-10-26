@@ -41,11 +41,13 @@ from functional_relational_python.outputs.python.test_mappings import (
     Text,
     Transfer,
     compile_all,
+    employee_union,
     into,
     named,
 )
 from functional_relational_python.outputs.python.test_models import WithUnsupported
 from functional_relational_python.pipeline import conditions, steps
+from functional_relational_python.pipeline.unions import UnionName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.identifier import Identifier
 
@@ -64,6 +66,7 @@ def plan_of(compiled: compiler.CompiledViews, python: PythonLayout) -> PythonPla
         compiler.CompiledCatalog(
             views=compiled.views,
             payloads=(),
+            unions=compiled.unions,
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         python,
@@ -81,6 +84,7 @@ def diagnostics_of(
         compiler.CompiledCatalog(
             views=compiled.views,
             payloads=(),
+            unions=compiled.unions,
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         python,
@@ -529,3 +533,55 @@ def test_a_diagnostic_message_names_the_offending_values(
     diagnostic: PlanDiagnostic, message: str
 ) -> None:
     assert diagnostic.describe().root == message
+
+
+def test_a_union_is_planned_into_the_modules_its_layout_gives() -> None:
+    union = employee_union()
+
+    plan = plan_of(compile_all([], [union]), app_layout())
+
+    assert [
+        (planned.union, planned.symbol.describe().root)
+        for planned in plan.unions[ModulePath("app.views")]
+    ] == [
+        (UnionName("UnmentoredEmployee"), "app.views.UnmentoredEmployee"),
+        (union.name, "app.views.EmployeeByMentor"),
+    ]
+    assert [
+        function.symbol.describe().root
+        for function in plan.union_functions[ModulePath("app.mappings")]
+    ] == ["app.mappings.unmentored_employee", "app.mappings.employee_by_mentor"]
+
+
+def test_a_models_only_layout_plans_no_union_functions() -> None:
+    plan = plan_of(
+        compile_all([], [employee_union()]),
+        PythonLayout.models_only(into(ModulePath("app.views"))),
+    )
+
+    assert (len(plan.unions), plan.union_functions) == (1, {})
+
+
+def test_a_union_named_like_a_view_in_its_module_clashes() -> None:
+    union = employee_union()
+    view = company_view(ViewName(union.name.root))
+    module = ModulePath("app.views")
+
+    assert diagnostics_of(
+        compile_all([view], [union]), PythonLayout.models_only(into(module))
+    ) == (
+        NameClash(
+            scope=Scope(module.root),
+            name=Identifier(union.name.root),
+            origins=(
+                AnnotationText(
+                    f"{module.root}.{union.name.root} (the model of Union "
+                    f"{union.name.root})"
+                ),
+                AnnotationText(
+                    f"{module.root}.{union.name.root} (the model of View "
+                    f"{view.name.root})"
+                ),
+            ),
+        ),
+    )

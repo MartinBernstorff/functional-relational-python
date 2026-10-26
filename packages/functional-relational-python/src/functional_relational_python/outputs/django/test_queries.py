@@ -20,7 +20,7 @@ from hypothesis import event, given, settings
 from hypothesis import strategies as st
 from safe_result import Err, Ok
 
-from functional_relational_python.compiler import compiler
+from functional_relational_python.compiler import compiler, test_compiler
 from functional_relational_python.compiler.test_compiler import Depth, pipelines
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
@@ -46,6 +46,7 @@ from functional_relational_python.outputs.django.queries import (
     QueriesIntoDjangoModelsModule,
     ReverseInDjangoQueries,
     ReverseInQueryError,
+    UnionInDjangoQueries,
     ViewModelIntoDjangoModelsModule,
     ViewModelIntoQueriesModule,
     ViewQueries,
@@ -67,6 +68,7 @@ from functional_relational_python.outputs.python.test_mappings import (
     into,
 )
 from functional_relational_python.pipeline import conditions, ir, steps
+from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.filesystem import (
     Directory,
@@ -636,6 +638,7 @@ class Database:
             compiler.CompiledCatalog(
                 views=compiled.views,
                 payloads=(),
+                unions=(),
                 one_to_one_marker=OneToOneMarker.fake(),
             ),
             PythonLayout.models_only(into(Generated.models)),
@@ -738,7 +741,7 @@ def engine_rows(
 ) -> dict[ViewName, tuple[engine.ViewRow, ...]]:
     compiled = tuple(views)
     view_engine = engine.InMemoryViewEngine(
-        entity_graph(), compiler.CompiledViews(views=compiled)
+        entity_graph(), compiler.CompiledViews(views=compiled, unions=())
     )
     for entity in entities_by_id(entities):
         view_engine.put(entity).unwrap()
@@ -1347,4 +1350,45 @@ def test_the_filter_in_django_queries_message_names_the_view() -> None:
     assert FilterInDjangoQueries(view=ViewName("LeadEmployee")).describe().root == (
         "LeadEmployee: cannot generate Django queries for it, because it filters "
         "with `where`, and Django queries cannot filter yet."
+    )
+
+
+def test_a_union_over_an_entity_is_a_diagnostic() -> None:
+    def tagged(tag: Text) -> View:
+        return View(
+            name=ViewName(f"{tag.root.title()}Employee"),
+            source=Employee,
+            step=test_compiler.added_tag(
+                FieldName("kind"), test_compiler.Tag(tag.root)
+            ),
+        )
+
+    union = Union(
+        name=UnionName("AnyEmployee"),
+        discriminator=FieldName("kind"),
+        variants=(tagged(Text("first")), tagged(Text("second"))),
+    )
+    match compiler.compile_views(entity_graph(), [], [union]):
+        case Ok(compiled):
+            pass
+        case Err(error):
+            pytest.fail(f"expected a compiled Union, got {error}")
+
+    match DjangoQueriesRenderer.render(
+        entity_graph(),
+        Modules.config(),
+        compiled.views,
+        into(Generated.models),
+        compiled.unions,
+    ):
+        case Ok(files):
+            pytest.fail(f"expected diagnostics, got {files}")
+        case Err(error):
+            assert error.diagnostics == (UnionInDjangoQueries(union=union.name),)
+
+
+def test_the_union_in_django_queries_message_names_the_union() -> None:
+    assert UnionInDjangoQueries(union=UnionName("AnyEmployee")).describe().root == (
+        "AnyEmployee: cannot generate Django queries for it, because it is a Union, "
+        "and Django queries cannot read Unions yet."
     )

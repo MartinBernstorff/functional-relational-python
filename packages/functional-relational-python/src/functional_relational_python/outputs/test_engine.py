@@ -21,6 +21,7 @@ from functional_relational_python.entity_graph.id import (
 )
 from functional_relational_python.outputs import engine
 from functional_relational_python.pipeline import conditions, ir, steps
+from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
@@ -771,7 +772,7 @@ def test_every_view_either_gives_results_or_reports_diagnostics(
     checked = compiler.check(graph, case.views.views)
     compiled = tuple(v for v in checked if isinstance(v, compiler.CompiledView))
     view_engine = engine.InMemoryViewEngine(
-        graph, compiler.CompiledViews(views=compiled)
+        graph, compiler.CompiledViews(views=compiled, unions=())
     )
     for entity in case.stored:
         view_engine.put(entity).unwrap()
@@ -1212,3 +1213,175 @@ def test_a_required_field_lifted_through_a_missing_entity_is_unmet() -> None:
             entity=Profile, via=FieldName("employee_id"), ids=(without_profile.id,)
         ),
     )
+
+
+# Unions.
+
+
+class TicketStatus(enum.Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+    ARCHIVED = "archived"
+
+
+class TicketId(Id[int]):
+    pass
+
+
+class Ticket(pydantic.BaseModel, frozen=True):
+    id: TicketId
+    status: TicketStatus
+    assignee: Text | None
+
+    @staticmethod
+    def fake(ticket_id: TicketId, status: TicketStatus) -> Ticket:
+        return Ticket(id=ticket_id, status=status, assignee=None)
+
+
+def ticket_view(name: ViewName, *then: steps.Step) -> View:
+    return View(name=name, source=Ticket, step=steps.pipeline(*then))
+
+
+def has_status(status: TicketStatus) -> steps.Step:
+    return steps.where(conditions.eq(conditions.field(FieldName("status")), status))
+
+
+def open_or_closed() -> Union:
+    return Union(
+        name=UnionName("Tickets"),
+        discriminator=FieldName("status"),
+        variants=(
+            ticket_view(ViewName("OpenTicket"), has_status(TicketStatus.OPEN)),
+            ticket_view(
+                ViewName("ClosedTicket"),
+                has_status(TicketStatus.CLOSED),
+                steps.require(FieldName("assignee")),
+            ),
+        ),
+    )
+
+
+def union_engine(*unions: Union) -> engine.InMemoryViewEngine:
+    graph = EntityGraph.build(
+        [Ticket, Company], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+    match compiler.compile_views(graph, [], unions):
+        case Ok(compiled):
+            return engine.InMemoryViewEngine(graph, compiled)
+        case Err(error):
+            pytest.fail(f"expected a compiled Union, got {error}")
+
+
+def ticket_row(ticket: Ticket) -> engine.ViewRow:
+    return engine.ViewRow(
+        {FieldName(name): value for name, value in vars(ticket).items()}
+    )
+
+
+def test_each_row_is_the_result_of_the_variant_keeping_it() -> None:
+    union = open_or_closed()
+    view_engine = union_engine(union)
+    closed = Ticket(id=TicketId(1), status=TicketStatus.CLOSED, assignee=Text("Ada"))
+    opened = Ticket.fake(TicketId(2), TicketStatus.OPEN)
+    for ticket in (closed, opened):
+        view_engine.put(ticket).unwrap()
+
+    assert view_engine.read_union(union.name).unwrap() == (
+        engine.VariantRow(view=ViewName("ClosedTicket"), row=ticket_row(closed)),
+        engine.VariantRow(view=ViewName("OpenTicket"), row=ticket_row(opened)),
+    )
+
+
+def test_a_row_no_variant_keeps_is_no_result() -> None:
+    union = open_or_closed()
+    view_engine = union_engine(union)
+    view_engine.put(Ticket.fake(TicketId(1), TicketStatus.ARCHIVED)).unwrap()
+
+    assert view_engine.read_union(union.name).unwrap() == ()
+
+
+def test_the_first_variant_keeping_a_row_gives_its_result() -> None:
+
+    union = Union(
+        name=UnionName("Tagged"),
+        discriminator=FieldName("kind"),
+        variants=(
+            ticket_view(
+                ViewName("Open"),
+                has_status(TicketStatus.OPEN),
+                test_compiler.added_tag(FieldName("kind"), test_compiler.Tag("open")),
+            ),
+            ticket_view(
+                ViewName("Any"),
+                test_compiler.added_tag(FieldName("kind"), test_compiler.Tag("any")),
+            ),
+        ),
+    )
+    view_engine = union_engine(union)
+    opened = Ticket.fake(TicketId(1), TicketStatus.OPEN)
+    closed = Ticket.fake(TicketId(2), TicketStatus.CLOSED)
+    for ticket in (opened, closed):
+        view_engine.put(ticket).unwrap()
+
+    assert [row.view for row in view_engine.read_union(union.name).unwrap()] == [
+        ViewName("Open"),
+        ViewName("Any"),
+    ]
+
+
+def test_a_union_reports_the_unmet_requirements_of_the_variants_it_gives() -> None:
+    union = open_or_closed()
+    view_engine = union_engine(union)
+    unassigned_closed = Ticket.fake(TicketId(1), TicketStatus.CLOSED)
+    unassigned_open = Ticket.fake(TicketId(2), TicketStatus.OPEN)
+    for ticket in (unassigned_closed, unassigned_open):
+        view_engine.put(ticket).unwrap()
+
+    match view_engine.read_union(union.name):
+        case Err(DiagnosticsError() as error):
+            assert error.diagnostics == (
+                engine.UnmetRequirement(
+                    entity=Ticket,
+                    field=FieldName("assignee"),
+                    ids=(unassigned_closed.id,),
+                ),
+            )
+        case result:
+            pytest.fail(f"expected an unmet requirement, got {result}")
+
+
+def test_reading_an_unknown_union_names_it_and_the_known_unions() -> None:
+    known = open_or_closed()
+    unknown = UnionName(f"{known.name.root}Typo")
+
+    match union_engine(known).read_union(unknown):
+        case Err(engine.UnknownUnionError() as error):
+            assert (error.union, error.known) == (unknown, (known.name,))
+        case result:
+            pytest.fail(f"expected UnknownUnionError, got {result}")
+
+
+def test_reading_a_union_over_a_source_that_is_not_an_entity_is_an_error() -> None:
+    def memo(name: ViewName, tag: Text) -> View:
+        return View(
+            name=name,
+            source=Memo,
+            step=test_compiler.added_tag(
+                FieldName("kind"), test_compiler.Tag(tag.root)
+            ),
+        )
+
+    union = Union(
+        name=UnionName("Memos"),
+        discriminator=FieldName("kind"),
+        variants=(
+            memo(ViewName("Short"), Text("short")),
+            memo(ViewName("Long"), Text("long")),
+        ),
+    )
+
+    match union_engine(union).read_union(union.name):
+        case Err(engine.NonEntitySourceError() as error):
+            assert (error.view, error.source) == (union.name, Memo)
+        case result:
+            pytest.fail(f"expected NonEntitySourceError, got {result}")

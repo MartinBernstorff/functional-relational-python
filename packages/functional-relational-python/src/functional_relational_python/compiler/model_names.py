@@ -19,6 +19,7 @@ from safe_result import Err, Ok, Result
 from functional_relational_python.entity_graph.entity_graph import FieldName
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.payloads import DefinitionName
+from functional_relational_python.pipeline.unions import UnionName
 from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
@@ -32,6 +33,17 @@ class InvalidModelName(pydantic.BaseModel, Diagnostic, frozen=True):
     """A View's or Payload's name cannot be used as a class name."""
 
     view: DefinitionName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: the name is not a valid Python class name."
+        )
+
+
+class InvalidUnionName(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Union's name cannot be used as a class name."""
+
+    view: UnionName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
@@ -252,3 +264,24 @@ class ViewModelNames(pydantic.BaseModel, frozen=True):
         ):
             return ()
         return (InvalidFieldName(view=view, source=source, field=name),)
+
+
+class UnionModelNames(pydantic.BaseModel, frozen=True):
+    """Every name the code generated for one Union uses: its model's, a `type`
+    alias, and its mapping function's."""
+
+    model: ModelName
+    function: FunctionName
+
+    @staticmethod
+    def check(
+        union: UnionName,
+    ) -> Result[UnionModelNames, DiagnosticsError[InvalidUnionName]]:
+        """The names of the code generated for `union`, or why they cannot be
+        used."""
+        match Identifier.of(union):
+            case Ok(identifier):
+                model = ModelName(identifier.root)
+                return Ok(UnionModelNames(model=model, function=FunctionName.of(model)))
+            case Err():
+                return Err(DiagnosticsError((InvalidUnionName(view=union),)))

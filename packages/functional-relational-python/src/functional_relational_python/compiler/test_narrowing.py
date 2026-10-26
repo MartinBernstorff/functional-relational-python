@@ -455,7 +455,7 @@ def test_require_in_a_payload_is_a_diagnostic(step: steps.Step) -> None:
     payload = PayloadName("CampaignUpdate")
 
     match compiler.compile_catalog(
-        graph(), [], [Payload(name=payload, source=Campaign, step=step)]
+        graph(), [], [Payload(name=payload, source=Campaign, step=step)], ()
     ):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")

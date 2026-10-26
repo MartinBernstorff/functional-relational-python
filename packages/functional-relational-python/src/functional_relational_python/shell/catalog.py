@@ -25,6 +25,7 @@ from functional_relational_python.outputs.python.plan import (
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import ModulePath
 from functional_relational_python.pipeline.payloads import Payload
+from functional_relational_python.pipeline.unions import Union
 from functional_relational_python.pipeline.views import View
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
@@ -37,12 +38,14 @@ from functional_relational_python.support.identifier import Identifier
 
 class Catalog(pydantic.BaseModel, frozen=True):
     """The Entities, the class their ID types subclass, the Views over them, the
-    Payloads, the module each View's or Payload's model goes to, and whether and
-    where mapping functions and Django models go.
+    Payloads, the Unions of Views, the module each View's, Payload's or Union's
+    model goes to, and whether and where mapping functions and Django models go.
 
     Views are read models, Payloads are write models. A View and a Payload cannot
-    share a name. `layout` receives each compiled View and Payload. `mappings` is
-    the one module every View's mapping function goes to, see `MappingsRenderer`.
+    share a name. A Union's Variants are generated as if `views` listed them.
+    `layout` receives each compiled View, Payload and Union. `mappings` is the one
+    module every View's and Union's mapping function goes to, see
+    `MappingsRenderer`.
     It cannot be a module `layout` returns, a Django module, a module defining a
     Source or an Entity a View looks up, or a module named like a package other
     files are generated into (`app` when generating `app.views`). `django`
@@ -66,6 +69,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
     ...     payloads=[
     ...         Payload(name=PayloadName("CompanyCreate"), source=Company, step=...)
     ...     ],
+    ...     unions=[],
     ...     layout=lambda compiled: ModulePath("myapp.models"),
     ...     mappings=ModulePath("myapp.mappings"),
     ...     django=WithoutDjangoModels(),
@@ -77,6 +81,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
     one_to_one_marker: OneToOneMarker
     views: Sequence[View]
     payloads: Sequence[Payload]
+    unions: Sequence[Union]
     layout: ModuleLayout
     mappings: ModulePath | WithoutMappings
     django: DjangoModels | WithoutDjangoModels
@@ -94,7 +99,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
         reported: list[Diagnostic] = []
         # Django models need no compiled Views, so their diagnostics are reported
         # even when compiling fails.
-        match compiler.compile_catalog(graph, self.views, self.payloads):
+        match compiler.compile_catalog(graph, self.views, self.payloads, self.unions):
             case Err(compile_error):
                 reported.extend(compile_error.diagnostics)
                 outputs = [self._django_models(graph)]
@@ -159,7 +164,9 @@ class Catalog(pydantic.BaseModel, frozen=True):
                 return Ok(GeneratedFiles(files=()))
             case DjangoModels() as django:
                 pass
-        match DjangoQueriesRenderer.render(graph, django, compiled.views, self.layout):
+        match DjangoQueriesRenderer.render(
+            graph, django, compiled.views, self.layout, compiled.unions
+        ):
             case Ok(files):
                 return Ok(files)
             case Err(error):

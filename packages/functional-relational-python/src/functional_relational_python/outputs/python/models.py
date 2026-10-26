@@ -1,4 +1,5 @@
-"""Renders the planned View models: one module of Pydantic models per module.
+"""Renders the planned models: one module of Pydantic models, and of the `type`
+aliases of Union models, per module.
 
 Everything here is pure: it builds file contents and touches no filesystem.
 `generated_files` writes and checks them.
@@ -14,10 +15,12 @@ from functional_relational_python.outputs.python.plan import (
     ModelField,
     ModelPlan,
     PythonPlan,
+    UnionPlan,
 )
 from functional_relational_python.outputs.python.symbols import (
     LineLength,
     ModulePath,
+    PythonString,
     TypeExpression,
     ValueExpression,
 )
@@ -34,8 +37,12 @@ class FieldDeclaration(pydantic.RootModel[str], frozen=True):
     """One field of a model's class body, e.g. `name: Text | None = None`."""
 
 
+class AliasStatement(pydantic.RootModel[str], frozen=True):
+    """A `type` statement declaring a Union model, as ruff formats it."""
+
+
 class ModelsRenderer:
-    """Writes the source of every planned View model."""
+    """Writes the source of every planned model."""
 
     header: typing.ClassVar[FileText] = FileText(
         f"{GeneratedFiles.header.root}"
@@ -55,21 +62,29 @@ class ModelsRenderer:
                     module,
                     tuple(
                         model
-                        for view in plan.models[module]
+                        for view in plan.models.get(module, ())
                         for model in view.with_nested()
                     ),
+                    plan.unions.get(module, ()),
                 ),
             )
-            for module in sorted(plan.models, key=lambda module: module.root)
+            for module in plan.model_modules()
         )
 
     @staticmethod
-    def _module(module: ModulePath, models: Sequence[ModelPlan]) -> FileText:
+    def _module(
+        module: ModulePath,
+        models: Sequence[ModelPlan],
+        unions: Sequence[UnionPlan],
+    ) -> FileText:
+        """The classes of `models`, then the `type` statements of `unions`."""
         imported: dict[ModulePath, set[Identifier]] = {}
-        for model in models:
-            for symbol in model.uses:
-                if symbol.module.root != "builtins" and symbol.module != module:
-                    imported.setdefault(symbol.module, set()).add(symbol.bound_name())
+        for symbol in (
+            *(symbol for model in models for symbol in model.uses),
+            *(symbol for union in unions for symbol in union.uses()),
+        ):
+            if symbol.module.root != "builtins" and symbol.module != module:
+                imported.setdefault(symbol.module, set()).add(symbol.bound_name())
 
         sections: list[list[str]] = []
         for section in ModulePath.import_sections(imported):
@@ -96,7 +111,37 @@ class ModelsRenderer:
             )
             for model in models
         )
-        return FileText(f"{ModelsRenderer.header.root}\n{imports}\n\n\n{classes}")
+        aliases = "".join(f"{ModelsRenderer._alias(union).root}\n" for union in unions)
+        body = "\n\n".join(part for part in (classes, aliases) if part)
+        return FileText(f"{ModelsRenderer.header.root}\n{imports}\n\n\n{body}")
+
+    @staticmethod
+    def _alias(union: UnionPlan) -> AliasStatement:
+        """`type <Union> = Annotated[<A> | <B>, Discriminator("<field>")]`, on one
+        line if it fits, else split inside the brackets with a trailing comma,
+        and the union split at its `|`s if it does not fit on a line either."""
+        variants = [variant.reference().root for variant in union.variants]
+        head = (
+            f"type {union.symbol.bound_name().root} = "
+            f"{UnionPlan.annotated.reference().root}["
+        )
+        discriminator = (
+            f"{UnionPlan.discriminator_class.reference().root}("
+            f"{PythonString(union.discriminator.root).literal().root})"
+        )
+        line = f"{head}{' | '.join(variants)}, {discriminator}]"
+        if len(line) <= LineLength.default().root:
+            return AliasStatement(line)
+        joined = f"    {' | '.join(variants)},"
+        if len(joined) <= LineLength.default().root:
+            alternatives = f"{joined}\n"
+        else:
+            first, *rest = variants
+            alternatives = f"    {first}\n" + "".join(
+                f"    | {variant}{',' if index == len(rest) - 1 else ''}\n"
+                for index, variant in enumerate(rest)
+            )
+        return AliasStatement(f"{head}\n{alternatives}    {discriminator},\n]")
 
     @staticmethod
     def _declarations(field: ModelField) -> tuple[FieldDeclaration, ...]:

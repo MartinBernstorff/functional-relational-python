@@ -8,6 +8,7 @@ from functional_relational_python.entity_graph.entity_graph import (
 from functional_relational_python.entity_graph.id import IdType, OneToOneMarker
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.payloads import DefinitionName, PayloadName
+from functional_relational_python.pipeline.unions import UnionName
 from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
@@ -555,6 +556,133 @@ class RequireAddedField(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class VariantWithoutDiscriminator(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Union's Variant, or a View of a Union nested in it, has no field named
+    like the Union's Discriminator."""
+
+    view: UnionName
+    variant: ViewName
+    discriminator: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: the Variant {self.variant.root} has no field "
+            f"'{self.discriminator.root}', the Union's Discriminator."
+        )
+
+
+class UntaggedVariant(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Union's Variant, or a View of a Union nested in it, types the
+    Discriminator by something other than one Tag: a `Literal` of one enum
+    member, string or integer."""
+
+    view: UnionName
+    variant: ViewName
+    discriminator: FieldName
+    annotation: RuntimeAnnotation
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: the Variant {self.variant.root} types "
+            f"'{self.discriminator.root}' {self.annotation!r}, which is not one Tag. "
+            "Narrow it to one value with `where`, or declare it with `add`, as a "
+            "Literal of one enum member, string or integer."
+        )
+
+
+class TagText(pydantic.RootModel[str], frozen=True):
+    """How a Tag reads in a diagnostic: its `repr`."""
+
+    @staticmethod
+    def of(tag: object) -> TagText:
+        return TagText(repr(tag))
+
+
+class SharedTag(pydantic.BaseModel, Diagnostic, frozen=True):
+    """Several Variants of a Union have the same Tag, so a model cannot tell which
+    one it is."""
+
+    view: UnionName
+    discriminator: FieldName
+    tag: TagText
+    variants: tuple[ViewName | UnionName, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        variants = ", ".join(variant.root for variant in self.variants)
+        return DiagnosticMessage(
+            f"{self.view.root}: the Variants {variants} all have the Tag "
+            f"{self.tag.root} for '{self.discriminator.root}'. Each Variant needs "
+            "its own Tag."
+        )
+
+
+class NestedUnionTagsDiffer(pydantic.BaseModel, Diagnostic, frozen=True):
+    """The Views of a Union nested in another have different Tags for the outer
+    Union's Discriminator, so the nested Union has no one Tag there."""
+
+    view: UnionName
+    nested: UnionName
+    discriminator: FieldName
+    tags: tuple[TagText, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        tags = ", ".join(tag.root for tag in self.tags)
+        return DiagnosticMessage(
+            f"{self.view.root}: the Variants of the nested Union "
+            f"{self.nested.root} have the Tags {tags} for "
+            f"'{self.discriminator.root}', but a nested Union's Variants need one "
+            "Tag."
+        )
+
+
+class VariantSourcesDiffer(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Union's Variants read different Sources. `sources` has the Source of
+    each of `variants`, in turn."""
+
+    view: UnionName
+    variants: tuple[ViewName | UnionName, ...]
+    sources: tuple[ir.SourceName, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        read = ", ".join(
+            f"{variant.root} reads {source.root}"
+            for variant, source in zip(self.variants, self.sources, strict=True)
+        )
+        return DiagnosticMessage(
+            f"{self.view.root}: its Variants read different Sources: {read}. "
+            "Every Variant of a Union reads one Source."
+        )
+
+
+class ViewsMixedWithPayloads(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Union has both Views (or Unions of them) and Payloads as Variants."""
+
+    view: UnionName
+    views: tuple[ViewName | UnionName, ...]
+    payloads: tuple[PayloadName, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        views = ", ".join(view.root for view in self.views)
+        payloads = ", ".join(payload.root for payload in self.payloads)
+        return DiagnosticMessage(
+            f"{self.view.root}: its Variants mix Views ({views}) with Payloads "
+            f"({payloads}). A Union's Variants are all read models or all write "
+            "models."
+        )
+
+
+class PayloadUnion(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Union's Variants are Payloads, which Unions do not support yet."""
+
+    view: UnionName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: its Variants are Payloads, but only Unions of "
+            "Views are supported yet."
+        )
+
+
 type CompileDiagnostic = (
     UnknownField
     | RenameOntoExistingField
@@ -592,4 +720,12 @@ type CompileDiagnostic = (
     | RequireOnRequiredField
     | RequireOnAlwaysNoneField
     | RequireAddedField
+    | model_names.InvalidUnionName
+    | VariantWithoutDiscriminator
+    | UntaggedVariant
+    | SharedTag
+    | NestedUnionTagsDiffer
+    | VariantSourcesDiffer
+    | ViewsMixedWithPayloads
+    | PayloadUnion
 )
