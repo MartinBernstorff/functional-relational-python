@@ -123,22 +123,6 @@ class FlattenOntoExistingField(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class FlattenNestedModel(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A field `flatten` would lift out of `flattened` is typed by the model of a
-    nested pipeline, whose Entity a lifted field cannot look up."""
-
-    view: DefinitionName
-    flattened: FieldName
-    field: FieldName
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.view.root}: cannot lift '{self.field.root}' out of "
-            f"'{self.flattened.root}', because its type is the model of a nested "
-            "pipeline. Flatten or omit it in the nested pipeline of the resolve."
-        )
-
-
 class SharedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
     """A View and a Payload have the same name, so their models would too.
 
@@ -413,7 +397,6 @@ type CompileDiagnostic = (
     | ResolvedNameCollision
     | NotAResolvedField
     | FlattenOntoExistingField
-    | FlattenNestedModel
     | NonLiteralDefault
     | AddOntoExistingField
     | AddWithoutDefault

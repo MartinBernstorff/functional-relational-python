@@ -682,7 +682,7 @@ def _resolve_field(
     match _lookup(entity_graph, view, relation, field):
         case _CheckedField() as unresolved:
             return unresolved
-        case ir.Lookup() as lookup:
+        case ir.Lookup() | ir.ChainedLookup() as found:
             pass
     # A field named just `_id` keeps its name rather than losing all of it.
     name = FieldName(field.name.root.removesuffix("_id") or field.name.root)
@@ -699,7 +699,7 @@ def _resolve_field(
         invalid := ViewModelNames.check_field(view, relation.source, name)
     ):
         return _CheckedField(field=field, diagnostics=invalid)
-    return _resolved(entity_graph, view, node, name, lookup)
+    return _resolved(entity_graph, view, node, name, found)
 
 
 def _lookup(
@@ -707,8 +707,9 @@ def _lookup(
     view: DefinitionName,
     relation: ir.Relation,
     field: ir.RelationField,
-) -> ir.Lookup | _CheckedField:
-    """How `field` is looked up, or the field unresolved with why it can't be."""
+) -> ir.EntityValue | _CheckedField:
+    """How the Entity `field` references is found, or the field unresolved with
+    why it can't be."""
     not_a_reference = _CheckedField(
         field=field,
         diagnostics=(
@@ -718,17 +719,28 @@ def _lookup(
         ),
     )
     match field:
-        case ir.Field(info=info, value=ir.SourceField(field=source)):
+        case ir.Field():
             pass
-        case ir.Field() | ir.NestedField():
+        case ir.NestedField():
+            return not_a_reference
+    match field.reference_source():
+        case (source, info):
+            pass
+        case ir.Field():
             return not_a_reference
     match entity_graph.reference_of(source, info):
         case Ok(reference):
-            return ir.Lookup(
+            lookup = ir.Lookup(
                 reference=ir.SourceField(field=reference.field),
                 id_type=reference.id_type,
                 target=reference.target,
                 optionality=reference.optionality,
+            )
+            # A lifted Reference is followed from the Entity it is read off.
+            return (
+                ir.ChainedLookup(chain=(*field.value.lookups(), lookup))
+                if (field.value.lookups())
+                else lookup
             )
         case Err(error):
             pass
@@ -754,7 +766,7 @@ def _resolved(
     view: DefinitionName,
     node: ir.Resolve,
     name: FieldName,
-    lookup: ir.Lookup,
+    found: ir.EntityValue,
 ) -> _CheckedField:
     """The field holding the looked-up Entity, after `node.then` if it does anything.
 
@@ -763,11 +775,11 @@ def _resolved(
     need not fit the Entity.
     """
     default = ir.NoDefault()
-    root = ir.FromSource(source=lookup.target)
+    root = ir.FromSource(source=found.lookups()[-1].target)
     nested = node.then(root)
     if nested == root:
         return _CheckedField(
-            field=ir.Field.looked_up(name, lookup, default), diagnostics=()
+            field=ir.Field.looked_up(name, found, default), diagnostics=()
         )
     match _check_node(entity_graph, view, nested):
         case ir.Relation() as relation:
@@ -781,121 +793,128 @@ def _resolved(
     )
     return _CheckedField(
         field=ir.NestedField(
-            name=name, value=lookup, relation=relation.unfiltered(), default=default
+            name=name, value=found, relation=relation.unfiltered(), default=default
         ),
         diagnostics=(*reported, *misplaced),
     )
 
 
 class _HeldEntity(pydantic.BaseModel, frozen=True):
-    """The Entity a resolved field holds: how it is looked up, and its fields."""
+    """The Entity a resolved field holds: the Lookups that find it from the
+    subject, in turn, and its fields."""
 
-    lookup: ir.Lookup
+    chain: tuple[ir.Lookup, ...]
     relation: ir.Relation
 
     @staticmethod
     def of(field: ir.RelationField) -> _HeldEntity | ir.Field:
         """The Entity `field` holds, or `field` itself when it is not resolved."""
         match field:
-            case ir.Field(value=ir.Lookup() as lookup):
+            case ir.Field(value=ir.Lookup() | ir.ChainedLookup() as found):
+                chain = found.lookups()
                 return _HeldEntity(
-                    lookup=lookup,
-                    relation=ir.Relation.of(ir.FromSource(source=lookup.target)),
+                    chain=chain,
+                    relation=ir.Relation.of(ir.FromSource(source=chain[-1].target)),
                 )
-            case ir.NestedField(value=lookup, relation=relation):
-                return _HeldEntity(lookup=lookup, relation=relation)
+            case ir.NestedField(value=found, relation=relation):
+                return _HeldEntity(chain=found.lookups(), relation=relation)
             case ir.Field():
                 return field
 
-    def lifted(self, field: ir.Field) -> ir.Field:
-        """`field` of the Entity, computed from the subject through `lookup`.
+    def lifted(self, field: ir.RelationField) -> ir.RelationField:
+        """`field` of the Entity, computed from the subject through `chain`.
 
-        Out of an optional Reference it is optional too. An added field has no
-        value from the Entity, so it is lifted as it is.
+        Lifted out of an optional Reference, a field is optional too. An added
+        field has no value from the Entity, so it is lifted as it is.
         """
-        match field.value:
+        match field:
+            case ir.NestedField(value=found):
+                return field.model_copy(
+                    update={
+                        "value": ir.ChainedLookup(chain=(*self.chain, *found.lookups()))
+                    }
+                )
+            case ir.Field(value=value):
+                pass
+        lifted_value: ir.Value
+        match value:
             case ir.Added():
                 return field
-            case ir.SourceField() | ir.Lookup() | ir.Lifted() as value:
-                pass
-        lifted = field.model_copy(
-            update={"value": ir.Lifted(lookup=self.lookup, value=value)}
-        )
-        match self.lookup.optionality:
+            case ir.SourceField():
+                lifted_value = ir.Lifted(through=self.chain, field=value)
+            case ir.Lifted(through=through, field=read):
+                lifted_value = ir.Lifted(through=(*self.chain, *through), field=read)
+            case ir.Lookup() | ir.ChainedLookup():
+                lifted_value = ir.ChainedLookup(chain=(*self.chain, *value.lookups()))
+        lifted = field.model_copy(update={"value": lifted_value})
+        match ir.Lookup.optionality_of(self.chain):
             case Optionality.REQUIRED:
                 return lifted
             case Optionality.OPTIONAL:
-                return lifted.retyped(Optionality.admitting_none(field.annotation()))
+                return lifted.admitting_none()
 
 
 def _check_flatten(
     view: DefinitionName, node: ir.Flatten, relation: ir.Relation
 ) -> ir.Relation | Poisoned:
-    """Replaces each named or selected resolved field with the fields it lifts.
+    """Replaces the named resolved field, or each selected one, with the fields
+    of the Entity it holds, each computed from the subject through the Lookups
+    that find the Entity.
 
-    A field that is not resolved is a diagnostic, and stays. A lifted field typed
-    by a nested model, or named like a field the relation keeps or an earlier
-    lifted field, is a diagnostic, and is dropped: the existing field keeps its
-    name, as for a rename.
+    A Select ignores the fields that are not resolved. A named field that is not
+    resolved is a diagnostic, and stays. A lifted field named like a field the
+    relation keeps, or an earlier lifted field, is a diagnostic, and is dropped:
+    the existing field keeps its name, as for a rename.
     """
     reported: list[diagnostics.CompileDiagnostic] = []
+    held: dict[FieldName, _HeldEntity] = {}
+    for field in relation.fields:
+        match _HeldEntity.of(field):
+            case _HeldEntity() as entity:
+                held[field.name] = entity
+            case ir.Field():
+                pass
     match node.fields:
         case ir.Select() as selected:
-            named = relation.selected(selected)
+            flattened = {name for name in relation.selected(selected) if name in held}
+        case FieldName() as name if name in held:
+            flattened = {name}
         case FieldName() as name:
-            named = (name,)
-            if name not in relation.field_names():
-                reported.append(
-                    diagnostics.UnknownField(
-                        view=view,
-                        source=relation.source,
-                        field=name,
-                        valid=relation.field_names(),
-                    )
+            flattened = set[FieldName]()
+            reported.append(
+                diagnostics.NotAResolvedField(
+                    view=view, source=relation.source, field=name
                 )
+                if name in relation.field_names()
+                else diagnostics.UnknownField(
+                    view=view,
+                    source=relation.source,
+                    field=name,
+                    valid=relation.field_names(),
+                )
+            )
     # The fields that stay, so their names are taken before any field is lifted.
-    taken = {
-        field.name
-        for field in relation.fields
-        if field.name not in named or isinstance(_HeldEntity.of(field), ir.Field)
-    }
+    taken = {field.name for field in relation.fields if field.name not in flattened}
     fields: list[ir.RelationField] = []
     for field in relation.fields:
-        if field.name not in named:
+        if field.name not in flattened:
             fields.append(field)
             continue
-        match _HeldEntity.of(field):
-            case ir.Field() as unresolved:
+        entity = held[field.name]
+        for inner in entity.relation.fields:
+            if inner.name in taken:
                 reported.append(
-                    diagnostics.NotAResolvedField(
-                        view=view, source=relation.source, field=field.name
+                    diagnostics.FlattenOntoExistingField(
+                        view=view, flattened=field.name, field=inner.name
                     )
                 )
-                fields.append(unresolved)
                 continue
-            case _HeldEntity() as entity:
-                pass
-        for inner in entity.relation.fields:
-            match inner:
-                case ir.NestedField():
-                    reported.append(
-                        diagnostics.FlattenNestedModel(
-                            view=view, flattened=field.name, field=inner.name
-                        )
-                    )
-                case ir.Field() if inner.name in taken:
-                    reported.append(
-                        diagnostics.FlattenOntoExistingField(
-                            view=view, flattened=field.name, field=inner.name
-                        )
-                    )
-                case ir.Field():
-                    taken.add(inner.name)
-                    fields.append(entity.lifted(inner))
-    flattened = relation.with_fields(tuple(fields))
+            taken.add(inner.name)
+            fields.append(entity.lifted(inner))
+    flattened_relation = relation.with_fields(tuple(fields))
     if not reported:
-        return flattened
-    return Poisoned(recovered=flattened, diagnostics=tuple(reported))
+        return flattened_relation
+    return Poisoned(recovered=flattened_relation, diagnostics=tuple(reported))
 
 
 def _poison(

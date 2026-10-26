@@ -196,10 +196,12 @@ def flatten(fields: FieldName | ir.Select) -> Step:
     selects, with the fields of the Entity it holds, in its place.
 
     `resolve(select(...), omit("id"))` then `flatten("department")` gives the
-    Department's `name` at top level. A lifted field may not take a name the
+    Department's `name` at top level. A Select passes over the fields that are not
+    resolved; naming one is a diagnostic. A lifted field may not take a name the
     relation already has: rename or omit it in the resolve's nested pipeline. A
     field lifted out of an optional Reference is optional, `None` when the
-    Reference is.
+    Reference is. A lifted Reference can be resolved, and a lifted resolved field
+    flattened, like any other.
     """
 
     def step(node: ir.Node) -> ir.Node:

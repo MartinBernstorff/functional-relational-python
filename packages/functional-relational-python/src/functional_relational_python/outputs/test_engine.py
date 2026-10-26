@@ -257,6 +257,12 @@ class Department(pydantic.BaseModel, frozen=True):
     name: Text
     company_id: CompanyId
 
+    def itself(self) -> engine.FieldValue:
+        return self
+
+    def name_of(self) -> engine.FieldValue:
+        return self.name
+
     @staticmethod
     def fake(department_id: DepartmentId, company_id: CompanyId) -> Department:
         return Department(id=department_id, name=Text("Sales"), company_id=company_id)
@@ -472,6 +478,71 @@ def test_fields_lifted_out_of_an_absent_reference_are_none() -> None:
     )
 
 
+def mentor_flattened(*then: steps.Step) -> steps.Step:
+    """Lifts the mentor's fields, prefixed `mentor_`; `then` runs on the mentor."""
+    return steps.pipeline(
+        steps.project([FieldName("id"), FieldName("mentor_id")]),
+        steps.resolve(
+            named(FieldName("mentor_id")),
+            steps.rename(
+                steps.select(lambda _field: True),
+                lambda field: FieldName(f"mentor_{field.root}"),
+            ),
+            *then,
+        ),
+        steps.flatten(FieldName("mentor")),
+    )
+
+
+@pytest.mark.parametrize(
+    ("step", "field", "of_department"),
+    [
+        (
+            steps.pipeline(
+                mentor_flattened(),
+                steps.resolve(named(FieldName("mentor_department_id"))),
+            ),
+            FieldName("mentor_department"),
+            Department.itself,
+        ),
+        (
+            steps.pipeline(
+                mentor_flattened(
+                    steps.resolve(
+                        named(FieldName("mentor_department_id")),
+                        steps.project([FieldName("name")]),
+                    )
+                ),
+                steps.flatten(FieldName("mentor_department")),
+            ),
+            FieldName("name"),
+            Department.name_of,
+        ),
+    ],
+    ids=["a lifted Reference resolved", "a lifted resolved field flattened"],
+)
+def test_an_entity_lifted_out_is_found_through_the_flattened_one(
+    step: steps.Step,
+    field: FieldName,
+    of_department: Callable[[Department], engine.FieldValue],
+) -> None:
+    view = employee_view(step)
+    view_engine = hr_engine(view)
+    department = Department.fake(DepartmentId(1), CompanyId.fake())
+    mentor = Employee.fake(EmployeeId(1), department.id, None)
+    mentee = Employee.fake(EmployeeId(2), department.id, mentor.id)
+    for entity in (department, mentor, mentee):
+        view_engine.put(entity).unwrap()
+
+    rows = read(view_engine, view.name)
+
+    # The mentor has no mentor, so nothing is found for them.
+    assert [(row.root[FieldName("id")], row.root[field]) for row in rows] == [
+        (mentor.id, None),
+        (mentee.id, of_department(department)),
+    ]
+
+
 def test_a_dangling_reference_lifted_out_is_reported_on_its_entity() -> None:
     view = employee_view(
         steps.pipeline(
@@ -631,7 +702,7 @@ def with_ids_again(
             case ir.Added():
                 # An added field holds no value of the Source.
                 pass
-            case ir.Lifted():
+            case ir.ChainedLookup() | ir.Lifted():
                 pytest.fail(f"a View that only resolves lifted {field.name.root}")
     return source(**values)
 

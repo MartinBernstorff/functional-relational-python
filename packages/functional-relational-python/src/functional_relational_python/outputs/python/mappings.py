@@ -117,6 +117,35 @@ class Indent(pydantic.RootModel[int], frozen=True):
         return Expression(f"(\n{branches}{pad}else {written}\n{self.pad().root})")
 
 
+class Followed(pydantic.BaseModel, frozen=True):
+    """A chain of Lookups followed from a subject in generated source: per
+    optional Lookup, in turn, the expression to check for `None` before going on,
+    and the Entity the chain ends at."""
+
+    guards: tuple[Expression, ...]
+    entity: Expression
+
+    @staticmethod
+    def of(
+        lookups: Iterable[ir.Lookup],
+        subject: Expression,
+        entity: Callable[[ir.Lookup, Expression], Expression],
+        guard: Callable[[ir.Lookup, Expression], Expression],
+    ) -> Followed:
+        """`entity` writes what a Lookup finds from the expression before it, and
+        `guard` what is `None` when its optional Reference is absent."""
+        guards: list[Expression] = []
+        found = subject
+        for lookup in lookups:
+            match lookup.optionality:
+                case Optionality.REQUIRED:
+                    pass
+                case Optionality.OPTIONAL:
+                    guards.append(guard(lookup, found))
+            found = entity(lookup, found)
+        return Followed(guards=tuple(guards), entity=found)
+
+
 class MappingsRenderer:
     """Writes the source of every planned mapping function."""
 
@@ -220,56 +249,45 @@ class _Construction(pydantic.BaseModel, frozen=True):
         self, model: ModelPlan, field: ir.RelationField, subject: Expression
     ) -> Expression | LeftOut:
         """The argument for `field` of `model`, on a line at this indentation."""
+        prefix = Expression(f"{field.name.root}=")
         match field:
-            case ir.Field(value=value):
-                match value:
-                    case ir.SourceField() | ir.Lookup() | ir.Lifted():
-                        return self.computed(field, value, subject)
-                    case ir.Added():
-                        return LeftOut()
-            case ir.NestedField(value=lookup):
+            case ir.NestedField(value=found):
                 nested = model.nested_in(field)
+                followed = self._followed(found.lookups(), subject)
                 return self.indent.looked_up(
-                    Expression(f"{field.name.root}="),
-                    _Construction._guard(lookup, subject),
+                    prefix,
+                    followed.guards,
                     lambda indent: self.model_copy(update={"indent": indent}).call(
-                        nested, self._entity(lookup, subject)
+                        nested, followed.entity
                     ),
                 )
-
-    def computed(
-        self, field: ir.RelationField, value: ir.SubjectValue, subject: Expression
-    ) -> Expression:
-        """`value` computed from `subject`, as the argument for `field`."""
-        guards, present = self._chain(value, subject)
-        return self.indent.looked_up(
-            Expression(f"{field.name.root}="), guards, lambda _: present
-        )
-
-    def _chain(
-        self, value: ir.SubjectValue, subject: Expression
-    ) -> tuple[tuple[Expression, ...], Expression]:
-        """The IDs of the optional References `value` follows from `subject`, to
-        check for `None` in order, and what it computes once none is."""
+            case ir.Field(value=value):
+                pass
         match value:
             case ir.SourceField():
-                return (), Expression(f"{subject.root}.{value.field.root}")
-            case ir.Lookup():
-                return _Construction._guard(value, subject), self._entity(
-                    value, subject
+                return Expression(f"{subject.root}.{value.field.root}")
+            case ir.Lookup() | ir.ChainedLookup():
+                followed = self._followed(value.lookups(), subject)
+                return self.indent.looked_up(
+                    prefix, followed.guards, lambda _: followed.entity
                 )
-            case ir.Lifted(lookup=lookup, value=lifted):
-                guards, present = self._chain(lifted, self._entity(lookup, subject))
-                return (*_Construction._guard(lookup, subject), *guards), present
+            case ir.Lifted(through=through, field=read):
+                followed = self._followed(through, subject)
+                lifted = Expression(f"{followed.entity.root}.{read.field.root}")
+                return self.indent.looked_up(prefix, followed.guards, lambda _: lifted)
+            case ir.Added():
+                return LeftOut()
 
-    @staticmethod
-    def _guard(lookup: ir.Lookup, subject: Expression) -> tuple[Expression, ...]:
-        """The ID to check for `None`, if `lookup`'s Reference is optional."""
-        match lookup.optionality:
-            case Optionality.REQUIRED:
-                return ()
-            case Optionality.OPTIONAL:
-                return (Expression(f"{subject.root}.{lookup.reference.field.root}"),)
+    def _followed(self, lookups: Iterable[ir.Lookup], subject: Expression) -> Followed:
+        """`lookups` followed from `subject`, each optional one checked by its ID."""
+        return Followed.of(
+            lookups,
+            subject,
+            self._entity,
+            lambda lookup, found: Expression(
+                f"{found.root}.{lookup.reference.field.root}"
+            ),
+        )
 
     def _entity(self, lookup: ir.Lookup, subject: Expression) -> Expression:
         parameter = self.function.parameter_of(lookup)

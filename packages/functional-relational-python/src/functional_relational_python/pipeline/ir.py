@@ -7,7 +7,7 @@ and the Value that computes it. Backends run the Relation, not the node tree.
 
 import copy
 import enum
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from typing import Annotated
 
 import pydantic
@@ -112,9 +112,14 @@ class References(pydantic.BaseModel, frozen=True):
         it reports why it cannot be resolved.
         """
         match field:
-            case Field(info=info, value=SourceField(field=source)):
+            case NestedField():
+                return False
+            case Field():
                 pass
-            case Field() | NestedField():
+        match field.reference_source():
+            case (source, info):
+                pass
+            case Field():
                 return False
         match entity_graph.reference_of(source, info):
             case Ok():
@@ -324,6 +329,9 @@ class SourceField(pydantic.BaseModel, frozen=True):
 
     field: FieldName
 
+    def lookups(self) -> tuple[Lookup, ...]:
+        return ()
+
 
 class Lookup(pydantic.BaseModel, frozen=True):
     """The Entity a Reference points to, or `None` for an absent optional one."""
@@ -333,10 +341,42 @@ class Lookup(pydantic.BaseModel, frozen=True):
     target: type[pydantic.BaseModel]
     optionality: Optionality
 
+    def lookups(self) -> tuple[Lookup, ...]:
+        return (self,)
+
     def annotation(self) -> type[pydantic.BaseModel | None]:
         """The looked-up value's type: the target Entity, optional if the
         Reference is."""
         return self.optionality.annotate(self.target)
+
+    @staticmethod
+    def optionality_of(lookups: Iterable[Lookup]) -> Optionality:
+        """Whether following `lookups` in turn may find no Entity: whether any of
+        their References is optional."""
+        if any(lookup.optionality is Optionality.OPTIONAL for lookup in lookups):
+            return Optionality.OPTIONAL
+        return Optionality.REQUIRED
+
+
+class ChainedLookup(pydantic.BaseModel, frozen=True):
+    """The Entity found by following each of `chain` in turn from the subject, or
+    `None` when one finds none: a resolved field `flatten` lifted, or a lifted
+    Reference resolved.
+    """
+
+    chain: Annotated[tuple[Lookup, ...], pydantic.Field(min_length=2)]
+
+    def lookups(self) -> tuple[Lookup, ...]:
+        return self.chain
+
+    def annotation(self) -> type[pydantic.BaseModel | None]:
+        """The found value's type: the last target Entity, optional if any
+        Reference on the way is."""
+        return Lookup.optionality_of(self.chain).annotate(self.chain[-1].target)
+
+
+type EntityValue = Lookup | ChainedLookup
+"""The Entity a resolved field holds."""
 
 
 class Added(pydantic.BaseModel, frozen=True):
@@ -345,26 +385,23 @@ class Added(pydantic.BaseModel, frozen=True):
     A mapping leaves it out, so the model fills it with its default.
     """
 
+    def lookups(self) -> tuple[Lookup, ...]:
+        return ()
+
 
 class Lifted(pydantic.BaseModel, frozen=True):
-    """The value `value` computes on the Entity `lookup` finds: a field `flatten`
-    lifted out of a resolved field. It is `None` when `lookup` finds no Entity."""
+    """The value of `field` of the Entity found by following each of `through` in
+    turn from the subject: a field `flatten` lifted out of a resolved field. It is
+    `None` when a Lookup on the way finds no Entity."""
 
-    lookup: Lookup
-    value: SubjectValue
+    through: Annotated[tuple[Lookup, ...], pydantic.Field(min_length=1)]
+    field: SourceField
 
     def lookups(self) -> tuple[Lookup, ...]:
-        """`lookup`, then each Lookup `value` makes on the Entity it finds."""
-        match self.value:
-            case SourceField():
-                return (self.lookup,)
-            case Lookup():
-                return (self.lookup, self.value)
-            case Lifted():
-                return (self.lookup, *self.value.lookups())
+        return self.through
 
 
-type SubjectValue = SourceField | Lookup | Lifted
+type SubjectValue = SourceField | EntityValue | Lifted
 """A value computed from the subject's fields."""
 
 type Value = SubjectValue | Added
@@ -456,13 +493,14 @@ class Field(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def looked_up(
-        name: FieldName, lookup: Lookup, default: DefaultValue | NoDefault
+        name: FieldName, value: EntityValue, default: DefaultValue | NoDefault
     ) -> Field:
-        """The field holding the Entity `lookup` finds, typed by `lookup.annotation()`."""
+        """The field holding the Entity `value` finds, typed by
+        `value.annotation()`."""
         return Field(
             name=name,
-            info=FieldInfo.from_annotation(lookup.annotation()),
-            value=lookup,
+            info=FieldInfo.from_annotation(value.annotation()),
+            value=value,
             default=default,
         )
 
@@ -472,11 +510,38 @@ class Field(pydantic.BaseModel, frozen=True):
     def retyped(self, annotation: RuntimeAnnotation) -> Field:
         """This field typed by `annotation`, keeping its default but not the old
         type's constraints."""
+        retyped = self._annotated(annotation)
+        object.__setattr__(retyped.info, "metadata", [])
+        return retyped
+
+    def reference_source(self) -> tuple[FieldName, FieldInfo] | Field:
+        """The subject's field this field's ID is read from, with that field's
+        info, if it is read unchanged from one: the subject's own, or one of the
+        Entity a lifted field is read off. Otherwise, this field itself.
+
+        Whether it is a Reference depends on the field's own type, not on the
+        optional one a lifted field may have.
+        """
+        match self.value:
+            case SourceField(field=source):
+                return (source, self.info)
+            case Lifted(through=through, field=read):
+                return (read.field, through[-1].target.model_fields[read.field.root])
+            case Lookup() | ChainedLookup() | Added():
+                return self
+
+    def admitting_none(self) -> Field:
+        """This field typed to admit `None` too, keeping its default and its
+        type's constraints."""
+        return self._annotated(Optionality.OPTIONAL.annotate(self.annotation()))
+
+    def _annotated(self, annotation: RuntimeAnnotation) -> Field:
+        """This field typed by `annotation`, with a copy of its info."""
         info = copy.copy(self.info)
         # `FieldInfo.annotation` is typed narrower than the annotations a Source
         # can have, e.g. `int | None`, so set it untyped.
         object.__setattr__(info, "annotation", annotation)
-        object.__setattr__(info, "metadata", [])
+        object.__setattr__(info, "metadata", list(self.info.metadata))
         return self.model_copy(update={"info": info})
 
     def optionality(self) -> Optionality:
@@ -487,16 +552,16 @@ class NestedField(pydantic.BaseModel, frozen=True):
     """A resolved field whose Entity went through a nested pipeline.
 
     Its type is a View model generated from `relation`, built from the Entity
-    `value` looks up.
+    `value` finds.
     """
 
     name: FieldName
-    value: Lookup
+    value: EntityValue
     relation: Relation
     default: DefaultValue | NoDefault
 
     def optionality(self) -> Optionality:
-        return self.value.optionality
+        return Lookup.optionality_of(self.value.lookups())
 
 
 type RelationField = Field | NestedField
@@ -544,15 +609,9 @@ class Relation(pydantic.BaseModel, frozen=True):
         for field in self.fields:
             match field:
                 case Field(value=value):
-                    match value:
-                        case SourceField() | Added():
-                            pass
-                        case Lookup():
-                            used.append(value)
-                        case Lifted():
-                            used.extend(value.lookups())
-                case NestedField(value=lookup, relation=nested):
-                    used.extend((lookup, *nested.lookups()))
+                    used.extend(value.lookups())
+                case NestedField(value=value, relation=nested):
+                    used.extend((*value.lookups(), *nested.lookups()))
         first: dict[type[pydantic.BaseModel], Lookup] = {}
         for lookup in used:
             if lookup.target not in first:
