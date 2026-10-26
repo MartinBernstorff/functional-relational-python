@@ -1,12 +1,13 @@
 import enum
 import types
 from collections.abc import Iterable, Sequence
-from typing import Literal
+from typing import Annotated, Literal
 
 import pydantic
 import pytest
 from hypothesis import event, given
 from hypothesis import strategies as st
+from pydantic import MISSING
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler, diagnostics, model_names
@@ -1766,3 +1767,261 @@ def test_views_and_payloads_of_distinct_names_compile() -> None:
 
     assert [v.name for v in compiled.views] == [view.name]
     assert [p.name for p in compiled.payloads] == [payload.name]
+
+
+# retype.
+
+
+def compile_employee_payload(
+    step: steps.Step,
+) -> Result[compiler.CompiledCatalog, DiagnosticsError[diagnostics.CompileDiagnostic]]:
+    payload = Payload(name=PayloadName.fake(), source=Employee, step=step)
+    return compiler.compile_catalog(hr_graph(), [], [payload])
+
+
+def employee_payload_diagnostics(
+    step: steps.Step,
+) -> tuple[diagnostics.CompileDiagnostic, ...]:
+    match compile_employee_payload(step):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            return error.diagnostics
+
+
+def annotations(relation: ir.Relation) -> dict[FieldName, ir.RuntimeAnnotation]:
+    return {
+        field.name: field.annotation()
+        for field in relation.fields
+        if isinstance(field, ir.Field)
+    }
+
+
+def test_retype_maps_each_selected_fields_type_with_the_transform() -> None:
+    (compiled,) = (
+        compile_employee_payload(
+            steps.retype(
+                named(FieldName("name"), FieldName("mentor_id")),
+                lambda annotation: annotation | MISSING,
+            ),
+        )
+        .unwrap()
+        .payloads
+    )
+
+    assert annotations(compiled.relation) == {
+        FieldName("id"): EmployeeId,
+        FieldName("name"): Text | MISSING,
+        FieldName("department_id"): DepartmentId,
+        FieldName("mentor_id"): EmployeeId | None | MISSING,
+    }
+
+
+def test_retype_to_gives_the_named_field_one_type() -> None:
+    (compiled,) = (
+        compile_employee_payload(steps.retype_to(FieldName("name"), int))
+        .unwrap()
+        .payloads
+    )
+
+    assert annotations(compiled.relation)[FieldName("name")] is int
+
+
+class Constrained(pydantic.BaseModel):
+    code: Annotated[Text, "constraint"]
+
+
+def test_a_retyped_field_drops_the_old_types_constraints() -> None:
+    payload = Payload(
+        name=PayloadName.fake(),
+        source=Constrained,
+        step=steps.retype_to(FieldName("code"), int),
+    )
+
+    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+
+    match compiled.relation.fields:
+        case (ir.Field(info=info),):
+            assert info.metadata == []
+        case fields:
+            pytest.fail(f"expected one own field, got {fields}")
+
+
+def test_retyping_an_unknown_field_is_a_diagnostic() -> None:
+    unknown = FieldName("nme")
+
+    assert employee_payload_diagnostics(steps.retype_to(unknown, int)) == (
+        diagnostics.UnknownField(
+            view=PayloadName.fake(),
+            source=ir.SourceName("Employee"),
+            field=unknown,
+            valid=tuple(map(FieldName, Employee.model_fields)),
+        ),
+    )
+
+
+def test_retyping_a_field_resolved_through_a_nested_pipeline_is_a_diagnostic() -> None:
+    step = steps.pipeline(
+        steps.resolve(named(FieldName("department_id")), steps.omit(FieldName("name"))),
+        steps.retype_to(FieldName("department"), int),
+    )
+
+    assert employee_payload_diagnostics(step) == (
+        diagnostics.RetypeNestedField(
+            view=PayloadName.fake(),
+            source=ir.SourceName("Employee"),
+            field=FieldName("department"),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        steps.retype_to(FieldName("name"), int),
+        steps.resolve(
+            named(FieldName("department_id")),
+            steps.retype(named(FieldName("name")), lambda annotation: annotation),
+        ),
+    ],
+    ids=["in the view", "in a nested pipeline"],
+)
+def test_retype_in_a_view_is_a_diagnostic(step: steps.Step) -> None:
+    assert resolve_diagnostics(Employee, step) == (
+        diagnostics.RetypeInView(view=ViewName.fake()),
+    )
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "message"),
+    [
+        (
+            diagnostics.RetypeInView(view=ViewName("CompanySummary")),
+            (
+                "CompanySummary: a View cannot retype its fields, because its "
+                "mapping copies each value unchanged. Retype in a Payload instead."
+            ),
+        ),
+        (
+            diagnostics.RetypeNestedField(
+                view=PayloadName("CompanyUpdate"),
+                source=ir.SourceName("Company"),
+                field=FieldName("parent"),
+            ),
+            (
+                "CompanyUpdate: cannot retype Company.parent, because its type is "
+                "the model of a nested pipeline."
+            ),
+        ),
+    ],
+    ids=["in-view", "nested"],
+)
+def test_a_retype_diagnostic_message_names_the_offending_values(
+    diagnostic: diagnostics.CompileDiagnostic, message: str
+) -> None:
+    assert diagnostic.describe().root == message
+
+
+# Base classes.
+
+
+class NamedBase(pydantic.BaseModel):
+    name: Text
+
+
+class Keyed[T](pydantic.BaseModel):
+    name: T
+
+
+class DepartmentNamedBase(pydantic.BaseModel):
+    name: DepartmentId
+
+
+@pytest.mark.parametrize("base", [NamedBase, Keyed[Text]])
+def test_a_kept_field_the_base_declares_with_the_same_type_compiles(
+    base: type[pydantic.BaseModel],
+) -> None:
+    payload = Payload(
+        name=PayloadName.fake(), source=Company, step=steps.pipeline(), base=base
+    )
+
+    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+
+    # The model inherits `name`; the relation still holds it for the mapping.
+    assert compiled.base is base
+    assert [field.name for field in compiled.relation.fields] == names(
+        Text("name"), Text("secret"), Text("revenue")
+    )
+
+
+@pytest.mark.parametrize("base", [DepartmentNamedBase, Keyed[DepartmentId]])
+def test_a_kept_field_the_base_declares_with_another_type_is_a_diagnostic(
+    base: type[pydantic.BaseModel],
+) -> None:
+    view = View(name=ViewName.fake(), source=Company, step=steps.pipeline(), base=base)
+
+    match compile_catalog([view], []):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            assert error.diagnostics == (
+                diagnostics.BaseFieldTypeMismatch(
+                    view=view.name,
+                    base=base,
+                    field=FieldName("name"),
+                    declared=DepartmentId,
+                    kept=Text,
+                ),
+            )
+
+
+def test_a_field_the_base_declares_is_not_checked_once_omitted() -> None:
+    payload = Payload(
+        name=PayloadName.fake(),
+        source=Company,
+        step=steps.omit(FieldName("name")),
+        base=DepartmentNamedBase,
+    )
+
+    assert isinstance(compile_catalog([], [payload]), Ok)
+
+
+def test_the_base_field_type_mismatch_message_contains_the_offending_values() -> None:
+    view = ViewName.fake()
+    message = diagnostics.BaseFieldTypeMismatch(
+        view=view,
+        base=Keyed[DepartmentId],
+        field=FieldName("name"),
+        declared=DepartmentId,
+        kept=Text,
+    ).describe()
+
+    assert all(
+        part in message.root
+        for part in (view.root, "Keyed[", "'name'", "DepartmentId", "Text")
+    )
+
+
+class DepartmentBase(pydantic.BaseModel):
+    department: Department
+
+
+def test_a_nested_field_the_base_declares_is_a_diagnostic() -> None:
+    view = View(
+        name=ViewName.fake(),
+        source=Employee,
+        step=steps.resolve(
+            named(FieldName("department_id")), steps.project([FieldName("name")])
+        ),
+        base=DepartmentBase,
+    )
+
+    match compiler.compile_views(hr_graph(), [view]):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            assert error.diagnostics == (
+                diagnostics.BaseFieldIsNestedModel(
+                    view=view.name, base=DepartmentBase, field=FieldName("department")
+                ),
+            )

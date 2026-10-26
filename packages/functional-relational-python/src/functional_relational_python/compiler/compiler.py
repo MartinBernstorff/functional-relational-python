@@ -25,7 +25,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     NoEntityError,
     NotAReferenceError,
 )
-from functional_relational_python.pipeline import ir, steps
+from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.payloads import (
     DefinitionName,
     Payload,
@@ -51,11 +51,14 @@ class Poisoned(pydantic.BaseModel, frozen=True):
 
 
 class CompiledView(pydantic.BaseModel, frozen=True):
-    """A checked View: its Source, the Relation backends compute from it, and the
-    names its generated code uses."""
+    """A checked View: its Source, the Relation backends compute from it, the
+    base its model subclasses, and the names its generated code uses.
+
+    Every kept field `base` declares has the type it declares."""
 
     name: ViewName
     source: type[pydantic.BaseModel]
+    base: type[pydantic.BaseModel]
     relation: ir.Relation
     names: ViewModelNames
 
@@ -71,10 +74,14 @@ class CompiledViews(pydantic.BaseModel, frozen=True):
 
 class CompiledPayload(pydantic.BaseModel, frozen=True):
     """A checked Payload: its Source, the Relation its model is generated from,
-    and the names of its models. A Payload has no mapping function."""
+    the base its model subclasses, and the names of its models. A Payload has no
+    mapping function.
+
+    Every kept field `base` declares has the type it declares."""
 
     name: PayloadName
     source: type[pydantic.BaseModel]
+    base: type[pydantic.BaseModel]
     relation: ir.Relation
     names: ModelNames
 
@@ -149,26 +156,68 @@ class PoisonedPayload(pydantic.BaseModel, frozen=True):
 
 
 def _check_relation(
-    entity_graph: EntityGraph,
-    name: DefinitionName,
-    source: type[pydantic.BaseModel],
-    step: steps.Step,
+    entity_graph: EntityGraph, definition: View | Payload
 ) -> ir.Relation | Poisoned:
-    """The Relation a View's or Payload's pipeline builds over its Source, before
-    its model names are checked."""
-    match _check_node(entity_graph, name, step(ir.FromSource(source=source))):
+    """The Relation a View's or Payload's pipeline builds over its Source, checked
+    against its base, before its model names are checked."""
+    name = definition.name
+    match _check_node(
+        entity_graph, name, definition.step(ir.FromSource(source=definition.source))
+    ):
         case ir.Relation() as relation:
-            return relation
+            reported = _check_base(name, definition.base, relation)
+            if not reported:
+                return relation
+            return Poisoned(recovered=relation, diagnostics=reported)
         case Poisoned(recovered=recovered, diagnostics=reported):
             # Nested model names depend on the Relation, which is only partly known.
             return Poisoned(
                 recovered=recovered,
-                diagnostics=(*reported, *ModelNames.name_diagnostics(name)),
+                diagnostics=(
+                    *reported,
+                    *_check_base(name, definition.base, recovered),
+                    *ModelNames.name_diagnostics(name),
+                ),
             )
 
 
+def _check_base(
+    name: DefinitionName, base: type[pydantic.BaseModel], relation: ir.Relation
+) -> tuple[diagnostics.CompileDiagnostic, ...]:
+    """A diagnostic per kept field `base` declares with another type.
+
+    The generated model inherits the fields the base declares with the same type,
+    rather than declaring them again.
+    """
+    reported: list[diagnostics.CompileDiagnostic] = []
+    for field in relation.fields:
+        declared = base.model_fields.get(field.name.root)
+        if declared is None:
+            continue
+        match field:
+            case ir.Field() if field.annotation() == declared.annotation:
+                pass
+            case ir.Field():
+                reported.append(
+                    diagnostics.BaseFieldTypeMismatch(
+                        view=name,
+                        base=base,
+                        field=field.name,
+                        declared=declared.annotation,
+                        kept=field.annotation(),
+                    )
+                )
+            case ir.NestedField():
+                reported.append(
+                    diagnostics.BaseFieldIsNestedModel(
+                        view=name, base=base, field=field.name
+                    )
+                )
+    return tuple(reported)
+
+
 def _check_view(entity_graph: EntityGraph, view: View) -> CompiledView | PoisonedView:
-    match _check_relation(entity_graph, view.name, view.source, view.step):
+    match _check_relation(entity_graph, view):
         case ir.Relation() as relation:
             pass
         case Poisoned(diagnostics=reported):
@@ -176,7 +225,11 @@ def _check_view(entity_graph: EntityGraph, view: View) -> CompiledView | Poisone
     match ViewModelNames.check(view.name, relation):
         case Ok(names):
             return CompiledView(
-                name=view.name, source=view.source, relation=relation, names=names
+                name=view.name,
+                source=view.source,
+                base=view.base,
+                relation=relation,
+                names=names,
             )
         case Err(error):
             return PoisonedView(name=view.name, diagnostics=error.diagnostics)
@@ -185,7 +238,7 @@ def _check_view(entity_graph: EntityGraph, view: View) -> CompiledView | Poisone
 def _check_payload(
     entity_graph: EntityGraph, payload: Payload
 ) -> CompiledPayload | PoisonedPayload:
-    match _check_relation(entity_graph, payload.name, payload.source, payload.step):
+    match _check_relation(entity_graph, payload):
         case ir.Relation() as relation:
             pass
         case Poisoned(diagnostics=reported):
@@ -195,6 +248,7 @@ def _check_payload(
             return CompiledPayload(
                 name=payload.name,
                 source=payload.source,
+                base=payload.base,
                 relation=relation,
                 names=names,
             )
@@ -212,6 +266,7 @@ def _check_node(
             ir.Omit()
             | ir.Rename()
             | ir.RenameSelected()
+            | ir.Retype()
             | ir.Project()
             | ir.Resolve()
             | ir.Default()
@@ -232,6 +287,7 @@ def _check_step(
     node: ir.Omit
     | ir.Rename
     | ir.RenameSelected
+    | ir.Retype
     | ir.Project
     | ir.Resolve
     | ir.Default
@@ -247,6 +303,8 @@ def _check_step(
             checked = _check_rename(view, node, relation)
         case ir.RenameSelected():
             checked = _check_rename_selected(view, node, relation)
+        case ir.Retype():
+            checked = _check_retype(view, node, relation)
         case ir.Project():
             checked = _check_project(view, node, relation)
         case ir.Resolve():
@@ -368,6 +426,56 @@ def _check_rename_selected(
     if not reported:
         return renamed
     return Poisoned(recovered=renamed, diagnostics=tuple(reported))
+
+
+def _check_retype(
+    view: DefinitionName, node: ir.Retype, relation: ir.Relation
+) -> ir.Relation | Poisoned:
+    """Retypes the named field, or every selected field, in place.
+
+    In a View, retyping is a diagnostic. Its fields are still retyped, so later
+    steps are checked against the types the pipeline asks for.
+    """
+    reported: list[diagnostics.CompileDiagnostic] = []
+    match view:
+        case ViewName():
+            reported.append(diagnostics.RetypeInView(view=view))
+        case PayloadName():
+            pass
+    match node.fields:
+        case ir.Select() as selected:
+            retyped = relation.selected(selected)
+        case FieldName() as field:
+            retyped = (field,)
+            if field not in relation.field_names():
+                reported.append(
+                    diagnostics.UnknownField(
+                        view=view,
+                        source=relation.source,
+                        field=field,
+                        valid=relation.field_names(),
+                    )
+                )
+    fields: list[ir.RelationField] = []
+    for field in relation.fields:
+        if field.name not in retyped:
+            fields.append(field)
+            continue
+        match field:
+            case ir.Field():
+                fields.append(field.retyped(node.transform(field.annotation())))
+            case ir.NestedField():
+                # Left as it is, so later steps still find it.
+                reported.append(
+                    diagnostics.RetypeNestedField(
+                        view=view, source=relation.source, field=field.name
+                    )
+                )
+                fields.append(field)
+    checked = ir.Relation(source=relation.source, fields=tuple(fields))
+    if not reported:
+        return checked
+    return Poisoned(recovered=checked, diagnostics=tuple(reported))
 
 
 def _check_project(

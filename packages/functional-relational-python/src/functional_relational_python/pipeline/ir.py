@@ -5,6 +5,7 @@ and derives its Relation: the fields a View result will have, each with its type
 and the Value that computes it. Backends run the Relation, not the node tree.
 """
 
+import copy
 import enum
 from collections.abc import Callable, Collection, Mapping
 
@@ -63,6 +64,20 @@ class RenameSelected(pydantic.BaseModel, frozen=True):
     input: Node
     fields: Select
     new: FieldRenaming
+
+
+type TypeTransform = Callable[[RuntimeAnnotation], RuntimeAnnotation]
+"""Gives a field its new type from its old one."""
+
+
+class Retype(pydantic.BaseModel, frozen=True):
+    """Gives the named field, or every selected field, the type `transform` maps
+    its type to. Only a Payload may retype; a View's mapping copies each value
+    unchanged."""
+
+    input: Node
+    fields: FieldName | Select
+    transform: TypeTransform
 
 
 class Project(pydantic.BaseModel, frozen=True):
@@ -129,7 +144,15 @@ class Add(pydantic.BaseModel, frozen=True):
 
 
 type Node = (
-    FromSource | Omit | Rename | RenameSelected | Project | Resolve | Default | Add
+    FromSource
+    | Omit
+    | Rename
+    | RenameSelected
+    | Retype
+    | Project
+    | Resolve
+    | Default
+    | Add
 )
 
 
@@ -223,6 +246,16 @@ class Field(pydantic.BaseModel, frozen=True):
 
     def annotation(self) -> RuntimeAnnotation:
         return self.info.annotation
+
+    def retyped(self, annotation: RuntimeAnnotation) -> Field:
+        """This field typed by `annotation`, keeping its default but not the old
+        type's constraints."""
+        info = copy.copy(self.info)
+        # `FieldInfo.annotation` is typed narrower than the annotations a Source
+        # can have, e.g. `int | None`, so set it untyped.
+        object.__setattr__(info, "annotation", annotation)
+        object.__setattr__(info, "metadata", [])
+        return self.model_copy(update={"info": info})
 
     def optionality(self) -> Optionality:
         return Optionality.of_annotation(self.annotation()).optionality

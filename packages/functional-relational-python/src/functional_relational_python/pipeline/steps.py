@@ -64,6 +64,31 @@ def rename(fields: FieldName | ir.Select, new: FieldName | ir.FieldRenaming) -> 
     return step
 
 
+def retype(fields: FieldName | ir.Select, transform: ir.TypeTransform) -> Step:
+    """Gives the field named `fields`, or every field `fields` selects, the type
+    `transform` maps its type to.
+
+    Only a Payload may retype. E.g. an update payload widens its fields with
+    `retype(select(...), lambda annotation: annotation | MISSING)`, then defaults
+    them to `MISSING`.
+    """
+
+    def step(node: ir.Node) -> ir.Node:
+        return ir.Retype(input=node, fields=fields, transform=transform)
+
+    return step
+
+
+def retype_to(fields: FieldName | ir.Select, annotation: ir.RuntimeAnnotation) -> Step:
+    """Gives the field named `fields`, or every field `fields` selects, the type
+    `annotation`."""
+
+    def transform(_old: ir.RuntimeAnnotation) -> ir.RuntimeAnnotation:
+        return annotation
+
+    return retype(fields, transform)
+
+
 def default(fields: FieldName | ir.Select, value: ir.UncheckedDefault) -> Step:
     """Sets the default of the field named `fields`, or of every field `fields`
     selects, in the generated model.
