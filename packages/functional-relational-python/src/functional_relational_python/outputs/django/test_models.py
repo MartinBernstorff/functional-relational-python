@@ -33,6 +33,7 @@ from functional_relational_python.outputs.django.models import (
     DjangoModels,
     DjangoModelsRenderer,
     InvalidDjangoFieldName,
+    InvalidReverseAccessorName,
     NoDjangoFieldRule,
     OnDelete,
     OnDeleteForNonReference,
@@ -414,6 +415,39 @@ def test_reverse_accessors_named_alike_are_a_diagnostic() -> None:
                 ReferenceKey(entity=OwnedByTeam, field=FieldName("owner_id")),
             ),
         ),
+    )
+
+
+def test_a_reverse_accessor_django_rejects_is_a_diagnostic() -> None:
+    """An Entity named with `__` gives a reverse accessor holding `__`."""
+
+    class DoubleId(Id[int]):
+        pass
+
+    double = pydantic.create_model(
+        "Holder__Details",
+        id=(DoubleId, ...),
+        holder_id=(Annotated[HolderId, OneToOne()], ...),
+    )
+
+    assert diagnostics([Holder, double], config({}, {})) == (
+        InvalidReverseAccessorName(
+            name=FieldName("holder__details_by_holder"),
+            reference=ReferenceKey(entity=double, field=FieldName("holder_id")),
+        ),
+    )
+
+
+def test_the_invalid_reverse_accessor_message_names_the_reference() -> None:
+    diagnostic = InvalidReverseAccessorName(
+        name=FieldName("holder__details_by_holder"),
+        reference=ReferenceKey(entity=HolderDetails, field=FieldName("holder_id")),
+    )
+
+    assert diagnostic.describe().root == (
+        "HolderDetails.holder_id: its reverse accessor 'holder__details_by_holder' "
+        "cannot be a Django related name, since Django rejects one ending in '_' "
+        "or holding '__'. Rename the Entity or the field."
     )
 
 

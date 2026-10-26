@@ -1985,17 +1985,16 @@ def test_queries_give_the_same_view_results_as_the_engine(
 
     # Catch a strategy that stops drawing resolves, reverses, Filters or Unions.
     relations = [view.relation for view in compiled.views]
-    event(f"looks up an Entity: {any(relation.lookups() for relation in relations)}")
-    event(
-        "reverses: "
-        f"{any(isinstance(lookup, ir.ReverseLookup) for r in relations for lookup in r.lookups())}"
+    lookups = [lookup for relation in relations for lookup in relation.lookups()]
+    reverses = any(isinstance(lookup, ir.ReverseLookup) for lookup in lookups)
+    unmet = any(
+        isinstance(result, UnmetRequirementRead) for result in expected.values()
     )
+    event(f"looks up an Entity: {bool(lookups)}")
+    event(f"reverses: {reverses}")
     event(f"filters: {any(relation.filters for relation in relations)}")
     event(f"reads a Union: {bool(compiled.unions)}")
-    event(
-        "unmet requirement: "
-        f"{any(isinstance(result, UnmetRequirementRead) for result in expected.values())}"
-    )
+    event(f"unmet requirement: {unmet}")
     assert read == expected
 
 

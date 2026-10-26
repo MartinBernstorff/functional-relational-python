@@ -305,6 +305,23 @@ class ReverseAccessorClash(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class InvalidReverseAccessorName(pydantic.BaseModel, Diagnostic, frozen=True):
+    """The reverse accessor of a one-to-one Reference would have a name Django
+    rejects as a related name: one ending in `_` or holding `__`, e.g. for an
+    Entity named with `__`."""
+
+    name: FieldName
+    reference: ReferenceKey
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.reference.entity.__qualname__}.{self.reference.field.root}: its "
+            f"reverse accessor '{self.name.root}' cannot be a Django related name, "
+            "since Django rejects one ending in '_' or holding '__'. Rename the "
+            "Entity or the field."
+        )
+
+
 class AutoIncrementOnNonPrimaryKey(pydantic.BaseModel, Diagnostic, frozen=True):
     """A type override gives a field other than the primary key an
     auto-incrementing Django field, e.g. an override keyed on `int`."""
@@ -331,6 +348,7 @@ type DjangoDiagnostic = (
     | DjangoFieldNameClash
     | DjangoModelNameClash
     | ReverseAccessorClash
+    | InvalidReverseAccessorName
 )
 
 
@@ -676,10 +694,10 @@ class DjangoModelsRenderer:
         graph: EntityGraph,
         model: type[pydantic.BaseModel],
         declarations: Iterable[_Declaration],
-    ) -> Iterator[ReverseAccessorClash]:
+    ) -> Iterator[ReverseAccessorClash | InvalidReverseAccessorName]:
         """Reverse accessors on `model`'s Django model named like another one, or
-        like a name the model binds or reserves. References are in Entity name and
-        field order."""
+        like a name the model binds or reserves, or named as Django forbids.
+        References are in Entity name and field order."""
         bound = {
             *DjangoModelsRenderer.reserved,
             *(
@@ -705,6 +723,13 @@ class DjangoModelsRenderer:
             if len(references) > 1 or name in bound:
                 yield ReverseAccessorClash(
                     entity=model, name=name, references=tuple(references)
+                )
+            # It is an identifier, made of an Entity's and a field's name, and no
+            # keyword, since it holds `_by_`.
+            if name.root.endswith("_") or "__" in name.root:
+                yield from (
+                    InvalidReverseAccessorName(name=name, reference=reference)
+                    for reference in references
                 )
 
     @staticmethod

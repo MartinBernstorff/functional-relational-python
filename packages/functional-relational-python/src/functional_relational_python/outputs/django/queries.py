@@ -593,11 +593,12 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                 ),
             )
             for query in self._over(entity):
+                method = query.names().method()
                 methods.define(
-                    query.names().method(),
+                    method,
                     AnnotationText(
-                        f"{query_set.describe().root}.{query.names().method().root} (the "
-                        f"method of {query.describe().root})"
+                        f"{query_set.describe().root}.{method.root} (the method of "
+                        f"{query.describe().root})"
                     ),
                 )
             yield from methods.clashes()
