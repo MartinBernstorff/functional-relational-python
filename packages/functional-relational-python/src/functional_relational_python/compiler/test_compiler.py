@@ -522,9 +522,24 @@ class Count(int):
     pass
 
 
+class Permission(enum.Flag):
+    READ = enum.auto()
+    WRITE = enum.auto()
+
+
 @pytest.mark.parametrize(
     "value",
-    [object(), (), [None], {"key": None}, float("nan"), Count(1), Text("shop")],
+    [
+        object(),
+        (),
+        [None],
+        {"key": None},
+        float("nan"),
+        Count(1),
+        Text("shop"),
+        Permission.READ | Permission.WRITE,
+        Permission(0),
+    ],
     ids=[
         "object",
         "tuple",
@@ -533,6 +548,8 @@ class Count(int):
         "nan",
         "int subclass",
         "root model",
+        "combined flag",
+        "empty flag",
     ],
 )
 def test_a_default_that_is_not_a_literal_is_a_diagnostic(
@@ -823,7 +840,7 @@ def test_resolve_leaves_unselected_references_alone() -> None:
 @pytest.mark.parametrize(
     "then", [(), (steps.project([FieldName("name")]),)], ids=["entity", "nested"]
 )
-def test_a_resolved_reference_keeps_its_default(then: tuple[steps.Step, ...]) -> None:
+def test_a_resolved_reference_loses_its_default(then: tuple[steps.Step, ...]) -> None:
     view = compile_resolving(
         Employee,
         steps.pipeline(
@@ -832,7 +849,7 @@ def test_a_resolved_reference_keeps_its_default(then: tuple[steps.Step, ...]) ->
         ),
     )
 
-    assert defaults(view) == {FieldName("mentor"): ir.ScalarDefault(None)}
+    assert defaults(view) == {}
 
 
 def department_lookup() -> ir.Lookup:

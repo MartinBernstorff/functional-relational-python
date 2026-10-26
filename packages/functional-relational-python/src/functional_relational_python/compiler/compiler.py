@@ -340,7 +340,9 @@ def _default_value(
     match value:
         case pydantic.MISSING:
             default = ir.MissingDefault()
-        case enum.Enum():
+        case enum.Enum() if type(value).__members__.get(value.name) is value:
+            # A combination of Flag members, or an empty Flag, has no name to
+            # write out.
             default = ir.EnumDefault(member=value)
         case None:
             default = ir.ScalarDefault(None)
@@ -415,9 +417,7 @@ def _resolve_field(
         invalid := ViewModelNames.check_field(view, relation.source, name)
     ):
         return _CheckedField(field=field, diagnostics=invalid)
-    return _resolved(
-        entity_graph, view, node, lookup, field.model_copy(update={"name": name})
-    )
+    return _resolved(entity_graph, view, node, name, lookup)
 
 
 def _lookup(
@@ -471,17 +471,16 @@ def _resolved(
     entity_graph: EntityGraph,
     view: ViewName,
     node: ir.Resolve,
+    name: FieldName,
     lookup: ir.Lookup,
-    reference: ir.RelationField,
 ) -> _CheckedField:
-    """The field holding the Entity `lookup` finds, after `node.then` if it does
-    anything.
+    """The field holding the looked-up Entity, after `node.then` if it does anything.
 
-    `reference` is the Reference, renamed to the name the resolved field gets; the
-    resolved field keeps its default. Without a nested pipeline the field is typed
-    by the Entity class itself.
+    Without a nested pipeline the field is typed by the Entity class itself. The
+    field is new, so it has no default: the Reference's default was for an ID, and
+    need not fit the Entity.
     """
-    name, default = reference.name, reference.default
+    default = ir.NoDefault()
     root = ir.FromSource(source=lookup.target)
     nested = node.then(root)
     if nested == root:
