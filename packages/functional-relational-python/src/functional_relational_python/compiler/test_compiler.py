@@ -1,5 +1,6 @@
 import types
 from collections.abc import Iterable, Sequence
+from typing import Annotated
 
 import pydantic
 import pytest
@@ -1468,19 +1469,17 @@ def test_views_and_payloads_of_distinct_names_compile() -> None:
 # retype.
 
 
-def compile_payload(
-    source: type[pydantic.BaseModel], step: steps.Step
-) -> compiler.CompiledPayload:
-    payload = Payload(name=PayloadName.fake(), source=source, step=step)
-    (compiled,) = compiler.compile_catalog(hr_graph(), [], [payload]).unwrap().payloads
-    return compiled
+def compile_employee_payload(
+    step: steps.Step,
+) -> Result[compiler.CompiledCatalog, DiagnosticsError[diagnostics.CompileDiagnostic]]:
+    payload = Payload(name=PayloadName.fake(), source=Employee, step=step)
+    return compiler.compile_catalog(hr_graph(), [], [payload])
 
 
-def payload_diagnostics(
-    source: type[pydantic.BaseModel], step: steps.Step
+def employee_payload_diagnostics(
+    step: steps.Step,
 ) -> tuple[diagnostics.CompileDiagnostic, ...]:
-    payload = Payload(name=PayloadName.fake(), source=source, step=step)
-    match compiler.compile_catalog(hr_graph(), [], [payload]):
+    match compile_employee_payload(step):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
@@ -1496,12 +1495,15 @@ def annotations(relation: ir.Relation) -> dict[FieldName, ir.RuntimeAnnotation]:
 
 
 def test_retype_maps_each_selected_fields_type_with_the_transform() -> None:
-    compiled = compile_payload(
-        Employee,
-        steps.retype(
-            named(FieldName("name"), FieldName("mentor_id")),
-            lambda annotation: annotation | MISSING,
-        ),
+    (compiled,) = (
+        compile_employee_payload(
+            steps.retype(
+                named(FieldName("name"), FieldName("mentor_id")),
+                lambda annotation: annotation | MISSING,
+            ),
+        )
+        .unwrap()
+        .payloads
     )
 
     assert annotations(compiled.relation) == {
@@ -1513,15 +1515,39 @@ def test_retype_maps_each_selected_fields_type_with_the_transform() -> None:
 
 
 def test_retype_to_gives_the_named_field_one_type() -> None:
-    compiled = compile_payload(Employee, steps.retype_to(FieldName("name"), int))
+    (compiled,) = (
+        compile_employee_payload(steps.retype_to(FieldName("name"), int))
+        .unwrap()
+        .payloads
+    )
 
     assert annotations(compiled.relation)[FieldName("name")] is int
+
+
+class Constrained(pydantic.BaseModel):
+    code: Annotated[Text, "constraint"]
+
+
+def test_a_retyped_field_drops_the_old_types_constraints() -> None:
+    payload = Payload(
+        name=PayloadName.fake(),
+        source=Constrained,
+        step=steps.retype_to(FieldName("code"), int),
+    )
+
+    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+
+    match compiled.relation.fields:
+        case (ir.Field(info=info),):
+            assert info.metadata == []
+        case fields:
+            pytest.fail(f"expected one own field, got {fields}")
 
 
 def test_retyping_an_unknown_field_is_a_diagnostic() -> None:
     unknown = FieldName("nme")
 
-    assert payload_diagnostics(Employee, steps.retype_to(unknown, int)) == (
+    assert employee_payload_diagnostics(steps.retype_to(unknown, int)) == (
         diagnostics.UnknownField(
             view=PayloadName.fake(),
             source=ir.SourceName("Employee"),
@@ -1537,7 +1563,7 @@ def test_retyping_a_field_resolved_through_a_nested_pipeline_is_a_diagnostic() -
         steps.retype_to(FieldName("department"), int),
     )
 
-    assert payload_diagnostics(Employee, step) == (
+    assert employee_payload_diagnostics(step) == (
         diagnostics.RetypeNestedField(
             view=PayloadName.fake(),
             source=ir.SourceName("Employee"),

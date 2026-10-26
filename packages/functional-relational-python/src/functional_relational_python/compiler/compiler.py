@@ -386,9 +386,10 @@ def _check_retype(
                 )
     fields: list[ir.RelationField] = []
     for field in relation.fields:
+        if field.name not in retyped:
+            fields.append(field)
+            continue
         match field:
-            case _ if field.name not in retyped:
-                fields.append(field)
             case ir.Field():
                 fields.append(field.retyped(node.transform(field.annotation())))
             case ir.NestedField():

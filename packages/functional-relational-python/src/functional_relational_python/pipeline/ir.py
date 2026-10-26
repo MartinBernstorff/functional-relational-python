@@ -67,7 +67,6 @@ class RenameSelected(pydantic.BaseModel, frozen=True):
 
 type TypeTransform = Callable[[RuntimeAnnotation], RuntimeAnnotation]
 """Gives a field its new type from its old one."""
-"""Gives a field its new type from its old one."""
 
 
 class Retype(pydantic.BaseModel, frozen=True):
@@ -155,11 +154,13 @@ class Field(pydantic.BaseModel, frozen=True):
         return self.info.annotation
 
     def retyped(self, annotation: RuntimeAnnotation) -> Field:
-        """This field typed by `annotation`, keeping the rest of its `info`."""
+        """This field typed by `annotation`. It keeps the rest of its `info`, such
+        as its default, but not the old type's constraints."""
         info = copy.copy(self.info)
         # `FieldInfo.annotation` is typed narrower than the annotations a Source
         # can have, e.g. `int | None`, so set it untyped.
         object.__setattr__(info, "annotation", annotation)
+        object.__setattr__(info, "metadata", [])
         return self.model_copy(update={"info": info})
 
     def optionality(self) -> Optionality:
