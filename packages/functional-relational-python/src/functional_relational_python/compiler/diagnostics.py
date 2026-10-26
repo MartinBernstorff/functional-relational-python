@@ -125,8 +125,9 @@ class ReverseOfNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
 class NoOneToOneReference(pydantic.BaseModel, Diagnostic, frozen=True):
     """`reverse` named an Entity with no one-to-one Reference to the subject.
 
-    `many_to_one` are its References to the subject that are not marked
-    `OneToOne`; following one backwards would give several Entities.
+    `many_to_one` are its References to the subject that the catalog's
+    `OneToOneMarker` does not mark; following one backwards would give several
+    Entities.
     """
 
     view: DefinitionName
@@ -142,7 +143,7 @@ class NoOneToOneReference(pydantic.BaseModel, Diagnostic, frozen=True):
         )
         if self.many_to_one:
             fields = ", ".join(f"'{field.root}'" for field in self.many_to_one)
-            message += f" Its References {fields} are not marked OneToOne."
+            message += f" Its References {fields} are not marked one-to-one."
         return DiagnosticMessage(message)
 
 

@@ -11,7 +11,11 @@ from pydantic import BaseModel, ConfigDict, RootModel
 from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.entity_graph.id import IdBase, IdType, OneToOne
+from functional_relational_python.entity_graph.id import (
+    IdBase,
+    IdType,
+    OneToOneMarker,
+)
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,
@@ -115,22 +119,24 @@ class SplitAnnotation(BaseModel):
 class Cardinality(StrEnum):
     """How many Entities' References may point to one target Entity.
 
-    A Reference is many-to-one unless its field is marked `OneToOne`. Only a
-    one-to-one Reference can be followed backwards to a single Entity.
+    A Reference is many-to-one unless the catalog's `OneToOneMarker` marks its
+    field. Only a one-to-one Reference can be followed backwards to a single
+    Entity.
     """
 
     MANY_TO_ONE = "many-to-one"
     ONE_TO_ONE = "one-to-one"
 
     @staticmethod
-    def of_field(info: FieldInfo) -> Cardinality:
-        """One-to-one if `OneToOne` marks the field, as `Annotated[X, OneToOne()]`,
-        `Annotated[X | None, OneToOne()]` or `Annotated[X, OneToOne()] | None`."""
+    def of_field(info: FieldInfo, one_to_one: OneToOneMarker) -> Cardinality:
+        """One-to-one if `one_to_one` marks the field, e.g. with frp's `OneToOne`
+        as `Annotated[X, OneToOne()]`, `Annotated[X | None, OneToOne()]` or
+        `Annotated[X, OneToOne()] | None`."""
         metadata = (
             *info.metadata,
             *Optionality.of_annotation(info.annotation).metadata,
         )
-        if any(isinstance(marker, OneToOne) for marker in metadata):
+        if any(one_to_one.marks(marker) for marker in metadata):
             return Cardinality.ONE_TO_ONE
         return Cardinality.MANY_TO_ONE
 
@@ -207,18 +213,19 @@ class NotAnEntity(BaseModel, Diagnostic):
 
 
 class OneToOneOnNonReference(BaseModel, Diagnostic):
-    """A field marked `OneToOne` is not a Reference: it is the primary key, or not
+    """A field marked one-to-one is not a Reference: it is the primary key, or not
     typed `X` or `X | None` for an ID type `X`."""
 
     model_config = ConfigDict(frozen=True)
 
     entity: type[BaseModel]
     field: FieldName
+    one_to_one: OneToOneMarker
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.entity.__qualname__}.{self.field.root} is marked OneToOne, but "
-            "is not a Reference"
+            f"{self.entity.__qualname__}.{self.field.root} is marked "
+            f"{self.one_to_one.root.__qualname__}, but is not a Reference"
         )
 
 
@@ -248,7 +255,7 @@ class NoEntityError(Exception):
 
 class IdAnnotation(BaseModel):
     """A field annotated `X` or `X | None`, where `X` is an ID type, and whether
-    it is marked `OneToOne`.
+    it is marked one-to-one.
 
     Only these two shapes are References; `list[X]` and the like are not.
     """
@@ -261,7 +268,7 @@ class IdAnnotation(BaseModel):
 
     @staticmethod
     def of(
-        info: FieldInfo, id_base: IdBase
+        info: FieldInfo, id_base: IdBase, one_to_one: OneToOneMarker
     ) -> Result[IdAnnotation, NotAnIdAnnotationError]:
         split = Optionality.of_annotation(info.annotation)
         if id_base.includes(split.required):
@@ -269,14 +276,14 @@ class IdAnnotation(BaseModel):
                 IdAnnotation(
                     id_type=split.required,
                     optionality=split.optionality,
-                    cardinality=Cardinality.of_field(info),
+                    cardinality=Cardinality.of_field(info, one_to_one),
                 )
             )
         return Err(NotAnIdAnnotationError(info, id_base))
 
     @staticmethod
     def of_reference(
-        field: FieldName, info: FieldInfo, id_base: IdBase
+        field: FieldName, info: FieldInfo, id_base: IdBase, one_to_one: OneToOneMarker
     ) -> Result[IdAnnotation, NotAReferenceError]:
         """The ID type and optionality of `field`, if it is a Reference.
 
@@ -285,7 +292,7 @@ class IdAnnotation(BaseModel):
         """
         if field == EntityNode.primary_key:
             return Err(NotAReferenceError(field))
-        match IdAnnotation.of(info, id_base):
+        match IdAnnotation.of(info, id_base, one_to_one):
             case Ok(annotation):
                 return Ok(annotation)
             case Err():
@@ -311,16 +318,20 @@ class EntityGraph(BaseModel):
     """All Entities, with every Reference resolved to the Entity it points to.
 
     `id_base` decides which types are ID types, and so which fields are References.
+    `one_to_one` decides which References are one-to-one.
     """
 
     model_config = ConfigDict(frozen=True)
 
     entities: Mapping[type[BaseModel], EntityNode]
     id_base: IdBase
+    one_to_one: OneToOneMarker
 
     @staticmethod
     def build(
-        entities: Iterable[type[BaseModel]], id_base: IdBase
+        entities: Iterable[type[BaseModel]],
+        id_base: IdBase,
+        one_to_one: OneToOneMarker,
     ) -> Result[EntityGraph, DiagnosticsError[EntityGraphDiagnostic]]:
         """Build the graph, or return every diagnostic at once.
 
@@ -335,11 +346,16 @@ class EntityGraph(BaseModel):
                 case _:
                     diagnostics.add(NotAnEntity(model=model, id_base=id_base))
             diagnostics.update(
-                OneToOneOnNonReference(entity=model, field=FieldName(name))
+                OneToOneOnNonReference(
+                    entity=model, field=FieldName(name), one_to_one=one_to_one
+                )
                 for name, info in model.model_fields.items()
-                if Cardinality.of_field(info) == Cardinality.ONE_TO_ONE
+                if Cardinality.of_field(info, one_to_one) == Cardinality.ONE_TO_ONE
                 and isinstance(
-                    IdAnnotation.of_reference(FieldName(name), info, id_base), Err
+                    IdAnnotation.of_reference(
+                        FieldName(name), info, id_base, one_to_one
+                    ),
+                    Err,
                 )
             )
 
@@ -356,7 +372,9 @@ class EntityGraph(BaseModel):
         for id_type, models in keyed_by.items():
             for model in models:
                 references: list[Reference] = []
-                for reference in EntityGraph._reference_fields(model, id_base):
+                for reference in EntityGraph._reference_fields(
+                    model, id_base, one_to_one
+                ):
                     annotation = reference.annotation
                     if annotation.id_type in owners:
                         references.append(
@@ -385,15 +403,15 @@ class EntityGraph(BaseModel):
         # Sorted, so the order of `entities` does not affect the order reported.
         return DiagnosticsError.or_ok(
             sorted(diagnostics, key=lambda diagnostic: diagnostic.describe().root),
-            lambda: EntityGraph(entities=nodes, id_base=id_base),
+            lambda: EntityGraph(entities=nodes, id_base=id_base, one_to_one=one_to_one),
         )
 
     @staticmethod
     def _reference_fields(
-        model: type[BaseModel], id_base: IdBase
+        model: type[BaseModel], id_base: IdBase, one_to_one: OneToOneMarker
     ) -> Iterator[_ReferenceField]:
         for name, info in model.model_fields.items():
-            match IdAnnotation.of_reference(FieldName(name), info, id_base):
+            match IdAnnotation.of_reference(FieldName(name), info, id_base, one_to_one):
                 case Ok(annotation):
                     yield _ReferenceField(field=FieldName(name), annotation=annotation)
                 case Err():
@@ -415,7 +433,7 @@ class EntityGraph(BaseModel):
 
         `field` is the subject's own field the value comes from.
         """
-        match IdAnnotation.of_reference(field, info, self.id_base):
+        match IdAnnotation.of_reference(field, info, self.id_base, self.one_to_one):
             case Err() as not_a_reference:
                 return not_a_reference
             case Ok(annotation):

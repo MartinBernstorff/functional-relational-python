@@ -1,3 +1,4 @@
+import dataclasses
 import itertools
 from collections.abc import Sequence
 from typing import Annotated
@@ -8,7 +9,12 @@ from pydantic import BaseModel, RootModel
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.entity_graph import entity_graph
-from functional_relational_python.entity_graph.id import Id, IdBase, OneToOne
+from functional_relational_python.entity_graph.id import (
+    Id,
+    IdBase,
+    OneToOne,
+    OneToOneMarker,
+)
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
 
@@ -107,6 +113,23 @@ class MarkedPrimaryKey(BaseModel):
     id: Annotated[ProjectDetailId, OneToOne()]
 
 
+@dataclasses.dataclass(frozen=True)
+class AppOneToOne:
+    """A one-to-one marker an application defines, rather than using frp's."""
+
+
+class AppProjectDetail(BaseModel):
+    id: ProjectDetailId
+    project_id: Annotated[ProjectId, AppOneToOne()]
+    successor_id: Annotated[ProjectId | None, AppOneToOne()]
+    predecessor_id: Annotated[ProjectId, AppOneToOne()] | None
+
+
+class AppMarkedPlainField(BaseModel):
+    id: ProjectDetailId
+    name: Annotated[Name, AppOneToOne()]
+
+
 class AppId(RootModel[UUID], frozen=True):
     """An ID base an application defines, rather than subclassing frp's `Id`."""
 
@@ -132,7 +155,9 @@ class Member(BaseModel):
 def _diagnostics(
     entities: Sequence[type[BaseModel]],
 ) -> frozenset[entity_graph.EntityGraphDiagnostic]:
-    match entity_graph.EntityGraph.build(entities, IdBase.fake()):
+    match entity_graph.EntityGraph.build(
+        entities, IdBase.fake(), OneToOneMarker.fake()
+    ):
         case Ok(graph):
             pytest.fail(f"Expected diagnostics, got {graph}")
         case Err(error):
@@ -141,7 +166,7 @@ def _diagnostics(
 
 def test_references_resolve_to_the_entity_owning_their_id_type() -> None:
     result = entity_graph.EntityGraph.build(
-        [Department, Employee, Project], IdBase.fake()
+        [Department, Employee, Project], IdBase.fake(), OneToOneMarker.fake()
     )
 
     assert isinstance(result, Ok)
@@ -164,7 +189,9 @@ def test_references_resolve_to_the_entity_owning_their_id_type() -> None:
 
 
 def test_an_entity_may_reference_itself() -> None:
-    result = entity_graph.EntityGraph.build([Department, Employee], IdBase.fake())
+    result = entity_graph.EntityGraph.build(
+        [Department, Employee], IdBase.fake(), OneToOneMarker.fake()
+    )
 
     assert isinstance(result, Ok)
     assert [
@@ -173,7 +200,9 @@ def test_an_entity_may_reference_itself() -> None:
 
 
 def test_entities_record_their_primary_key_type() -> None:
-    result = entity_graph.EntityGraph.build([Department], IdBase.fake())
+    result = entity_graph.EntityGraph.build(
+        [Department], IdBase.fake(), OneToOneMarker.fake()
+    )
 
     assert isinstance(result, Ok)
     assert result.value.entities[Department].id_type is DepartmentId
@@ -285,7 +314,9 @@ def test_a_reference_to_a_duplicated_id_type_is_not_also_unresolved() -> None:
 
 
 def test_the_error_message_names_the_offending_types() -> None:
-    match entity_graph.EntityGraph.build([Employee], IdBase.fake()):
+    match entity_graph.EntityGraph.build(
+        [Employee], IdBase.fake(), OneToOneMarker.fake()
+    ):
         case Ok(graph):
             pytest.fail(f"Expected diagnostics, got {graph}")
         case Err(error):
@@ -307,7 +338,11 @@ def test_reordering_the_entities_gives_the_same_result(
     entities: Sequence[type[BaseModel]],
 ) -> None:
     first, *rest = [
-        _comparable(entity_graph.EntityGraph.build(permutation, IdBase.fake()))
+        _comparable(
+            entity_graph.EntityGraph.build(
+                permutation, IdBase.fake(), OneToOneMarker.fake()
+            )
+        )
         for permutation in itertools.permutations(entities)
     ]
 
@@ -379,7 +414,9 @@ def test_an_annotation_is_written_with_its_optionality(
 
 def test_a_reference_marked_one_to_one_is_one_to_one_however_it_is_optional() -> None:
     graph = entity_graph.EntityGraph.build(
-        [Department, Employee, Project, ProjectDetail], IdBase.fake()
+        [Department, Employee, Project, ProjectDetail],
+        IdBase.fake(),
+        OneToOneMarker.fake(),
     ).unwrap()
 
     assert [
@@ -432,22 +469,86 @@ def test_marking_a_field_that_is_not_a_reference_one_to_one_is_a_diagnostic(
     model: type[BaseModel], field: entity_graph.FieldName
 ) -> None:
     assert _diagnostics([model]) == {
-        entity_graph.OneToOneOnNonReference(entity=model, field=field)
+        entity_graph.OneToOneOnNonReference(
+            entity=model, field=field, one_to_one=OneToOneMarker.fake()
+        )
     }
 
 
-def test_the_one_to_one_on_non_reference_message_names_the_field() -> None:
+def test_the_one_to_one_on_non_reference_message_names_the_field_and_marker() -> None:
     diagnostic = entity_graph.OneToOneOnNonReference(
-        entity=MarkedPlainField, field=entity_graph.FieldName("name")
+        entity=MarkedPlainField,
+        field=entity_graph.FieldName("name"),
+        one_to_one=OneToOneMarker(AppOneToOne),
     )
 
     assert diagnostic.describe().root == (
-        "MarkedPlainField.name is marked OneToOne, but is not a Reference"
+        "MarkedPlainField.name is marked AppOneToOne, but is not a Reference"
     )
 
 
+@pytest.mark.parametrize(
+    ("one_to_one", "cardinality"),
+    [
+        pytest.param(
+            OneToOneMarker(AppOneToOne),
+            entity_graph.Cardinality.ONE_TO_ONE,
+            id="the catalog's marker",
+        ),
+        pytest.param(
+            OneToOneMarker.fake(),
+            entity_graph.Cardinality.MANY_TO_ONE,
+            id="another marker",
+        ),
+    ],
+)
+def test_only_the_catalogs_one_to_one_marker_marks_a_reference(
+    one_to_one: OneToOneMarker, cardinality: entity_graph.Cardinality
+) -> None:
+    graph = entity_graph.EntityGraph.build(
+        [Department, Employee, Project, AppProjectDetail], IdBase.fake(), one_to_one
+    ).unwrap()
+
+    assert {
+        reference.cardinality
+        for reference in graph.entities[AppProjectDetail].references
+    } == {cardinality}
+
+
+def test_the_catalogs_marker_on_a_field_that_is_not_a_reference_is_a_diagnostic() -> (
+    None
+):
+    match entity_graph.EntityGraph.build(
+        [AppMarkedPlainField], IdBase.fake(), OneToOneMarker(AppOneToOne)
+    ):
+        case Ok(graph):
+            pytest.fail(f"Expected diagnostics, got {graph}")
+        case Err(error):
+            assert error.diagnostics == (
+                entity_graph.OneToOneOnNonReference(
+                    entity=AppMarkedPlainField,
+                    field=entity_graph.FieldName("name"),
+                    one_to_one=OneToOneMarker(AppOneToOne),
+                ),
+            )
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [object, BaseModel, Department, OneToOne()],
+    ids=["object", "BaseModel", "a model", "not a class"],
+)
+def test_a_one_to_one_marker_is_a_class_other_than_object_or_a_model(
+    marker: object,
+) -> None:
+    with pytest.raises(ValueError, match="cannot mark a Reference as one-to-one"):
+        _ = OneToOneMarker.model_validate(marker)
+
+
 def test_the_id_base_decides_which_fields_are_references() -> None:
-    graph = entity_graph.EntityGraph.build([Team, Member], IdBase(AppId)).unwrap()
+    graph = entity_graph.EntityGraph.build(
+        [Team, Member], IdBase(AppId), OneToOneMarker.fake()
+    ).unwrap()
 
     assert graph.entities[Member].references == (
         entity_graph.Reference(
@@ -461,7 +562,9 @@ def test_the_id_base_decides_which_fields_are_references() -> None:
 
 
 def test_a_model_keyed_by_an_id_of_another_base_is_not_an_entity() -> None:
-    match entity_graph.EntityGraph.build([Department], IdBase(AppId)):
+    match entity_graph.EntityGraph.build(
+        [Department], IdBase(AppId), OneToOneMarker.fake()
+    ):
         case Ok(graph):
             pytest.fail(f"Expected diagnostics, got {graph}")
         case Err(error):
@@ -475,7 +578,9 @@ def test_the_id_base_itself_is_not_an_id_type() -> None:
     class KeyedByTheBase(BaseModel):
         id: AppId
 
-    match entity_graph.EntityGraph.build([KeyedByTheBase], IdBase(AppId)):
+    match entity_graph.EntityGraph.build(
+        [KeyedByTheBase], IdBase(AppId), OneToOneMarker.fake()
+    ):
         case Ok(graph):
             pytest.fail(f"Expected diagnostics, got {graph}")
         case Err(error):

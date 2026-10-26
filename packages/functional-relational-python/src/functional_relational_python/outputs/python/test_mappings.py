@@ -26,7 +26,12 @@ from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
     Optionality,
 )
-from functional_relational_python.entity_graph.id import Id, IdBase, OneToOne
+from functional_relational_python.entity_graph.id import (
+    Id,
+    IdBase,
+    OneToOne,
+    OneToOneMarker,
+)
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.python.mappings import (
     Expression,
@@ -142,7 +147,9 @@ class Transfer(pydantic.BaseModel, frozen=True):
 
 def entity_graph() -> EntityGraph:
     return EntityGraph.build(
-        [Company, Wide, Department, Employee, Profile], IdBase.fake()
+        [Company, Wide, Department, Employee, Profile],
+        IdBase.fake(),
+        OneToOneMarker.fake(),
     ).unwrap()
 
 
@@ -213,7 +220,9 @@ def into(module: ModulePath) -> ModuleLayout:
 
 def plan_of(compiled: compiler.CompiledViews, layout: PythonLayout) -> PythonPlan:
     match PythonPlan.of(
-        compiler.CompiledCatalog(views=compiled.views, payloads=()), layout
+        compiler.CompiledCatalog(views=compiled.views, payloads=()),
+        layout,
+        OneToOneMarker.fake(),
     ):
         case Ok(plan):
             return plan

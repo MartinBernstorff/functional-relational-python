@@ -1,3 +1,4 @@
+import dataclasses
 import enum
 import subprocess
 import sys
@@ -15,7 +16,12 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id, IdBase, OneToOne
+from functional_relational_python.entity_graph.id import (
+    Id,
+    IdBase,
+    OneToOne,
+    OneToOneMarker,
+)
 from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
     PythonLayout,
@@ -66,7 +72,9 @@ def compile_catalog(
     views: Sequence[View], payloads: Sequence[Payload]
 ) -> compiler.CompiledCatalog:
     return compiler.compile_catalog(
-        EntityGraph.build([Company], IdBase.fake()).unwrap(), views, payloads
+        EntityGraph.build([Company], IdBase.fake(), OneToOneMarker.fake()).unwrap(),
+        views,
+        payloads,
     ).unwrap()
 
 
@@ -84,7 +92,9 @@ def generate(
     views: Sequence[View], payloads: Sequence[Payload], layout: ModuleLayout
 ) -> GeneratedFiles:
     match PythonPlan.of(
-        compile_catalog(views, payloads), PythonLayout.models_only(layout)
+        compile_catalog(views, payloads),
+        PythonLayout.models_only(layout),
+        OneToOneMarker.fake(),
     ):
         case Ok(plan):
             return PythonRenderer.render(plan)
@@ -636,6 +646,33 @@ def test_a_view_model_leaves_one_to_one_out_wherever_it_marks_a_field() -> None:
     assert (
         "    inside: CompanyId | None\n    outside: CompanyId | None\n"
     ) in file.text.root
+
+
+@dataclasses.dataclass(frozen=True)
+class AppOneToOne:
+    """A one-to-one marker an application defines, rather than using frp's."""
+
+
+class AppCompanyDetails(pydantic.BaseModel):
+    """The application's marker inside a Reference's `None`, which Pydantic leaves
+    in the annotation."""
+
+    outside: Annotated[CompanyId, AppOneToOne()] | None
+
+
+def test_a_view_model_leaves_the_catalogs_one_to_one_marker_out() -> None:
+    match PythonPlan.of(
+        compile_catalog([view(AppCompanyDetails)], []),
+        PythonLayout.models_only(single_module(ModulePath("app.views"))),
+        OneToOneMarker(AppOneToOne),
+    ):
+        case Ok(plan):
+            (file,) = PythonRenderer.render(plan).files
+        case Err(error):
+            pytest.fail(f"expected generated files, got {error}")
+
+    assert "    outside: CompanyId | None\n" in file.text.root
+    assert "AppOneToOne" not in file.text.root
 
 
 class WithUnsupported(pydantic.BaseModel):

@@ -17,7 +17,12 @@ from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
     RuntimeAnnotation,
 )
-from functional_relational_python.entity_graph.id import Id, IdBase, OneToOne
+from functional_relational_python.entity_graph.id import (
+    Id,
+    IdBase,
+    OneToOne,
+    OneToOneMarker,
+)
 from functional_relational_python.outputs.django.models import (
     AppLabel,
     AutoIncrementOnNonPrimaryKey,
@@ -159,7 +164,8 @@ def render(
     entities: Iterable[type[pydantic.BaseModel]], models: DjangoModels
 ) -> FileText:
     match DjangoModelsRenderer.render(
-        EntityGraph.build(entities, IdBase.fake()).unwrap(), models
+        EntityGraph.build(entities, IdBase.fake(), OneToOneMarker.fake()).unwrap(),
+        models,
     ):
         case Ok(files):
             (file,) = files.files
@@ -172,7 +178,8 @@ def diagnostics(
     entities: Iterable[type[pydantic.BaseModel]], models: DjangoModels
 ) -> tuple[DjangoDiagnostic, ...]:
     match DjangoModelsRenderer.render(
-        EntityGraph.build(entities, IdBase.fake()).unwrap(), models
+        EntityGraph.build(entities, IdBase.fake(), OneToOneMarker.fake()).unwrap(),
+        models,
     ):
         case Ok(files):
             pytest.fail(f"expected diagnostics, got {files}")
@@ -411,7 +418,7 @@ def test_golden_django_models() -> None:
 
 
 def test_the_module_is_written_where_the_catalog_names() -> None:
-    graph = EntityGraph.build([Company], IdBase.fake()).unwrap()
+    graph = EntityGraph.build([Company], IdBase.fake(), OneToOneMarker.fake()).unwrap()
     models = config({}, {})
 
     files = DjangoModelsRenderer.render(graph, models).unwrap()
@@ -508,7 +515,9 @@ def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None
         heads_id: Annotated[DepartmentId | None, OneToOne()]
         born: Moment
 
-    graph = EntityGraph.build([Company, Department, Person], IdBase.fake()).unwrap()
+    graph = EntityGraph.build(
+        [Company, Department, Person], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
     files = GeneratedFiles.merged(
         [
             DjangoModelsRenderer.render(graph, models).unwrap(),

@@ -11,7 +11,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityNode,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id, IdBase
+from functional_relational_python.entity_graph.id import Id, IdBase, OneToOneMarker
 from functional_relational_python.outputs.python.plan import (
     FunctionPlan,
     GeneratedIntoDefiningModule,
@@ -61,7 +61,9 @@ def app_layout() -> PythonLayout:
 
 def plan_of(compiled: compiler.CompiledViews, python: PythonLayout) -> PythonPlan:
     match PythonPlan.of(
-        compiler.CompiledCatalog(views=compiled.views, payloads=()), python
+        compiler.CompiledCatalog(views=compiled.views, payloads=()),
+        python,
+        OneToOneMarker.fake(),
     ):
         case Ok(plan):
             return plan
@@ -73,7 +75,9 @@ def diagnostics_of(
     compiled: compiler.CompiledViews, python: PythonLayout
 ) -> tuple[PlanDiagnostic, ...]:
     match PythonPlan.of(
-        compiler.CompiledCatalog(views=compiled.views, payloads=()), python
+        compiler.CompiledCatalog(views=compiled.views, payloads=()),
+        python,
+        OneToOneMarker.fake(),
     ):
         case Ok(plan):
             pytest.fail(f"expected diagnostics, got {plan}")
@@ -163,7 +167,7 @@ def test_whatever_cannot_be_imported_is_reported_once() -> None:
     team, team_id, player = local_entity_and_source()
     view = View(name=ViewName.fake(), source=player, step=steps.hydrate())
     compiled = compiler.compile_views(
-        EntityGraph.build([team], IdBase.fake()).unwrap(), [view]
+        EntityGraph.build([team], IdBase.fake(), OneToOneMarker.fake()).unwrap(), [view]
     ).unwrap()
 
     # The Entity is a field's type and a looked-up Entity, yet reported once,
@@ -187,7 +191,7 @@ def test_a_models_only_layout_reports_only_what_the_models_cannot_import() -> No
     team, _, player = local_entity_and_source()
     view = View(name=ViewName.fake(), source=player, step=steps.hydrate())
     compiled = compiler.compile_views(
-        EntityGraph.build([team], IdBase.fake()).unwrap(), [view]
+        EntityGraph.build([team], IdBase.fake(), OneToOneMarker.fake()).unwrap(), [view]
     ).unwrap()
 
     assert diagnostics_of(
@@ -344,7 +348,9 @@ def test_a_name_bound_to_several_things_is_one_clash(
     views: Iterable[View], python: PythonLayout, clash: tuple[Scope, Identifier]
 ) -> None:
     graph = EntityGraph.build(
-        [Company, Department, Employee, Archive.Department], IdBase.fake()
+        [Company, Department, Employee, Archive.Department],
+        IdBase.fake(),
+        OneToOneMarker.fake(),
     )
     compiled = compiler.compile_views(graph.unwrap(), views).unwrap()
 

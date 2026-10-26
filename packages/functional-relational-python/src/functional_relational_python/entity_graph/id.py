@@ -1,7 +1,7 @@
 import dataclasses
 from typing import Annotated, TypeIs
 
-from pydantic import ConfigDict, RootModel, SkipValidation, field_validator
+from pydantic import BaseModel, ConfigDict, RootModel, SkipValidation, field_validator
 
 
 class Id[T](RootModel[T]):
@@ -69,7 +69,8 @@ class IdBase(RootModel[IdType], frozen=True):
 # as a schema to apply, rather than leaving it in `FieldInfo.metadata`.
 @dataclasses.dataclass(frozen=True)
 class OneToOne:
-    """Marks a Reference as one-to-one: at most one Entity references each target.
+    """frp's own one-to-one marker. With `OneToOneMarker(OneToOne)`, `OneToOne()`
+    marks a Reference as one-to-one: at most one Entity references each target.
 
     Only a one-to-one Reference can be followed backwards to a single Entity, e.g.
     from a `ChannelCampaign` to its `MetaCampaign` detail row. An optional
@@ -80,4 +81,42 @@ class OneToOne:
     ...     channel_campaign_id: Annotated[ChannelCampaignId, OneToOne()]
     ...     replaces_id: Annotated[ChannelCampaignId | None, OneToOne()]
     ...     replaced_by_id: Annotated[ChannelCampaignId, OneToOne()] | None
+
+    Entity modules using it import frp at run time, and so does generated code
+    importing them. An application that must run without frp names its own
+    marker, see `OneToOneMarker`.
     """
+
+
+class OneToOneMarker(RootModel[Annotated[type, SkipValidation]], frozen=True):
+    """The class whose instances mark a Reference as one-to-one, named by the
+    catalog: frp's `OneToOne`, or an application's own:
+
+    >>> @dataclasses.dataclass(frozen=True)
+    ... class AppOneToOne:
+    ...     pass
+    >>> OneToOneMarker(AppOneToOne)
+
+    `object` is no marker, since all metadata would mark a Reference. Nor is a
+    Pydantic model, since Pydantic reads one in `Annotated` metadata as a schema
+    to apply, rather than leaving it in `FieldInfo.metadata`.
+    """
+
+    @field_validator("root")
+    @classmethod
+    def _a_class_other_than_object_or_a_model(cls, root: object) -> object:
+        match root:
+            case type() if root is not object and not issubclass(root, BaseModel):
+                return root
+            case _:
+                msg = f"{root!r} cannot mark a Reference as one-to-one"
+                raise ValueError(msg)
+
+    @staticmethod
+    def fake() -> OneToOneMarker:
+        return OneToOneMarker(OneToOne)
+
+    def marks(self, metadata: object) -> bool:
+        """Whether `metadata`, one object after the type in `Annotated[X, ...]`,
+        marks a Reference as one-to-one."""
+        return isinstance(metadata, self.root)
