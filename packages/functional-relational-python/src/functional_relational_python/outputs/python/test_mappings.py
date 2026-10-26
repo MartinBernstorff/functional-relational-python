@@ -594,6 +594,28 @@ def mapping_functions(plan: PythonPlan) -> Generator[types.ModuleType]:
         del sys.modules[models.__name__]
 
 
+class NamedBase(pydantic.BaseModel, frozen=True):
+    name: Text
+
+
+def test_a_mapping_function_fills_the_fields_its_model_inherits() -> None:
+    view = View(
+        name=ViewName("CompanyNamed"),
+        source=Company,
+        step=steps.omit(FieldName("secret")),
+        base=NamedBase,
+    )
+    company = Company(id=CompanyId(1), name=Text("Acme"), secret=Text("hidden"))
+
+    with mapping_functions(plan_of(compile_all([view]), Generated.layout())) as module:
+        mapped = module.company_named(company)
+
+    assert isinstance(mapped, NamedBase)
+    assert Executed.row_of(mapped) == engine.ViewRow(
+        {FieldName("name"): company.name, FieldName("id"): company.id}
+    )
+
+
 def view_source(
     compiled: compiler.CompiledViews, name: ViewName
 ) -> type[pydantic.BaseModel]:

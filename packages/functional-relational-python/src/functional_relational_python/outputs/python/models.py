@@ -10,6 +10,7 @@ from collections.abc import Sequence
 import pydantic
 
 from functional_relational_python.outputs.python.plan import (
+    Inherited,
     ModelField,
     ModelPlan,
     PythonPlan,
@@ -17,6 +18,7 @@ from functional_relational_python.outputs.python.plan import (
 from functional_relational_python.outputs.python.symbols import (
     LineLength,
     ModulePath,
+    TypeExpression,
     ValueExpression,
 )
 from functional_relational_python.pipeline import ir
@@ -82,13 +84,13 @@ class ModelsRenderer:
             sections.append(lines)
         imports = "\n\n".join("\n".join(lines) for lines in sections)
 
-        base = ModelPlan.base.reference().root
         classes = "\n\n".join(
-            f"class {model.symbol.bound_name().root}({base}, frozen=True):\n"
+            f"class {model.symbol.bound_name().root}({model.base.root}, frozen=True):\n"
             + (
                 "".join(
-                    f"    {ModelsRenderer._declaration(field).root}\n"
+                    f"    {declaration.root}\n"
                     for field in model.fields
+                    for declaration in ModelsRenderer._declarations(field)
                 )
                 or "    pass\n"
             )
@@ -97,10 +99,15 @@ class ModelsRenderer:
         return FileText(f"{ModelsRenderer.header.root}\n{imports}\n\n\n{classes}")
 
     @staticmethod
-    def _declaration(field: ModelField) -> FieldDeclaration:
-        annotated = f"{field.field.name.root}: {field.type.root}"
+    def _declarations(field: ModelField) -> tuple[FieldDeclaration, ...]:
+        """The line declaring `field`, or none when the model inherits it."""
+        match field.type:
+            case TypeExpression() as type_expression:
+                annotated = f"{field.field.name.root}: {type_expression.root}"
+            case Inherited():
+                return ()
         match field.default:
             case ValueExpression() as default:
-                return FieldDeclaration(f"{annotated} = {default.root}")
+                return (FieldDeclaration(f"{annotated} = {default.root}"),)
             case ir.NoDefault():
-                return FieldDeclaration(annotated)
+                return (FieldDeclaration(annotated),)
