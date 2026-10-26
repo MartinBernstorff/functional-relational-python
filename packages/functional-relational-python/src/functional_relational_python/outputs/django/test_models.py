@@ -373,10 +373,11 @@ def test_golden_django_models() -> None:
 
 def test_the_module_is_written_where_the_catalog_names() -> None:
     graph = EntityGraph.build([Company]).unwrap()
+    models = config({}, {})
 
-    files = DjangoModelsRenderer.render(graph, config({}, {})).unwrap()
+    files = DjangoModelsRenderer.render(graph, models).unwrap()
 
-    assert [str(file.path.root) for file in files.files] == ["app/models.py"]
+    assert [file.path for file in files.files] == [models.module.file_path()]
     assert GeneratedFiles.is_generated(files.files[0].text)
 
 

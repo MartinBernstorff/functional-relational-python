@@ -74,10 +74,10 @@ class Catalog(pydantic.BaseModel, frozen=True):
                     parts.append(files)
                 case Err(error):
                     reported.extend(error.diagnostics)
-        match DiagnosticsError.or_ok(reported, lambda: parts):
-            case Err(output_error):
-                return Err(output_error)
-            case Ok(_):
+        match tuple(reported):
+            case (first, *rest):
+                return Err(DiagnosticsError((first, *rest)))
+            case _:
                 pass
         match GeneratedFiles.merged(parts):
             case Ok(merged):

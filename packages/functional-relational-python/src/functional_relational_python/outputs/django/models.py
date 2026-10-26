@@ -224,7 +224,7 @@ class NoFieldRuleError(Exception):
         super().__init__(f"No Django field for {annotation!r}")
 
 
-class FieldTypes:
+class FieldTypes(pydantic.BaseModel, frozen=True):
     """The Django field for an Entity field's type.
 
     The type is unwrapped one RootModel at a time, e.g. `Email` to `Text` to
@@ -245,8 +245,7 @@ class FieldTypes:
         uuid.UUID: DjangoField.builtin(Identifier("UUIDField"), {}),
     }
 
-    def __init__(self, overrides: Mapping[RuntimeAnnotation, DjangoField]) -> None:
-        self.overrides = overrides
+    overrides: Mapping[RuntimeAnnotation, DjangoField]
 
     def field_of(
         self, annotation: RuntimeAnnotation
@@ -331,7 +330,7 @@ class DjangoModelsRenderer:
         Models are in name order, and refer to each other by name, so the order of
         Entities does not matter.
         """
-        types = FieldTypes(config.field_types)
+        types = FieldTypes(overrides=config.field_types)
         reported: list[DjangoDiagnostic] = []
         planned: list[_PlannedModel] = []
         references = {
