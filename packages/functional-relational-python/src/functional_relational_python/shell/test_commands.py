@@ -9,11 +9,11 @@ from functional_relational_python.pipeline import steps
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.shell import commands
 from functional_relational_python.shell.catalog import (
+    Catalog,
     CatalogAttributeMissingError,
     CatalogModuleNotFoundError,
     ImportPath,
     NotACatalogError,
-    ViewCatalog,
 )
 from functional_relational_python.shell.project_config import ConfigFile, ProjectConfig
 from functional_relational_python.support.diagnostic import DiagnosticsError
@@ -45,7 +45,7 @@ def cards_module(_view: compiler.CompiledView) -> ModulePath:
     return ModulePath("app.cards")
 
 
-catalog = ViewCatalog(
+catalog = Catalog(
     entities=[Company],
     views=[View(name=ViewName("CompanyCard"), source=Company, step=steps.pipeline())],
     layout=cards_module,

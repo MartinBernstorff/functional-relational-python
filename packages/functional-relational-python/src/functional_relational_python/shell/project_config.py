@@ -42,7 +42,7 @@ class Option(pydantic.BaseModel, frozen=True):
 
 class ProjectConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
     catalog: ImportPath = pydantic.Field(
-        description="Where the ViewCatalog is defined, as 'module:attribute'. "
+        description="Where the Catalog is defined, as 'module:attribute'. "
         "The module is imported with this file's directory on the search path."
     )
     output_dir: RelativePath = pydantic.Field(
