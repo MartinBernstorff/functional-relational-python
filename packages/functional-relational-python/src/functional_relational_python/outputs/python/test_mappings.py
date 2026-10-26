@@ -908,11 +908,10 @@ def type_checked_plan() -> PythonPlan:
 
 def test_a_union_of_payloads_has_a_model_but_no_mapping_function() -> None:
     plan = type_checked_plan()
+    patch = patch_union().name
 
-    assert UnionName("Patch") in {
-        union.union for union in plan.unions[Generated.models]
-    }
-    assert UnionName("Patch") not in {
+    assert patch in {union.union for union in plan.unions[Generated.models]}
+    assert patch not in {
         function.union for function in plan.union_functions[Generated.mappings]
     }
 

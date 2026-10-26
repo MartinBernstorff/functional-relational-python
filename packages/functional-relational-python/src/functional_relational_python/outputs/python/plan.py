@@ -5,10 +5,9 @@ For each View and Payload the plan decides its model's Symbol and the Symbols of
 the models nested in it, and for each Union, of Views or of Payloads, the Symbol
 of its model, a `type` alias. For each View and Union of Views, when the layout
 asks for them, it also decides its mapping function's Symbol and lookup
-parameters. Every problem that
-depends on where things are generated (a name bound twice in one module, a type
-that cannot be imported, a module that defines what it would be overwritten with)
-is found here, once. The renderers in
+parameters. Every problem that depends on where things are generated (a name
+bound twice in one module, a type that cannot be imported, a module that defines
+what it would be overwritten with) is found here, once. The renderers in
 `models` and `mappings` read the plan and cannot fail.
 
 The compiler has already checked the names themselves (`model_names`).

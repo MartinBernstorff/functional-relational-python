@@ -191,14 +191,22 @@ def compile_views(
     them.
 
     `entity_graph` is what References are resolved against. A Union of Payloads
-    is checked, but the result holds only Unions of Views; `compile_catalog`
-    returns both.
+    is a diagnostic, as it is a write model; `compile_catalog` compiles it.
     """
+    unions = tuple(unions)
+    misplaced: tuple[diagnostics.CompileDiagnostic, ...] = tuple(
+        diagnostics.PayloadUnionInViews(view=union.name)
+        for union in unions
+        if not union.views()
+    )
     match compile_catalog(entity_graph, views, (), unions):
         case Ok(compiled):
-            return Ok(CompiledViews(views=compiled.views, unions=compiled.unions))
+            return DiagnosticsError.or_ok(
+                misplaced,
+                lambda: CompiledViews(views=compiled.views, unions=compiled.unions),
+            )
         case Err(error):
-            return Err(error)
+            return Err(DiagnosticsError((*error.diagnostics, *misplaced)))
 
 
 def compile_catalog(
@@ -1282,7 +1290,7 @@ def _check_union(
         *_tag_diagnostics(union, variants.compiled_views),
         *(
             ()
-            if variants.views
+            if variants.read_models
             else _tag_diagnostics(union, variants.compiled_payloads)
         ),
         *_unreachable_diagnostics(union, variants.compiled_views),
@@ -1331,8 +1339,8 @@ class _SortedVariants(pydantic.BaseModel, frozen=True):
     not. A nested Union mixing both kinds is neither, as it reports that itself.
     """
 
-    views: tuple[ViewName | UnionName, ...]
-    payloads: tuple[PayloadName | UnionName, ...]
+    read_models: tuple[ViewName | UnionName, ...]
+    write_models: tuple[PayloadName | UnionName, ...]
     compiled_views: tuple[CompiledView | CompiledUnion, ...]
     compiled_payloads: tuple[CompiledPayload | CompiledPayloadUnion, ...]
     failed: tuple[ViewName | PayloadName | UnionName, ...]
@@ -1344,8 +1352,8 @@ class _SortedVariants(pydantic.BaseModel, frozen=True):
         checked_payloads: Mapping[Payload, CompiledPayload | PoisonedPayload],
         unions: Mapping[Union, _CheckedUnion],
     ) -> _SortedVariants:
-        views: list[ViewName | UnionName] = []
-        payloads: list[PayloadName | UnionName] = []
+        read_models: list[ViewName | UnionName] = []
+        write_models: list[PayloadName | UnionName] = []
         compiled_views: list[CompiledView | CompiledUnion] = []
         compiled_payloads: list[CompiledPayload | CompiledPayloadUnion] = []
         failed: list[ViewName | PayloadName | UnionName] = []
@@ -1355,17 +1363,17 @@ class _SortedVariants(pydantic.BaseModel, frozen=True):
             ) | _CheckedUnion
             match variant:
                 case View():
-                    views.append(variant.name)
+                    read_models.append(variant.name)
                     checked = checked_views[variant]
                 case Payload():
-                    payloads.append(variant.name)
+                    write_models.append(variant.name)
                     checked = checked_payloads[variant]
                 case Union():
                     checked = unions[variant]
                     if not variant.payloads():
-                        views.append(variant.name)
+                        read_models.append(variant.name)
                     elif not variant.views():
-                        payloads.append(variant.name)
+                        write_models.append(variant.name)
             match checked:
                 case CompiledView() | CompiledUnion():
                     compiled_views.append(checked)
@@ -1379,8 +1387,8 @@ class _SortedVariants(pydantic.BaseModel, frozen=True):
                 ):
                     failed.append(variant.name)
         return _SortedVariants(
-            views=tuple(views),
-            payloads=tuple(payloads),
+            read_models=tuple(read_models),
+            write_models=tuple(write_models),
             compiled_views=tuple(compiled_views),
             compiled_payloads=tuple(compiled_payloads),
             failed=tuple(failed),
@@ -1390,10 +1398,10 @@ class _SortedVariants(pydantic.BaseModel, frozen=True):
         self, union: Union
     ) -> tuple[diagnostics.ViewsMixedWithPayloads, ...]:
         """Why the Variants are not all of one kind, if they are not."""
-        if self.views and self.payloads:
+        if self.read_models and self.write_models:
             return (
                 diagnostics.ViewsMixedWithPayloads(
-                    view=union.name, views=self.views, payloads=self.payloads
+                    view=union.name, views=self.read_models, payloads=self.write_models
                 ),
             )
         return ()
@@ -1477,15 +1485,15 @@ def _tag_diagnostics(
 
 
 def _tag(
-    union: Union, view: CompiledView | CompiledPayload
+    union: Union, leaf: CompiledView | CompiledPayload
 ) -> Tag | diagnostics.VariantWithoutDiscriminator | diagnostics.UntaggedVariant:
-    """The Tag `view`, a View or a Payload, has for the Union's Discriminator: the
+    """The Tag `leaf`, a View or a Payload, has for the Union's Discriminator: the
     one value the field's type is a `Literal` of."""
-    fields = {field.name: field for field in view.relation.fields}
+    fields = {field.name: field for field in leaf.relation.fields}
     match fields.get(union.discriminator):
         case None:
             return diagnostics.VariantWithoutDiscriminator(
-                view=union.name, variant=view.name, discriminator=union.discriminator
+                view=union.name, variant=leaf.name, discriminator=union.discriminator
             )
         case ir.Field() as field:
             annotation = field.annotation()
@@ -1505,7 +1513,7 @@ def _tag(
                 return tag
     return diagnostics.UntaggedVariant(
         view=union.name,
-        variant=view.name,
+        variant=leaf.name,
         discriminator=union.discriminator,
         annotation=annotation,
     )

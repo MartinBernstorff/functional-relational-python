@@ -695,6 +695,20 @@ class UnreachableVariant(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class PayloadUnionInViews(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`compile_views` was given a Union of Payloads. It compiles read models
+    only, so it would leave the Union out."""
+
+    view: UnionName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: a Union of Payloads is a write model, but "
+            "`compile_views` compiles read models only. Compile it with "
+            "`compile_catalog`."
+        )
+
+
 class SharedUnionName(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Union has the name of a View, a Payload or another Union, so their
     models would too. Reported once per name."""
@@ -755,4 +769,5 @@ type CompileDiagnostic = (
     | ViewsMixedWithPayloads
     | UnreachableVariant
     | SharedUnionName
+    | PayloadUnionInViews
 )
