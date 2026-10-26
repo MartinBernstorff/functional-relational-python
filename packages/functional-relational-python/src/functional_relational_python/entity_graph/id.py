@@ -1,7 +1,8 @@
 import dataclasses
 from typing import Annotated, TypeIs
 
-from pydantic import BaseModel, ConfigDict, RootModel, SkipValidation, field_validator
+from pydantic import ConfigDict, RootModel, SkipValidation, field_validator
+from pydantic.dataclasses import is_pydantic_dataclass
 
 
 class Id[T](RootModel[T]):
@@ -97,16 +98,22 @@ class OneToOneMarker(RootModel[Annotated[type, SkipValidation]], frozen=True):
     ...     pass
     >>> OneToOneMarker(AppOneToOne)
 
-    `object` is no marker, since all metadata would mark a Reference. Nor is a
-    Pydantic model, since Pydantic reads one in `Annotated` metadata as a schema
-    to apply, rather than leaving it in `FieldInfo.metadata`.
+    A builtin class, such as `object`, `type` or `str`, is no marker, since
+    metadata that is not meant as one, e.g. `Annotated[X, "doc"]`, would mark a
+    Reference. Nor is a class Pydantic reads as a schema to apply, a model or a
+    Pydantic dataclass, since Pydantic leaves its instances out of
+    `FieldInfo.metadata`.
     """
 
     @field_validator("root")
     @classmethod
-    def _a_class_other_than_object_or_a_model(cls, root: object) -> object:
+    def _a_class_pydantic_leaves_in_metadata(cls, root: object) -> object:
         match root:
-            case type() if root is not object and not issubclass(root, BaseModel):
+            case type() if not (
+                root.__module__ == "builtins"
+                or hasattr(root, "__get_pydantic_core_schema__")
+                or is_pydantic_dataclass(root)
+            ):
                 return root
             case _:
                 msg = f"{root!r} cannot mark a Reference as one-to-one"

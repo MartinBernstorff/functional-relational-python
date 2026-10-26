@@ -4,8 +4,9 @@ from collections.abc import Sequence
 from typing import Annotated
 from uuid import UUID
 
+import pydantic.dataclasses
 import pytest
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, GetCoreSchemaHandler, RootModel
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.entity_graph import entity_graph
@@ -454,32 +455,55 @@ def test_an_annotated_type_in_an_optional_union_keeps_its_metadata() -> None:
 
 
 @pytest.mark.parametrize(
-    ("model", "field"),
+    ("model", "field", "one_to_one_marker"),
     [
-        pytest.param(MarkedPlainField, entity_graph.FieldName("name"), id="plain"),
+        pytest.param(
+            MarkedPlainField,
+            entity_graph.FieldName("name"),
+            OneToOneMarker.fake(),
+            id="plain",
+        ),
         pytest.param(
             MarkedOptionalPlainField,
             entity_graph.FieldName("nickname"),
+            OneToOneMarker.fake(),
             id="optional plain",
         ),
-        pytest.param(MarkedPrimaryKey, entity_graph.FieldName("id"), id="primary key"),
+        pytest.param(
+            MarkedPrimaryKey,
+            entity_graph.FieldName("id"),
+            OneToOneMarker.fake(),
+            id="primary key",
+        ),
+        pytest.param(
+            AppMarkedPlainField,
+            entity_graph.FieldName("name"),
+            OneToOneMarker(AppOneToOne),
+            id="an application's marker",
+        ),
     ],
 )
 def test_marking_a_field_that_is_not_a_reference_one_to_one_is_a_diagnostic(
-    model: type[BaseModel], field: entity_graph.FieldName
+    model: type[BaseModel],
+    field: entity_graph.FieldName,
+    one_to_one_marker: OneToOneMarker,
 ) -> None:
-    assert _diagnostics([model]) == {
-        entity_graph.OneToOneOnNonReference(
-            entity=model, field=field, one_to_one=OneToOneMarker.fake()
-        )
-    }
+    match entity_graph.EntityGraph.build([model], IdBase.fake(), one_to_one_marker):
+        case Ok(graph):
+            pytest.fail(f"Expected diagnostics, got {graph}")
+        case Err(error):
+            assert error.diagnostics == (
+                entity_graph.OneToOneOnNonReference(
+                    entity=model, field=field, one_to_one_marker=one_to_one_marker
+                ),
+            )
 
 
 def test_the_one_to_one_on_non_reference_message_names_the_field_and_marker() -> None:
     diagnostic = entity_graph.OneToOneOnNonReference(
         entity=MarkedPlainField,
         field=entity_graph.FieldName("name"),
-        one_to_one=OneToOneMarker(AppOneToOne),
+        one_to_one_marker=OneToOneMarker(AppOneToOne),
     )
 
     assert diagnostic.describe().root == (
@@ -488,7 +512,7 @@ def test_the_one_to_one_on_non_reference_message_names_the_field_and_marker() ->
 
 
 @pytest.mark.parametrize(
-    ("one_to_one", "cardinality"),
+    ("one_to_one_marker", "cardinality"),
     [
         pytest.param(
             OneToOneMarker(AppOneToOne),
@@ -503,10 +527,12 @@ def test_the_one_to_one_on_non_reference_message_names_the_field_and_marker() ->
     ],
 )
 def test_only_the_catalogs_one_to_one_marker_marks_a_reference(
-    one_to_one: OneToOneMarker, cardinality: entity_graph.Cardinality
+    one_to_one_marker: OneToOneMarker, cardinality: entity_graph.Cardinality
 ) -> None:
     graph = entity_graph.EntityGraph.build(
-        [Department, Employee, Project, AppProjectDetail], IdBase.fake(), one_to_one
+        [Department, Employee, Project, AppProjectDetail],
+        IdBase.fake(),
+        one_to_one_marker,
     ).unwrap()
 
     assert {
@@ -515,30 +541,99 @@ def test_only_the_catalogs_one_to_one_marker_marks_a_reference(
     } == {cardinality}
 
 
-def test_the_catalogs_marker_on_a_field_that_is_not_a_reference_is_a_diagnostic() -> (
-    None
-):
+def test_frps_marker_under_another_catalog_marker_is_a_diagnostic() -> None:
+    app_marker = OneToOneMarker(AppOneToOne)
+
     match entity_graph.EntityGraph.build(
-        [AppMarkedPlainField], IdBase.fake(), OneToOneMarker(AppOneToOne)
+        [Department, Employee, Project, ProjectDetail], IdBase.fake(), app_marker
     ):
         case Ok(graph):
             pytest.fail(f"Expected diagnostics, got {graph}")
         case Err(error):
+            assert set(error.diagnostics) == {
+                entity_graph.UnconfiguredOneToOne(
+                    entity=ProjectDetail,
+                    field=entity_graph.FieldName(name),
+                    one_to_one_marker=app_marker,
+                )
+                for name in ("project_id", "successor_id", "predecessor_id")
+            }
+
+
+def test_frps_marker_on_a_field_that_is_not_a_reference_is_still_reported() -> None:
+    app_marker = OneToOneMarker(AppOneToOne)
+
+    match entity_graph.EntityGraph.build([MarkedPlainField], IdBase.fake(), app_marker):
+        case Ok(graph):
+            pytest.fail(f"Expected diagnostics, got {graph}")
+        case Err(error):
             assert error.diagnostics == (
-                entity_graph.OneToOneOnNonReference(
-                    entity=AppMarkedPlainField,
+                entity_graph.UnconfiguredOneToOne(
+                    entity=MarkedPlainField,
                     field=entity_graph.FieldName("name"),
-                    one_to_one=OneToOneMarker(AppOneToOne),
+                    one_to_one_marker=app_marker,
                 ),
             )
 
 
+def test_the_unconfigured_one_to_one_message_names_both_markers() -> None:
+    diagnostic = entity_graph.UnconfiguredOneToOne(
+        entity=ProjectDetail,
+        field=entity_graph.FieldName("project_id"),
+        one_to_one_marker=OneToOneMarker(AppOneToOne),
+    )
+
+    assert diagnostic.describe().root == (
+        "ProjectDetail.project_id is marked with frp's OneToOne, but the catalog "
+        "marks one-to-one References with AppOneToOne"
+    )
+
+
+@pydantic.dataclasses.dataclass(frozen=True)
+class PydanticDataclassMarker:
+    pass
+
+
+class SchemaMarker:
+    """A class Pydantic reads as a schema, through `__get_pydantic_core_schema__`."""
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: object, handler: GetCoreSchemaHandler
+    ) -> object:
+        return handler(source)
+
+
 @pytest.mark.parametrize(
     "marker",
-    [object, BaseModel, Department, OneToOne()],
-    ids=["object", "BaseModel", "a model", "not a class"],
+    [
+        object,
+        type,
+        str,
+        int,
+        bytes,
+        BaseModel,
+        Department,
+        Name,
+        PydanticDataclassMarker,
+        SchemaMarker,
+        OneToOne(),
+    ],
+    ids=[
+        "object",
+        "type",
+        "str",
+        "int",
+        "bytes",
+        "BaseModel",
+        "a model",
+        "a root model",
+        "a Pydantic dataclass",
+        "a class with a Pydantic schema",
+        "not a class",
+    ],
 )
-def test_a_one_to_one_marker_is_a_class_other_than_object_or_a_model(
+def test_a_one_to_one_marker_is_a_class_pydantic_leaves_in_metadata(
     marker: object,
 ) -> None:
     with pytest.raises(ValueError, match="cannot mark a Reference as one-to-one"):

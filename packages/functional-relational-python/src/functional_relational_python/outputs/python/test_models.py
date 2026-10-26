@@ -94,7 +94,6 @@ def generate(
     match PythonPlan.of(
         compile_catalog(views, payloads),
         PythonLayout.models_only(layout),
-        OneToOneMarker.fake(),
     ):
         case Ok(plan):
             return PythonRenderer.render(plan)
@@ -638,41 +637,44 @@ class CompanyDetails(pydantic.BaseModel):
     outside: Annotated[CompanyId, OneToOne()] | None
 
 
-def test_a_view_model_leaves_one_to_one_out_wherever_it_marks_a_field() -> None:
-    (file,) = generate(
-        [view(CompanyDetails)], [], single_module(ModulePath("app.views"))
-    ).files
-
-    assert (
-        "    inside: CompanyId | None\n    outside: CompanyId | None\n"
-    ) in file.text.root
-
-
 @dataclasses.dataclass(frozen=True)
 class AppOneToOne:
     """A one-to-one marker an application defines, rather than using frp's."""
 
 
 class AppCompanyDetails(pydantic.BaseModel):
-    """The application's marker inside a Reference's `None`, which Pydantic leaves
-    in the annotation."""
+    """`AppOneToOne` marking a Reference inside and outside its `None`."""
 
+    inside: Annotated[CompanyId | None, AppOneToOne()]
     outside: Annotated[CompanyId, AppOneToOne()] | None
 
 
-def test_a_view_model_leaves_the_catalogs_one_to_one_marker_out() -> None:
+@pytest.mark.parametrize(
+    ("model", "one_to_one_marker"),
+    [
+        pytest.param(CompanyDetails, OneToOneMarker.fake(), id="frp's marker"),
+        pytest.param(
+            AppCompanyDetails, OneToOneMarker(AppOneToOne), id="an application's"
+        ),
+    ],
+)
+def test_a_view_model_leaves_the_marker_out_wherever_it_marks_a_field(
+    model: type[pydantic.BaseModel], one_to_one_marker: OneToOneMarker
+) -> None:
+    graph = EntityGraph.build([Company], IdBase.fake(), one_to_one_marker).unwrap()
     match PythonPlan.of(
-        compile_catalog([view(AppCompanyDetails)], []),
+        compiler.compile_catalog(graph, [view(model)], []).unwrap(),
         PythonLayout.models_only(single_module(ModulePath("app.views"))),
-        OneToOneMarker(AppOneToOne),
     ):
         case Ok(plan):
             (file,) = PythonRenderer.render(plan).files
         case Err(error):
             pytest.fail(f"expected generated files, got {error}")
 
-    assert "    outside: CompanyId | None\n" in file.text.root
-    assert "AppOneToOne" not in file.text.root
+    assert (
+        "    inside: CompanyId | None\n    outside: CompanyId | None\n"
+    ) in file.text.root
+    assert one_to_one_marker.root.__name__ not in file.text.root
 
 
 class WithUnsupported(pydantic.BaseModel):

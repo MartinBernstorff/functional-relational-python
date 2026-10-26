@@ -65,7 +65,7 @@ def by_kind(compiled: compiler.CompiledView | compiler.CompiledPayload) -> Modul
 catalog = Catalog(
     entities=[Company],
     id_base=IdBase.fake(),
-    one_to_one=OneToOneMarker.fake(),
+    one_to_one_marker=OneToOneMarker.fake(),
     views=[View(name=ViewName("CompanyCard"), source=Company, step=steps.pipeline())],
     payloads=[
         Payload(

@@ -47,15 +47,21 @@ class Catalog(pydantic.BaseModel, frozen=True):
     Source or an Entity a View looks up, or a module named like a package other
     files are generated into (`app` when generating `app.views`). `django`
     generates a Django model per Entity, and Django queries for each View over
-    an Entity, see `DjangoModels`. `id_base` is frp's `Id`, or an application's
-    own base, and `one_to_one` is frp's `OneToOne`, or an application's own
-    marker, so that the Entity modules, and with them the generated code, do not
-    need frp installed.
+    an Entity, see `DjangoModels`. `id_base` is `IdBase(Id)`, or an application's
+    own base, and `one_to_one_marker` is `OneToOneMarker(OneToOne)`, or an
+    application's own marker, so that the Entity modules, and with them the
+    generated code, do not need frp installed.
 
+    >>> from functional_relational_python.entity_graph.id import (
+    ...     Id,
+    ...     IdBase,
+    ...     OneToOne,
+    ...     OneToOneMarker,
+    ... )
     >>> catalog = Catalog(
     ...     entities=[Company],
     ...     id_base=IdBase(Id),
-    ...     one_to_one=OneToOneMarker(OneToOne),
+    ...     one_to_one_marker=OneToOneMarker(OneToOne),
     ...     views=[View(name=ViewName("CompanySummary"), source=Company, step=...)],
     ...     payloads=[
     ...         Payload(name=PayloadName("CompanyCreate"), source=Company, step=...)
@@ -68,7 +74,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
 
     entities: Sequence[type[pydantic.BaseModel]]
     id_base: IdBase
-    one_to_one: OneToOneMarker
+    one_to_one_marker: OneToOneMarker
     views: Sequence[View]
     payloads: Sequence[Payload]
     layout: ModuleLayout
@@ -79,7 +85,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
         self,
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
         """Every generated file, or every diagnostic of every output."""
-        match EntityGraph.build(self.entities, self.id_base, self.one_to_one):
+        match EntityGraph.build(self.entities, self.id_base, self.one_to_one_marker):
             case Err(graph_error):
                 return Err(graph_error)
             case Ok(graph):
@@ -118,7 +124,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
     def _python(
         self, compiled: compiler.CompiledCatalog
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
-        match PythonPlan.of(compiled, self._python_layout(), self.one_to_one):
+        match PythonPlan.of(compiled, self._python_layout()):
             case Err(plan_error):
                 return Err(plan_error)
             case Ok(plan):

@@ -1488,6 +1488,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
                 source=ir.SourceName("ChannelCampaign"),
                 entity=CampaignNote,
                 many_to_one=(FieldName("campaign_id"),),
+                one_to_one_marker=OneToOneMarker.fake(),
             ),
         ),
         (
@@ -1498,6 +1499,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
                 source=ir.SourceName("MetaCampaign"),
                 entity=ChannelCampaign,
                 many_to_one=(),
+                one_to_one_marker=OneToOneMarker.fake(),
             ),
         ),
         (
@@ -1587,6 +1589,7 @@ def test_steps_after_a_defective_reverse_find_the_reversed_field() -> None:
             source=ir.SourceName("ChannelCampaign"),
             entity=CampaignNote,
             many_to_one=(FieldName("campaign_id"),),
+            one_to_one_marker=OneToOneMarker.fake(),
         ),
     )
 
@@ -1662,11 +1665,12 @@ def test_building_a_reverse_checks_nothing(
                 source=ir.SourceName("ChannelCampaign"),
                 entity=CampaignNote,
                 many_to_one=(FieldName("campaign_id"),),
+                one_to_one_marker=OneToOneMarker.fake(),
             ),
             (
                 "CampaignView: cannot reverse CampaignNote onto ChannelCampaign, "
                 "because it has no one-to-one Reference to ChannelCampaign. Its "
-                "References 'campaign_id' are not marked one-to-one."
+                "References 'campaign_id' are not marked OneToOne."
             ),
         ),
         (
@@ -1675,6 +1679,7 @@ def test_building_a_reverse_checks_nothing(
                 source=ir.SourceName("MetaCampaign"),
                 entity=ChannelCampaign,
                 many_to_one=(),
+                one_to_one_marker=OneToOneMarker.fake(),
             ),
             (
                 "MetaView: cannot reverse ChannelCampaign onto MetaCampaign, "

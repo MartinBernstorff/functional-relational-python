@@ -444,11 +444,11 @@ class _AnnotationRenderer:
         self,
         view: DefinitionName,
         field: FieldName | None,
-        one_to_one: OneToOneMarker,
+        one_to_one_marker: OneToOneMarker,
     ) -> None:
         self.view = view
         self.field = field
-        self.one_to_one = one_to_one
+        self.one_to_one_marker = one_to_one_marker
         self.symbols: set[Symbol] = set()
         self.diagnostics: list[PlanDiagnostic] = []
 
@@ -521,7 +521,7 @@ class _AnnotationRenderer:
                 f"{_AnnotationRenderer.literal.reference().root}[{values}]"
             )
         if origin is typing.Annotated and all(
-            self.one_to_one.marks(marker) for marker in args[1:]
+            self.one_to_one_marker.marks(marker) for marker in args[1:]
         ):
             # A generated model is not an Entity, so it leaves the one-to-one
             # marker out, as it does when the marker marks the whole field.
@@ -568,11 +568,14 @@ class _ModelPlanner:
     """Plans the model of one View or Payload, and one per nested resolved field."""
 
     def __init__(
-        self, view: DefinitionName, module: ModulePath, one_to_one: OneToOneMarker
+        self,
+        view: DefinitionName,
+        module: ModulePath,
+        one_to_one_marker: OneToOneMarker,
     ) -> None:
         self.view = view
         self.module = module
-        self.one_to_one = one_to_one
+        self.one_to_one_marker = one_to_one_marker
         self.diagnostics: list[PlanDiagnostic] = []
         self.used = _DefinitionsUsed(view, module)
 
@@ -580,9 +583,9 @@ class _ModelPlanner:
     def definition_model(
         compiled: compiler.CompiledView | compiler.CompiledPayload,
         module: ModulePath,
-        one_to_one: OneToOneMarker,
+        one_to_one_marker: OneToOneMarker,
     ) -> _PlannedModel:
-        planner = _ModelPlanner(compiled.name, module, one_to_one)
+        planner = _ModelPlanner(compiled.name, module, one_to_one_marker)
         planner.used.use(compiled.source)
         match compiled:
             case compiler.CompiledView(names=names):
@@ -608,12 +611,14 @@ class _ModelPlanner:
         """
         fields: list[ModelField] = []
         uses: set[Symbol] = set()
-        base_renderer = _AnnotationRenderer(self.view, None, self.one_to_one)
+        base_renderer = _AnnotationRenderer(self.view, None, self.one_to_one_marker)
         rendered_base = base_renderer.render_base(base)
         self._record(base_renderer, uses)
         nested: dict[FieldName, ModelPlan] = {}
         for field in relation.fields:
-            renderer = _AnnotationRenderer(self.view, field.name, self.one_to_one)
+            renderer = _AnnotationRenderer(
+                self.view, field.name, self.one_to_one_marker
+            )
             match field:
                 case _ if (
                     field.name.root in base.model_fields
@@ -670,20 +675,18 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def of(
-        compiled: compiler.CompiledCatalog,
-        layout: PythonLayout,
-        one_to_one: OneToOneMarker,
+        compiled: compiler.CompiledCatalog, layout: PythonLayout
     ) -> Result[PythonPlan, DiagnosticsError[PlanDiagnostic]]:
         """The plan, or every diagnostic. Each diagnostic is reported once, even
         when both a model and a mapping function run into it. A type a model field
         cannot import is reported for that field only, not again for the mapping
-        function that looks it up. Models leave `one_to_one` markers out."""
+        function that looks it up. Models leave the catalog's one-to-one markers out."""
         diagnostics: dict[PlanDiagnostic, None] = {}
         models: dict[ModulePath, list[ModelPlan]] = {}
         functions: dict[ModulePath, list[FunctionPlan]] = {}
         for view in compiled.views:
             model = _ModelPlanner.definition_model(
-                view, layout.models(view), one_to_one
+                view, layout.models(view), compiled.one_to_one_marker
             )
             diagnostics.update(dict.fromkeys(model.diagnostics))
             models.setdefault(model.plan.symbol.module, []).append(model.plan)
@@ -711,7 +714,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                     )
         for payload in compiled.payloads:
             model = _ModelPlanner.definition_model(
-                payload, layout.models(payload), one_to_one
+                payload, layout.models(payload), compiled.one_to_one_marker
             )
             diagnostics.update(dict.fromkeys(model.diagnostics))
             models.setdefault(model.plan.symbol.module, []).append(model.plan)

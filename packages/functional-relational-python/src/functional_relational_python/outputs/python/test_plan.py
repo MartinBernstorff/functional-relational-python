@@ -61,9 +61,12 @@ def app_layout() -> PythonLayout:
 
 def plan_of(compiled: compiler.CompiledViews, python: PythonLayout) -> PythonPlan:
     match PythonPlan.of(
-        compiler.CompiledCatalog(views=compiled.views, payloads=()),
+        compiler.CompiledCatalog(
+            views=compiled.views,
+            payloads=(),
+            one_to_one_marker=OneToOneMarker.fake(),
+        ),
         python,
-        OneToOneMarker.fake(),
     ):
         case Ok(plan):
             return plan
@@ -75,9 +78,12 @@ def diagnostics_of(
     compiled: compiler.CompiledViews, python: PythonLayout
 ) -> tuple[PlanDiagnostic, ...]:
     match PythonPlan.of(
-        compiler.CompiledCatalog(views=compiled.views, payloads=()),
+        compiler.CompiledCatalog(
+            views=compiled.views,
+            payloads=(),
+            one_to_one_marker=OneToOneMarker.fake(),
+        ),
         python,
-        OneToOneMarker.fake(),
     ):
         case Ok(plan):
             pytest.fail(f"expected diagnostics, got {plan}")

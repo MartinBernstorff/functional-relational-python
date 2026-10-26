@@ -220,9 +220,12 @@ def into(module: ModulePath) -> ModuleLayout:
 
 def plan_of(compiled: compiler.CompiledViews, layout: PythonLayout) -> PythonPlan:
     match PythonPlan.of(
-        compiler.CompiledCatalog(views=compiled.views, payloads=()),
+        compiler.CompiledCatalog(
+            views=compiled.views,
+            payloads=(),
+            one_to_one_marker=OneToOneMarker.fake(),
+        ),
         layout,
-        OneToOneMarker.fake(),
     ):
         case Ok(plan):
             return plan

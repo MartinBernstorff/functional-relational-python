@@ -5,7 +5,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
     RuntimeAnnotation,
 )
-from functional_relational_python.entity_graph.id import IdType
+from functional_relational_python.entity_graph.id import IdType, OneToOneMarker
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.payloads import DefinitionName, PayloadName
 from functional_relational_python.pipeline.views import ViewName
@@ -125,8 +125,8 @@ class ReverseOfNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
 class NoOneToOneReference(pydantic.BaseModel, Diagnostic, frozen=True):
     """`reverse` named an Entity with no one-to-one Reference to the subject.
 
-    `many_to_one` are its References to the subject that the catalog's
-    `OneToOneMarker` does not mark; following one backwards would give several
+    `many_to_one` are its References to the subject that `one_to_one_marker`,
+    the catalog's, does not mark; following one backwards would give several
     Entities.
     """
 
@@ -134,6 +134,7 @@ class NoOneToOneReference(pydantic.BaseModel, Diagnostic, frozen=True):
     source: ir.SourceName
     entity: type[pydantic.BaseModel]
     many_to_one: tuple[FieldName, ...]
+    one_to_one_marker: OneToOneMarker
 
     def describe(self) -> DiagnosticMessage:
         message = (
@@ -143,7 +144,8 @@ class NoOneToOneReference(pydantic.BaseModel, Diagnostic, frozen=True):
         )
         if self.many_to_one:
             fields = ", ".join(f"'{field.root}'" for field in self.many_to_one)
-            message += f" Its References {fields} are not marked one-to-one."
+            marker = self.one_to_one_marker.root.__qualname__
+            message += f" Its References {fields} are not marked {marker}."
         return DiagnosticMessage(message)
 
 

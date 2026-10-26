@@ -231,9 +231,12 @@ def compiled_views() -> compiler.CompiledViews:
 
 def test_golden_flowbase_view_models() -> None:
     match PythonPlan.of(
-        compiler.CompiledCatalog(views=compiled_views().views, payloads=()),
+        compiler.CompiledCatalog(
+            views=compiled_views().views,
+            payloads=(),
+            one_to_one_marker=OneToOneMarker.fake(),
+        ),
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
-        OneToOneMarker.fake(),
     ):
         case Ok(plan):
             (file,) = PythonRenderer.render(plan).files
@@ -389,9 +392,12 @@ def compiled_campaign_views() -> compiler.CompiledViews:
 
 def test_golden_flowbase_campaign_view_model() -> None:
     match PythonPlan.of(
-        compiler.CompiledCatalog(views=compiled_campaign_views().views, payloads=()),
+        compiler.CompiledCatalog(
+            views=compiled_campaign_views().views,
+            payloads=(),
+            one_to_one_marker=OneToOneMarker.fake(),
+        ),
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
-        OneToOneMarker.fake(),
     ):
         case Ok(plan):
             (file,) = PythonRenderer.render(plan).files

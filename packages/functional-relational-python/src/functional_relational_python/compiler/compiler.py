@@ -30,6 +30,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     NotAReferenceError,
     Optionality,
 )
+from functional_relational_python.entity_graph.id import OneToOneMarker
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.payloads import (
     DefinitionName,
@@ -92,10 +93,12 @@ class CompiledPayload(pydantic.BaseModel, frozen=True):
 
 
 class CompiledCatalog(pydantic.BaseModel, frozen=True):
-    """Every View and Payload of a Catalog, checked."""
+    """Every View and Payload of a Catalog, checked, and the Entity graph's
+    `OneToOneMarker`, which generated models leave out."""
 
     views: tuple[CompiledView, ...]
     payloads: tuple[CompiledPayload, ...]
+    one_to_one_marker: OneToOneMarker
 
 
 def compile_views(
@@ -144,6 +147,7 @@ def compile_catalog(
             payloads=tuple(
                 p for p in checked_payloads if isinstance(p, CompiledPayload)
             ),
+            one_to_one_marker=entity_graph.one_to_one_marker,
         ),
     )
 
@@ -844,6 +848,7 @@ def _check_reverse(
                             for reference in to_subject
                             if reference.cardinality == Cardinality.MANY_TO_ONE
                         ),
+                        one_to_one_marker=entity_graph.one_to_one_marker,
                     )
                 )
             case FieldName() as via:

@@ -632,9 +632,12 @@ class Database:
         compiled = compile_all(views)
         config = Modules.config()
         plan = PythonPlan.of(
-            compiler.CompiledCatalog(views=compiled.views, payloads=()),
+            compiler.CompiledCatalog(
+                views=compiled.views,
+                payloads=(),
+                one_to_one_marker=OneToOneMarker.fake(),
+            ),
             PythonLayout.models_only(into(Generated.models)),
-            OneToOneMarker.fake(),
         ).unwrap()
         return GeneratedFiles.merged(
             [
