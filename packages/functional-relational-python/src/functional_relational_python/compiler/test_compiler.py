@@ -2074,10 +2074,6 @@ def deal_diagnostics(step: steps.Step) -> tuple[diagnostics.CompileDiagnostic, .
     return diagnostics_of([View(name=ViewName.fake(), source=Deal, step=step)])
 
 
-def deal_field(name: FieldName) -> ir.FieldRef:
-    return conditions.field(name)
-
-
 def column(name: FieldName) -> ir.SourceField:
     return ir.SourceField(field=name)
 
@@ -2088,7 +2084,9 @@ def text_literal(value: Text) -> ir.RootModelLiteral:
 
 def test_where_keeps_every_field_and_filters_by_the_sources_own_field() -> None:
     acme = Text("Acme")
-    view = compile_deal(steps.where(conditions.eq(deal_field(FieldName("name")), acme)))
+    view = compile_deal(
+        steps.where(conditions.eq(conditions.field(FieldName("name")), acme))
+    )
 
     assert view.relation.fields == ir.Relation.of(ir.FromSource(source=Deal)).fields
     assert view.relation.filters == (
@@ -2107,7 +2105,8 @@ def test_a_condition_names_a_field_by_its_name_after_renames() -> None:
             steps.rename(FieldName("target"), FieldName("score")),
             steps.where(
                 conditions.lt(
-                    deal_field(FieldName("points")), deal_field(FieldName("score"))
+                    conditions.field(FieldName("points")),
+                    conditions.field(FieldName("score")),
                 )
             ),
         )
@@ -2125,7 +2124,7 @@ def test_a_condition_names_a_field_by_its_name_after_renames() -> None:
 def test_a_filter_survives_omitting_the_field_it_uses() -> None:
     view = compile_deal(
         steps.pipeline(
-            steps.where(conditions.is_null(deal_field(FieldName("nickname")))),
+            steps.where(conditions.is_null(conditions.field(FieldName("nickname")))),
             steps.omit(FieldName("nickname")),
         )
     )
@@ -2139,11 +2138,11 @@ def test_a_filter_survives_omitting_the_field_it_uses() -> None:
     ("condition", "checked"),
     [
         (
-            conditions.eq(deal_field(FieldName("nickname")), None),
+            conditions.eq(conditions.field(FieldName("nickname")), None),
             ir.FilterIsNull(field=column(FieldName("nickname"))),
         ),
         (
-            conditions.ne(deal_field(FieldName("nickname")), None),
+            conditions.ne(conditions.field(FieldName("nickname")), None),
             ir.FilterNot(term=ir.FilterIsNull(field=column(FieldName("nickname")))),
         ),
     ],
@@ -2162,10 +2161,12 @@ def test_and_or_and_not_keep_their_structure() -> None:
         steps.where(
             conditions.or_(
                 conditions.and_(
-                    conditions.eq(deal_field(FieldName("stage")), Stage.WON),
-                    conditions.ge(deal_field(FieldName("score")), Score(3)),
+                    conditions.eq(conditions.field(FieldName("stage")), Stage.WON),
+                    conditions.ge(conditions.field(FieldName("score")), Score(3)),
                 ),
-                conditions.not_(conditions.is_null(deal_field(FieldName("bonus")))),
+                conditions.not_(
+                    conditions.is_null(conditions.field(FieldName("bonus")))
+                ),
             )
         )
     )
@@ -2196,8 +2197,8 @@ def test_and_or_and_not_keep_their_structure() -> None:
 
 
 def test_each_where_adds_one_filter_in_order() -> None:
-    first = conditions.is_null(deal_field(FieldName("nickname")))
-    second = conditions.is_null(deal_field(FieldName("bonus")))
+    first = conditions.is_null(conditions.field(FieldName("nickname")))
+    second = conditions.is_null(conditions.field(FieldName("bonus")))
 
     view = compile_deal(steps.pipeline(steps.where(first), steps.where(second)))
 
@@ -2210,7 +2211,7 @@ def test_each_where_adds_one_filter_in_order() -> None:
 def test_an_optional_field_equals_a_literal_of_its_type() -> None:
     nickname = Text("Ace")
     view = compile_deal(
-        steps.where(conditions.eq(deal_field(FieldName("nickname")), nickname))
+        steps.where(conditions.eq(conditions.field(FieldName("nickname")), nickname))
     )
 
     assert view.relation.filters == (
@@ -2226,7 +2227,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
     ("step", "expected"),
     [
         (
-            steps.where(conditions.is_null(deal_field(FieldName("nicknme")))),
+            steps.where(conditions.is_null(conditions.field(FieldName("nicknme")))),
             diagnostics.UnknownField(
                 view=ViewName.fake(),
                 source=ir.SourceName("Deal"),
@@ -2237,7 +2238,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
         (
             steps.pipeline(
                 steps.add(FieldName("kind"), Literal["deal"], default="deal"),
-                steps.where(conditions.eq(deal_field(FieldName("kind")), "deal")),
+                steps.where(conditions.eq(conditions.field(FieldName("kind")), "deal")),
             ),
             diagnostics.NotASourceColumn(
                 view=ViewName.fake(),
@@ -2246,14 +2247,16 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
             ),
         ),
         (
-            steps.where(conditions.eq(deal_field(FieldName("name")), [Text("Acme")])),
+            steps.where(
+                conditions.eq(conditions.field(FieldName("name")), [Text("Acme")])
+            ),
             diagnostics.NonLiteralConditionValue(
                 view=ViewName.fake(),
                 value=diagnostics.LiteralText.of([Text("Acme")]),
             ),
         ),
         (
-            steps.where(conditions.eq(deal_field(FieldName("name")), "Acme")),
+            steps.where(conditions.eq(conditions.field(FieldName("name")), "Acme")),
             diagnostics.LiteralTypeMismatch(
                 view=ViewName.fake(),
                 source=ir.SourceName("Deal"),
@@ -2263,7 +2266,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
             ),
         ),
         (
-            steps.where(conditions.eq(deal_field(FieldName("name")), None)),
+            steps.where(conditions.eq(conditions.field(FieldName("name")), None)),
             diagnostics.LiteralTypeMismatch(
                 view=ViewName.fake(),
                 source=ir.SourceName("Deal"),
@@ -2275,7 +2278,8 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
         (
             steps.where(
                 conditions.eq(
-                    deal_field(FieldName("name")), deal_field(FieldName("score"))
+                    conditions.field(FieldName("name")),
+                    conditions.field(FieldName("score")),
                 )
             ),
             diagnostics.ComparedTypesDiffer(
@@ -2288,7 +2292,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
             ),
         ),
         (
-            steps.where(conditions.gt(deal_field(FieldName("bonus")), Score(1))),
+            steps.where(conditions.gt(conditions.field(FieldName("bonus")), Score(1))),
             diagnostics.OrderingOnOptionalField(
                 view=ViewName.fake(),
                 source=ir.SourceName("Deal"),
@@ -2299,7 +2303,8 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
         (
             steps.where(
                 conditions.le(
-                    deal_field(FieldName("score")), deal_field(FieldName("bonus"))
+                    conditions.field(FieldName("score")),
+                    conditions.field(FieldName("bonus")),
                 )
             ),
             diagnostics.OrderingOnOptionalField(
@@ -2310,7 +2315,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
             ),
         ),
         (
-            steps.where(conditions.lt(deal_field(FieldName("name")), Text("M"))),
+            steps.where(conditions.lt(conditions.field(FieldName("name")), Text("M"))),
             diagnostics.UnorderedFieldType(
                 view=ViewName.fake(),
                 source=ir.SourceName("Deal"),
@@ -2364,7 +2369,7 @@ def test_every_defective_term_of_a_condition_is_reported() -> None:
             conditions.and_(
                 conditions.is_null(conditions.field(unknown)),
                 conditions.not_(
-                    conditions.lt(deal_field(FieldName("name")), Text("M"))
+                    conditions.lt(conditions.field(FieldName("name")), Text("M"))
                 ),
             )
         )
@@ -2379,7 +2384,7 @@ def test_every_defective_term_of_a_condition_is_reported() -> None:
 def test_steps_after_a_defective_where_are_still_checked() -> None:
     reported = deal_diagnostics(
         steps.pipeline(
-            steps.where(conditions.eq(deal_field(FieldName("name")), "Acme")),
+            steps.where(conditions.eq(conditions.field(FieldName("name")), "Acme")),
             steps.omit(FieldName("secret")),
         )
     )
@@ -2394,7 +2399,7 @@ def test_where_in_a_payload_is_a_diagnostic() -> None:
     payload = Payload(
         name=PayloadName.fake(),
         source=Deal,
-        step=steps.where(conditions.is_null(deal_field(FieldName("nickname")))),
+        step=steps.where(conditions.is_null(conditions.field(FieldName("nickname")))),
     )
 
     match compile_catalog([], [payload]):
@@ -2422,7 +2427,7 @@ def test_where_in_a_nested_pipeline_is_a_diagnostic() -> None:
 
 def test_building_a_where_checks_nothing() -> None:
     root = ir.FromSource(source=Deal)
-    condition = conditions.eq(deal_field(FieldName("missing")), object())
+    condition = conditions.eq(conditions.field(FieldName("missing")), object())
 
     assert steps.where(condition)(root) == ir.Where(input=root, condition=condition)
 
@@ -2540,7 +2545,7 @@ def test_a_where_diagnostic_message_names_the_offending_values(
 def test_an_and_or_an_or_of_one_term_is_that_term(
     combine: Callable[[ir.Condition], ir.Condition],
 ) -> None:
-    term = conditions.is_null(deal_field(FieldName("nickname")))
+    term = conditions.is_null(conditions.field(FieldName("nickname")))
 
     view = compile_deal(steps.where(combine(term)))
 

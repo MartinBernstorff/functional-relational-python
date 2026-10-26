@@ -14,7 +14,7 @@ import pydantic
 from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.compiler import conditions, diagnostics
+from functional_relational_python.compiler import condition_checker, diagnostics
 from functional_relational_python.compiler.model_names import (
     ModelNames,
     ViewModelNames,
@@ -608,11 +608,11 @@ def _check_where(
             reported.append(
                 diagnostics.WhereInNestedPipeline(view=view, source=relation.source)
             )
-    checker = conditions.ConditionChecker(view, relation)
+    checker = condition_checker.ConditionChecker(view, relation)
     checked = checker.check(node.condition)
     reported.extend(checker.diagnostics)
     # A Defective Condition always comes with a diagnostic.
-    if reported or isinstance(checked, conditions.Defective):
+    if reported or isinstance(checked, condition_checker.Defective):
         return Poisoned(recovered=relation, diagnostics=tuple(reported))
     return relation.filtered(checked)
 
