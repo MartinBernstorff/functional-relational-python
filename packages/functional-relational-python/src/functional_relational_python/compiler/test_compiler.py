@@ -19,7 +19,13 @@ from functional_relational_python.entity_graph.entity_graph import (
     Optionality,
     RuntimeAnnotation,
 )
-from functional_relational_python.entity_graph.id import Id, IdBase, IdType, OneToOne
+from functional_relational_python.entity_graph.id import (
+    Id,
+    IdBase,
+    IdType,
+    OneToOne,
+    OneToOneMarker,
+)
 from functional_relational_python.pipeline import conditions, ir, steps, test_ir
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.views import View, ViewName
@@ -38,7 +44,7 @@ class Company(pydantic.BaseModel):
 
 def empty_graph() -> EntityGraph:
     # The Sources here are not Entities; compile does not require them to be.
-    return EntityGraph.build([], IdBase.fake()).unwrap()
+    return EntityGraph.build([], IdBase.fake(), OneToOneMarker.fake()).unwrap()
 
 
 def field_names(view: compiler.CompiledView) -> list[FieldName]:
@@ -899,7 +905,9 @@ class Memo(pydantic.BaseModel):
 
 
 def hr_graph() -> EntityGraph:
-    return EntityGraph.build([Department, Employee], IdBase.fake()).unwrap()
+    return EntityGraph.build(
+        [Department, Employee], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
 
 
 def named(*fields: FieldName) -> ir.Select:
@@ -987,7 +995,9 @@ class Member(pydantic.BaseModel):
 
 
 def test_hydrate_resolves_the_references_the_id_base_decides() -> None:
-    graph = EntityGraph.build([Team, Member], IdBase(AppId)).unwrap()
+    graph = EntityGraph.build(
+        [Team, Member], IdBase(AppId), OneToOneMarker.fake()
+    ).unwrap()
 
     match compiler.compile_views(
         graph, [View(name=ViewName.fake(), source=Member, step=steps.hydrate())]
@@ -1309,7 +1319,9 @@ class Copy(pydantic.BaseModel):
 
 def campaign_graph() -> EntityGraph:
     return EntityGraph.build(
-        [ChannelCampaign, MetaCampaign, Relaunch, CampaignNote, Copy], IdBase.fake()
+        [ChannelCampaign, MetaCampaign, Relaunch, CampaignNote, Copy],
+        IdBase.fake(),
+        OneToOneMarker.fake(),
     ).unwrap()
 
 
@@ -1481,6 +1493,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
                 source=ir.SourceName("ChannelCampaign"),
                 entity=CampaignNote,
                 many_to_one=(FieldName("campaign_id"),),
+                one_to_one_marker=OneToOneMarker.fake(),
             ),
         ),
         (
@@ -1491,6 +1504,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
                 source=ir.SourceName("MetaCampaign"),
                 entity=ChannelCampaign,
                 many_to_one=(),
+                one_to_one_marker=OneToOneMarker.fake(),
             ),
         ),
         (
@@ -1580,6 +1594,7 @@ def test_steps_after_a_defective_reverse_find_the_reversed_field() -> None:
             source=ir.SourceName("ChannelCampaign"),
             entity=CampaignNote,
             many_to_one=(FieldName("campaign_id"),),
+            one_to_one_marker=OneToOneMarker.fake(),
         ),
     )
 
@@ -1655,6 +1670,7 @@ def test_building_a_reverse_checks_nothing(
                 source=ir.SourceName("ChannelCampaign"),
                 entity=CampaignNote,
                 many_to_one=(FieldName("campaign_id"),),
+                one_to_one_marker=OneToOneMarker.fake(),
             ),
             (
                 "CampaignView: cannot reverse CampaignNote onto ChannelCampaign, "
@@ -1668,6 +1684,7 @@ def test_building_a_reverse_checks_nothing(
                 source=ir.SourceName("MetaCampaign"),
                 entity=ChannelCampaign,
                 many_to_one=(),
+                one_to_one_marker=OneToOneMarker.fake(),
             ),
             (
                 "MetaView: cannot reverse ChannelCampaign onto MetaCampaign, "
@@ -2149,7 +2166,9 @@ class Models(pydantic.BaseModel, frozen=True):
     clash: type[pydantic.BaseModel]
 
     def graph(self) -> EntityGraph:
-        return EntityGraph.build(self.entities, IdBase.fake()).unwrap()
+        return EntityGraph.build(
+            self.entities, IdBase.fake(), OneToOneMarker.fake()
+        ).unwrap()
 
     def sources(self) -> tuple[type[pydantic.BaseModel], ...]:
         return (*self.entities, self.memo, self.clash)
@@ -2618,7 +2637,8 @@ def test_unreferenced_entities_and_entity_order_do_not_change_the_result(
 ) -> None:
     original = compiler.check(case.views.models.graph(), case.views.views)
     varied = compiler.check(
-        EntityGraph.build(case.varied, IdBase.fake()).unwrap(), case.views.views
+        EntityGraph.build(case.varied, IdBase.fake(), OneToOneMarker.fake()).unwrap(),
+        case.views.views,
     )
 
     reordered = [e for e in case.varied if e not in case.unreferenced] != list(

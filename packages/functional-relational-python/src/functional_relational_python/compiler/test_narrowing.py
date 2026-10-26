@@ -13,7 +13,12 @@ from functional_relational_python.entity_graph.entity_graph import (
     Optionality,
     RuntimeAnnotation,
 )
-from functional_relational_python.entity_graph.id import Id, IdBase, OneToOne
+from functional_relational_python.entity_graph.id import (
+    Id,
+    IdBase,
+    OneToOne,
+    OneToOneMarker,
+)
 from functional_relational_python.pipeline import conditions, ir, steps
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.views import View, ViewName
@@ -80,7 +85,9 @@ class Detail(pydantic.BaseModel):
 
 
 def graph() -> EntityGraph:
-    return EntityGraph.build([Owner, Campaign, Detail], IdBase.fake()).unwrap()
+    return EntityGraph.build(
+        [Owner, Campaign, Detail], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
 
 
 def compile_campaign(step: steps.Step) -> compiler.CompiledView:
