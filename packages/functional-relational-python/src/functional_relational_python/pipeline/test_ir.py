@@ -1,8 +1,10 @@
 import types
 from collections.abc import Mapping
+from typing import Annotated
 
 import pydantic
 import pytest
+from pydantic.fields import FieldInfo
 
 from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
@@ -196,6 +198,57 @@ def test_lookups_are_one_per_entity_nested_included_in_first_use_order() -> None
     )
 
     assert relation.lookups() == (mentor, department, company)
+
+
+def test_a_lifted_field_looks_up_each_entity_on_its_way_outermost_first() -> None:
+    mentor = lookup(FieldName("mentor_id"), Employee, Optionality.OPTIONAL)
+    department = lookup(FieldName("department_id"), Department)
+    company = lookup(FieldName("company_id"), Company)
+    relation = ir.Relation(
+        source=ir.SourceName("Employee"),
+        fields=(
+            ir.Field.looked_up(
+                FieldName("mentor_company"),
+                ir.ChainedLookup(chain=(mentor, department, company)),
+                ir.NoDefault(),
+            ),
+            ir.Field(
+                name=FieldName("mentor_department_name"),
+                info=FieldInfo.from_annotation(str | None),
+                value=ir.Lifted(
+                    through=(mentor, department),
+                    field=ir.SourceField(field=FieldName("name")),
+                ),
+                default=ir.NoDefault(),
+            ),
+        ),
+        filters=(),
+    )
+
+    assert relation.lookups() == (mentor, department, company)
+
+
+def test_a_chain_is_optional_iff_a_lookup_on_its_way_is() -> None:
+    mentor = lookup(FieldName("mentor_id"), Employee, Optionality.OPTIONAL)
+    department = lookup(FieldName("department_id"), Department)
+    company = lookup(FieldName("company_id"), Company)
+
+    assert (
+        ir.ChainedLookup(chain=(department, company)).annotation(),
+        ir.ChainedLookup(chain=(mentor, department)).annotation(),
+    ) == (Company, Department | None)
+
+
+def test_admitting_none_keeps_the_fields_constraints() -> None:
+    field = own_field(FieldName("name"), Annotated[str, pydantic.Field(min_length=1)])
+
+    widened = field.admitting_none()
+
+    assert (widened.annotation(), widened.info.metadata) == (
+        str | None,
+        field.info.metadata,
+    )
+    assert widened.info.metadata
 
 
 def test_a_relation_of_own_fields_has_no_lookups() -> None:

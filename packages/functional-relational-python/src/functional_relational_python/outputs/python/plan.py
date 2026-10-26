@@ -611,8 +611,8 @@ class _ModelPlanner:
                     rendered = Inherited()
                 case ir.Field():
                     rendered = renderer.render(field.annotation())
-                case ir.NestedField(value=lookup, relation=nested_relation):
-                    self.used.use(lookup.target)
+                case ir.NestedField(value=found, relation=nested_relation):
+                    self.used.use(found.lookups()[-1].target)
                     model = self.plan(
                         names.nested_in(field), nested_relation, pydantic.BaseModel
                     )

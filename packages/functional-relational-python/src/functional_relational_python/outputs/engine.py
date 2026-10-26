@@ -4,7 +4,7 @@ It runs compiled Views over Entities held in memory. Users can use it as a
 stateful fake in their own tests, and every other backend is compared against it.
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Protocol
 
 import pydantic
@@ -268,19 +268,37 @@ class InMemoryViewEngine:
     ) -> FieldValue:
         match field:
             case ir.Field(value=value):
-                match value:
-                    case ir.SourceField():
-                        return getattr(subject, value.field.root)
-                    case ir.Lookup() | ir.ReverseLookup():
-                        return self._lookup(value, subject, run)
-                    case ir.Added():
-                        return InMemoryViewEngine._default(field)
-            case ir.NestedField(value=lookup, relation=relation):
-                match self._lookup(lookup, subject, run):
-                    case None:
-                        return None
-                    case entity:
-                        return self._row(relation, entity, run)
+                pass
+            case ir.NestedField(value=found, relation=relation):
+                entity = self._follow(found.lookups(), subject, run)
+                return None if entity is None else self._row(relation, entity, run)
+        match value:
+            case ir.SourceField():
+                return getattr(subject, value.field.root)
+            case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
+                return self._follow(value.lookups(), subject, run)
+            case ir.Lifted(through=through, field=read):
+                entity = self._follow(through, subject, run)
+                return None if entity is None else getattr(entity, read.field.root)
+            case ir.Added():
+                return InMemoryViewEngine._default(field)
+
+    def _follow(
+        self,
+        lookups: Iterable[ir.EntityLookup],
+        subject: pydantic.BaseModel,
+        run: _Read,
+    ) -> pydantic.BaseModel | None:
+        """The Entity found by following each of `lookups` in turn from `subject`,
+        or `None` once one finds none."""
+        found = subject
+        for lookup in lookups:
+            match self._lookup(lookup, found, run):
+                case None:
+                    return None
+                case entity:
+                    found = entity
+        return found
 
     @staticmethod
     def _holds(kept: ir.Filter, subject: pydantic.BaseModel) -> bool:

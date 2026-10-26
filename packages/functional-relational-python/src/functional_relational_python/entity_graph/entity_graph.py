@@ -77,13 +77,20 @@ class Optionality(StrEnum):
             optionality=Optionality.REQUIRED, required=annotation, metadata=()
         )
 
-    def annotate[T](self, annotation: type[T]) -> type[T | None]:
-        """`annotation` as a run time annotation of this optionality."""
+    @typing.overload
+    def annotate[T](self, annotation: type[T]) -> type[T | None]: ...
+
+    @typing.overload
+    def annotate(self, annotation: RuntimeAnnotation) -> RuntimeAnnotation: ...
+
+    def annotate(self, annotation: RuntimeAnnotation) -> RuntimeAnnotation:
+        """`annotation` as a run time annotation of this optionality. An optional
+        annotation that admits `None` already is unchanged."""
         match self:
             case Optionality.REQUIRED:
                 return annotation
             case Optionality.OPTIONAL:
-                return annotation | None
+                return functools.reduce(operator.or_, (annotation, types.NoneType))
 
     def annotate_text[T: RootModel[str]](self, annotation: T) -> T:
         """`annotation`, written as source, as an annotation of this optionality."""

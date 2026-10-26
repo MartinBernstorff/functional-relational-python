@@ -30,7 +30,7 @@ import their Managers from it.
 """
 
 import typing
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 
 import pydantic
 from safe_result import Result
@@ -46,6 +46,7 @@ from functional_relational_python.outputs.django.models import (
 )
 from functional_relational_python.outputs.python.mappings import (
     Expression,
+    Followed,
     Indent,
     LeftOut,
 )
@@ -201,23 +202,15 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
     ) -> Iterator[tuple[FieldName, ...]]:
         """`prefix` is the chain of foreign keys to the subject of `relation`."""
         for field in relation.fields:
+            path = prefix
+            for lookup in field.value.lookups():
+                path = (*path, DjangoQueriesRenderer.foreign_key(lookup, field.name))
+                yield path
             match field:
-                case ir.Field(value=value):
-                    match value:
-                        case ir.Lookup():
-                            yield (*prefix, DjangoQueriesRenderer.foreign_key(value))
-                        case ir.SourceField() | ir.Added():
-                            pass
-                        case ir.ReverseLookup():
-                            raise ReverseInQueryError(field.name)
-                case ir.NestedField(value=lookup, relation=nested):
-                    match lookup:
-                        case ir.Lookup():
-                            path = (*prefix, DjangoQueriesRenderer.foreign_key(lookup))
-                            yield path
-                            yield from ViewQueries._paths(nested, path)
-                        case ir.ReverseLookup():
-                            raise ReverseInQueryError(field.name)
+                case ir.Field():
+                    pass
+                case ir.NestedField(relation=nested):
+                    yield from ViewQueries._paths(nested, path)
 
 
 class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
@@ -250,9 +243,14 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     queries: tuple[ViewQueries, ...]
 
     @staticmethod
-    def foreign_key(lookup: ir.Lookup) -> FieldName:
-        """The foreign key of the Reference `lookup` follows."""
-        return DjangoModelsRenderer.foreign_key_name(lookup.reference.field)
+    def foreign_key(lookup: ir.EntityLookup, field: FieldName) -> FieldName:
+        """The foreign key of the Reference `lookup` follows, for `field`. The
+        renderer reports a View that reverses a Reference instead."""
+        match lookup:
+            case ir.Lookup():
+                return DjangoModelsRenderer.foreign_key_name(lookup.reference.field)
+            case ir.ReverseLookup():
+                raise ReverseInQueryError(field)
 
     @staticmethod
     def render(
@@ -650,54 +648,58 @@ class _RowReader(pydantic.BaseModel, frozen=True):
         subject: type[pydantic.BaseModel],
         row: Expression,
     ) -> Expression | LeftOut:
-        """The entry for `field`, on a line at this indentation."""
+        """The entry for `field`, on a line at this indentation. What a Lookup
+        finds is read off the row the QuerySet selected related."""
+        prefix = Expression(f'"{field.name.root}": ')
         match field:
-            case ir.Field(value=value):
-                match value:
-                    case ir.SourceField():
-                        node = self.graph.entities[subject]
-                        attribute = DjangoModelsRenderer.attribute_of(node, value.field)
-                        return Expression(f"{row.root}.{attribute.root}")
-                    case ir.Lookup():
-                        related = _RowReader._related(value, row)
-                        return self._looked_up(
-                            field,
-                            related,
-                            lambda indent: self.at(indent).entity(
-                                value.target, related
-                            ),
-                        )
-                    case ir.Added():
-                        return LeftOut()
-                    case ir.ReverseLookup():
-                        raise ReverseInQueryError(field.name)
-            case ir.NestedField(value=ir.Lookup() as lookup, relation=nested):
-                related = _RowReader._related(lookup, row)
-                return self._looked_up(
-                    field,
-                    related,
+            case ir.NestedField(value=found, relation=nested):
+                followed = _RowReader._followed(found.lookups(), row, field.name)
+                return self.indent.looked_up(
+                    prefix,
+                    followed.absent,
                     lambda indent: self.at(indent).fields(
-                        nested, lookup.target, related
+                        nested, found.lookups()[-1].target, followed.entity
                     ),
                 )
-            case ir.NestedField():
-                raise ReverseInQueryError(field.name)
+            case ir.Field(value=value):
+                pass
+        match value:
+            case ir.SourceField():
+                node = self.graph.entities[subject]
+                attribute = DjangoModelsRenderer.attribute_of(node, value.field)
+                return Expression(f"{row.root}.{attribute.root}")
+            case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
+                followed = _RowReader._followed(value.lookups(), row, field.name)
+                return self.indent.looked_up(
+                    prefix,
+                    followed.absent,
+                    lambda indent: self.at(indent).entity(
+                        value.lookups()[-1].target, followed.entity
+                    ),
+                )
+            case ir.Lifted(through=through, field=read):
+                followed = _RowReader._followed(through, row, field.name)
+                node = self.graph.entities[through[-1].target]
+                attribute = DjangoModelsRenderer.attribute_of(node, read.field)
+                lifted = Expression(f"{followed.entity.root}.{attribute.root}")
+                return self.indent.looked_up(prefix, followed.absent, lambda _: lifted)
+            case ir.Added():
+                return LeftOut()
 
     @staticmethod
-    def _related(lookup: ir.Lookup, row: Expression) -> Expression:
-        """The row `lookup` finds, which the QuerySet selected related."""
-        foreign_key = DjangoQueriesRenderer.foreign_key(lookup)
-        return Expression(f"{row.root}.{foreign_key.root}")
+    def _followed(
+        lookups: Iterable[ir.EntityLookup], row: Expression, field: FieldName
+    ) -> Followed:
+        """`lookups` followed from `row` through the rows the QuerySet selected
+        related, each optional one absent when its row is `None`."""
 
-    def _looked_up(
-        self,
-        field: ir.RelationField,
-        related: Expression,
-        present: Callable[[Indent], Expression],
-    ) -> Expression:
-        return self.indent.looked_up(
-            field.optionality(),
-            Expression(f'"{field.name.root}": '),
-            Expression(f"{related.root} is None"),
-            present,
+        def related(lookup: ir.EntityLookup, found: Expression) -> Expression:
+            foreign_key = DjangoQueriesRenderer.foreign_key(lookup, field)
+            return Expression(f"{found.root}.{foreign_key.root}")
+
+        return Followed.of(
+            lookups,
+            row,
+            related,
+            lambda lookup, found: Expression(f"{related(lookup, found).root} is None"),
         )

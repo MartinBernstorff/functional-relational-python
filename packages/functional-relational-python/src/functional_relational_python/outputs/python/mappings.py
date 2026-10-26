@@ -85,37 +85,71 @@ class Indent(pydantic.RootModel[int], frozen=True):
 
     def looked_up(
         self,
-        optionality: Optionality,
         prefix: Expression,
-        absent: Expression,
+        absent: Sequence[Expression],
         present: Callable[[Indent], Expression],
     ) -> Expression:
         """The value of an entry at this indentation that starts with `prefix`,
-        e.g. `mentor=`, holding what a lookup finds: `present` itself, or when it
-        is optional `None if <absent> else <present>`, where `absent` is the
-        condition under which it finds nothing, e.g. `source.mentor_id is None`.
+        e.g. `mentor=`, holding what a chain of lookups finds: `present` itself, or
+        `None if <absent> else ...` for each optional lookup on the way, where
+        `absent` is the condition under which it finds nothing, e.g.
+        `source.mentor_id is None`.
 
-        The conditional stays on one line when `present` is one line and the entry
-        fits; otherwise it is split over lines like ruff format does. `present`
-        gets the indentation to write at, and is written once: a one-line
-        expression reads the same at any indentation.
+        The conditionals stay on one line when `present` is one line and the
+        entry fits, or else they fit parenthesized on a line of their own;
+        otherwise they are split over lines like ruff format does, one chained
+        conditional rather than nested ones. `present` gets the
+        indentation to write at, and is written once: a one-line expression
+        reads the same at any indentation.
         """
-        match optionality:
-            case Optionality.REQUIRED:
-                return present(self)
-            case Optionality.OPTIONAL:
-                pass
+        if not absent:
+            return present(self)
         inner = self.deeper()
         written = present(inner).root
-        inline = f"None if {absent.root} else {written}"
+        conditions = "".join(f"None if {condition.root} else " for condition in absent)
+        inline = f"{conditions}{written}"
         line = f"{self.pad().root}{prefix.root}{inline},"
-        if "\n" not in written and len(line) <= LineLength.default().root:
-            return Expression(inline)
         pad = inner.pad().root
-        return Expression(
-            f"(\n{pad}None\n{pad}if {absent.root}\n"
-            f"{pad}else {written}\n{self.pad().root})"
+        if "\n" not in written:
+            if len(line) <= LineLength.default().root:
+                return Expression(inline)
+            # Like ruff format: parenthesized onto its own line, if that fits.
+            if len(f"{pad}{inline}") <= LineLength.default().root:
+                return Expression(f"(\n{pad}{inline}\n{self.pad().root})")
+        branches = "".join(
+            f"{pad}{'None' if index == 0 else 'else None'}\n{pad}if {condition.root}\n"
+            for index, condition in enumerate(absent)
         )
+        return Expression(f"(\n{branches}{pad}else {written}\n{self.pad().root})")
+
+
+class Followed(pydantic.BaseModel, frozen=True):
+    """A chain of lookups followed from a subject in generated source: per optional
+    lookup, in turn, the condition under which it finds nothing, and the Entity
+    the chain ends at."""
+
+    absent: tuple[Expression, ...]
+    entity: Expression
+
+    @staticmethod
+    def of(
+        lookups: Iterable[ir.EntityLookup],
+        subject: Expression,
+        entity: Callable[[ir.EntityLookup, Expression], Expression],
+        absent: Callable[[ir.EntityLookup, Expression], Expression],
+    ) -> Followed:
+        """`entity` writes what a lookup finds from the expression before it, and
+        `absent` the condition under which it finds nothing."""
+        conditions: list[Expression] = []
+        found = subject
+        for lookup in lookups:
+            match lookup.optionality:
+                case Optionality.REQUIRED:
+                    pass
+                case Optionality.OPTIONAL:
+                    conditions.append(absent(lookup, found))
+            found = entity(lookup, found)
+        return Followed(absent=tuple(conditions), entity=found)
 
 
 class MappingsRenderer:
@@ -221,31 +255,59 @@ class _Construction(pydantic.BaseModel, frozen=True):
         self, model: ModelPlan, field: ir.RelationField, subject: Expression
     ) -> Expression | LeftOut:
         """The argument for `field` of `model`, on a line at this indentation."""
+        prefix = Expression(f"{field.name.root}=")
         match field:
-            case ir.Field(value=value):
-                match value:
-                    case ir.SourceField():
-                        return Expression(f"{subject.root}.{value.field.root}")
-                    case ir.Lookup():
-                        entity = self._entity(value, subject)
-                        return self._looked_up(field, value, subject, lambda _: entity)
-                    case ir.ReverseLookup():
-                        access = self._access(value, subject)
-                        return Expression(
-                            f"{access.parameter.root}.get({access.key.root})"
-                        )
-                    case ir.Added():
-                        return LeftOut()
-            case ir.NestedField(value=lookup):
+            case ir.NestedField(value=found):
                 nested = model.nested_in(field)
-                return self._looked_up(
-                    field,
-                    lookup,
-                    subject,
+                followed = self._followed(found.lookups(), subject)
+                return self.indent.looked_up(
+                    prefix,
+                    followed.absent,
                     lambda indent: self.model_copy(update={"indent": indent}).call(
-                        nested, self._entity(lookup, subject)
+                        nested, followed.entity
                     ),
                 )
+            case ir.Field(value=value):
+                pass
+        match value:
+            case ir.SourceField():
+                return Expression(f"{subject.root}.{value.field.root}")
+            case ir.ReverseLookup():
+                access = self._access(value, subject)
+                return Expression(f"{access.parameter.root}.get({access.key.root})")
+            case ir.Lookup() | ir.ChainedLookup():
+                followed = self._followed(value.lookups(), subject)
+                return self.indent.looked_up(
+                    prefix, followed.absent, lambda _: followed.entity
+                )
+            case ir.Lifted(through=through, field=read):
+                followed = self._followed(through, subject)
+                lifted = Expression(f"{followed.entity.root}.{read.field.root}")
+                return self.indent.looked_up(prefix, followed.absent, lambda _: lifted)
+            case ir.Added():
+                return LeftOut()
+
+    def _followed(
+        self, lookups: Iterable[ir.EntityLookup], subject: Expression
+    ) -> Followed:
+        """`lookups` followed from `subject`: an optional Reference finds nothing
+        when its ID is `None`, a reversed one when no Entity holds the ID."""
+
+        def entity(lookup: ir.EntityLookup, found: Expression) -> Expression:
+            access = self._access(lookup, found)
+            return Expression(f"{access.parameter.root}[{access.key.root}]")
+
+        def absent(lookup: ir.EntityLookup, found: Expression) -> Expression:
+            access = self._access(lookup, found)
+            match lookup:
+                case ir.Lookup():
+                    return Expression(f"{access.key.root} is None")
+                case ir.ReverseLookup():
+                    return Expression(
+                        f"{access.key.root} not in {access.parameter.root}"
+                    )
+
+        return Followed.of(lookups, subject, entity, absent)
 
     def _access(self, lookup: ir.EntityLookup, subject: Expression) -> _Access:
         """The parameter `lookup` finds its Entity in, and the subject's value it
@@ -259,32 +321,6 @@ class _Construction(pydantic.BaseModel, frozen=True):
         return _Access(
             parameter=Expression(self.function.parameter_of(lookup).root),
             key=Expression(f"{subject.root}.{field.root}"),
-        )
-
-    def _entity(self, lookup: ir.EntityLookup, subject: Expression) -> Expression:
-        access = self._access(lookup, subject)
-        return Expression(f"{access.parameter.root}[{access.key.root}]")
-
-    def _looked_up(
-        self,
-        field: ir.RelationField,
-        lookup: ir.EntityLookup,
-        subject: Expression,
-        present: Callable[[Indent], Expression],
-    ) -> Expression:
-        """`present` itself, or `None` when an optional Reference is absent, or no
-        Entity holds a reversed one."""
-        access = self._access(lookup, subject)
-        match lookup:
-            case ir.Lookup():
-                absent = Expression(f"{access.key.root} is None")
-            case ir.ReverseLookup():
-                absent = Expression(f"{access.key.root} not in {access.parameter.root}")
-        return self.indent.looked_up(
-            field.optionality(),
-            Expression(f"{field.name.root}="),
-            absent,
-            present,
         )
 
 

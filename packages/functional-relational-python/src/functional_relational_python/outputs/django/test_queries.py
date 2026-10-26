@@ -199,6 +199,56 @@ def golden_views() -> list[View]:
     ]
 
 
+def flattened_employee() -> View:
+    """Lifts fields out of a chain of required References, and of a chain of
+    optional ones, whose conditionals chain; one of them an Entity."""
+    return View(
+        name=ViewName("EmployeeFlat"),
+        source=Employee,
+        step=steps.pipeline(
+            steps.resolve(
+                named(FieldName("department_id")),
+                steps.omit(FieldName("id")),
+                steps.rename(FieldName("name"), FieldName("department_name")),
+                steps.resolve(
+                    named(FieldName("company_id")),
+                    steps.project([FieldName("name")]),
+                    steps.rename(FieldName("name"), FieldName("company_name")),
+                ),
+                steps.flatten(FieldName("company")),
+            ),
+            steps.flatten(FieldName("department")),
+            steps.resolve(
+                named(FieldName("mentor_id")),
+                steps.project(
+                    [
+                        FieldName("name"),
+                        FieldName("department_id"),
+                        FieldName("mentor_id"),
+                    ]
+                ),
+                steps.resolve(named(FieldName("department_id"))),
+                steps.resolve(
+                    named(FieldName("mentor_id")),
+                    steps.project([FieldName("name"), FieldName("nickname")]),
+                    steps.rename(
+                        steps.select(lambda _field: True), prefixed(Text("grand"))
+                    ),
+                ),
+                steps.flatten(FieldName("mentor")),
+                steps.rename(
+                    steps.select(lambda _field: True), prefixed(Text("mentor"))
+                ),
+            ),
+            steps.flatten(FieldName("mentor")),
+        ),
+    )
+
+
+def prefixed(prefix: Text) -> ir.FieldRenaming:
+    return lambda field: FieldName(f"{prefix.root}_{field.root}")
+
+
 def test_golden_queries() -> None:
     assert queries_of(golden_views()) == FileText(
         """\
@@ -752,6 +802,7 @@ def organisation() -> tuple[pydantic.BaseModel, ...]:
             source=Employee,
             step=steps.hydrate(steps.hydrate(steps.omit(FieldName("name")))),
         ),
+        flattened_employee(),
         View(
             name=ViewName("OnlyAdded"),
             source=Employee,
@@ -907,7 +958,7 @@ class LongModules:
 def test_generated_queries_are_ruff_formatted(
     config: DjangoModels, views: ModulePath
 ) -> None:
-    compiled = compile_all(golden_views()).views
+    compiled = compile_all([*golden_views(), flattened_employee()]).views
     (file,) = (
         DjangoQueriesRenderer.render(entity_graph(), config, compiled, into(views))
         .unwrap()
