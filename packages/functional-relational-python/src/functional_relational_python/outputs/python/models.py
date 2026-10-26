@@ -7,17 +7,29 @@ Everything here is pure: it builds file contents and touches no filesystem.
 import typing
 from collections.abc import Sequence
 
-from functional_relational_python.outputs.python.plan import ModelPlan, PythonPlan
+import pydantic
+
+from functional_relational_python.outputs.python.plan import (
+    ModelField,
+    ModelPlan,
+    PythonPlan,
+)
 from functional_relational_python.outputs.python.symbols import (
     LineLength,
     ModulePath,
+    ValueExpression,
 )
+from functional_relational_python.pipeline import ir
 from functional_relational_python.support.filesystem import FileText
 from functional_relational_python.support.generated_files import (
     GeneratedFile,
     GeneratedFiles,
 )
 from functional_relational_python.support.identifier import Identifier
+
+
+class FieldDeclaration(pydantic.RootModel[str], frozen=True):
+    """One field of a model's class body, e.g. `name: Text | None = None`."""
 
 
 class ModelsRenderer:
@@ -75,7 +87,7 @@ class ModelsRenderer:
             f"class {model.symbol.bound_name().root}({base}, frozen=True):\n"
             + (
                 "".join(
-                    f"    {field.field.name.root}: {field.type.root}\n"
+                    f"    {ModelsRenderer._declaration(field).root}\n"
                     for field in model.fields
                 )
                 or "    pass\n"
@@ -83,3 +95,12 @@ class ModelsRenderer:
             for model in models
         )
         return FileText(f"{ModelsRenderer.header.root}\n{imports}\n\n\n{classes}")
+
+    @staticmethod
+    def _declaration(field: ModelField) -> FieldDeclaration:
+        annotated = f"{field.field.name.root}: {field.type.root}"
+        match field.default:
+            case ValueExpression() as default:
+                return FieldDeclaration(f"{annotated} = {default.root}")
+            case ir.NoDefault():
+                return FieldDeclaration(annotated)

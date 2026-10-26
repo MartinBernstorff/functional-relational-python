@@ -1,3 +1,4 @@
+import enum
 import types
 from collections.abc import Iterable, Sequence
 from typing import Annotated
@@ -225,6 +226,7 @@ def test_rename_keeps_the_field_in_place_with_its_type() -> None:
             name=FieldName("code") if name == "secret" else FieldName(name),
             info=info,
             value=ir.SourceField(field=FieldName(name)),
+            default=ir.NoDefault(),
         )
         for name, info in Company.model_fields.items()
     )
@@ -460,6 +462,153 @@ def test_building_steps_with_a_select_checks_nothing() -> None:
     )
 
 
+class Colour(enum.Enum):
+    RED = "red"
+
+
+def defaults(view: compiler.CompiledView) -> dict[FieldName, ir.DefaultValue]:
+    """The defaults the View's fields have, by name; required fields are left out."""
+    return {
+        field.name: field.default
+        for field in view.relation.fields
+        if not isinstance(field.default, ir.NoDefault)
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "default"),
+    [
+        (None, ir.ScalarDefault(None)),
+        (pydantic.MISSING, ir.MissingDefault()),
+        (3, ir.ScalarDefault(3)),
+        (0.5, ir.ScalarDefault(0.5)),
+        ("shop", ir.ScalarDefault("shop")),
+        (True, ir.ScalarDefault(root=True)),
+        ([], ir.EmptyListDefault()),
+        ({}, ir.EmptyDictDefault()),
+        (Colour.RED, ir.EnumDefault(member=Colour.RED)),
+    ],
+    ids=["none", "missing", "int", "float", "str", "bool", "list", "dict", "enum"],
+)
+def test_default_sets_a_literal_as_the_named_fields_default(
+    value: ir.UncheckedDefault, default: ir.DefaultValue
+) -> None:
+    field = FieldName("secret")
+
+    view = compile_one(steps.default(field, value))
+
+    assert defaults(view) == {field: default}
+
+
+def test_default_with_a_select_sets_each_selected_fields_default() -> None:
+    selected = (FieldName("name"), FieldName("revenue"))
+
+    view = compile_one(steps.default(named(*selected), None))
+
+    assert defaults(view) == dict.fromkeys(selected, ir.ScalarDefault(None))
+
+
+def test_a_later_default_replaces_an_earlier_one_and_a_rename_keeps_it() -> None:
+    old, new = FieldName("secret"), FieldName("hidden")
+
+    view = compile_one(
+        steps.pipeline(
+            steps.default(old, None),
+            steps.default(old, "redacted"),
+            steps.rename(old, new),
+        )
+    )
+
+    assert defaults(view) == {new: ir.ScalarDefault("redacted")}
+
+
+class Count(int):
+    pass
+
+
+class Permission(enum.Flag):
+    READ = enum.auto()
+    WRITE = enum.auto()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        object(),
+        (),
+        [None],
+        {"key": None},
+        float("nan"),
+        Count(1),
+        Text("shop"),
+        Permission.READ | Permission.WRITE,
+        Permission(0),
+    ],
+    ids=[
+        "object",
+        "tuple",
+        "non-empty list",
+        "non-empty dict",
+        "nan",
+        "int subclass",
+        "root model",
+        "combined flag",
+        "empty flag",
+    ],
+)
+def test_a_default_that_is_not_a_literal_is_a_diagnostic(
+    value: ir.UncheckedDefault,
+) -> None:
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.default(FieldName("secret"), value),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.NonLiteralDefault(
+            view=view.name, value=diagnostics.DefaultText.of(value)
+        ),
+    )
+
+
+def test_a_default_for_an_unknown_field_that_is_not_a_literal_reports_both() -> None:
+    unknown, value = FieldName("revnue"), object()
+    view = View(
+        name=ViewName.fake(), source=Company, step=steps.default(unknown, value)
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.UnknownField(
+            view=view.name,
+            source=ir.SourceName("Company"),
+            field=unknown,
+            valid=tuple(map(FieldName, Company.model_fields)),
+        ),
+        diagnostics.NonLiteralDefault(
+            view=view.name, value=diagnostics.DefaultText.of(value)
+        ),
+    )
+
+
+def test_the_non_literal_default_message_contains_the_value() -> None:
+    value = (Text("shop"),)
+    message = diagnostics.NonLiteralDefault(
+        view=ViewName.fake(), value=diagnostics.DefaultText.of(value)
+    ).describe()
+
+    assert repr(value) in message.root
+
+
+def test_building_a_default_checks_nothing() -> None:
+    root = ir.FromSource(source=Company)
+    unknown, value = FieldName("does_not_exist"), object()
+
+    node = steps.default(unknown, value)(root)
+
+    assert node == ir.Default(input=root, fields=unknown, value=value)
+
+
 # The prefix keeps these from ever being a field of `Company` or `Wide`.
 unknown_field_name = st.from_regex(r"unknown_[a-z]{1,6}", fullmatch=True)
 
@@ -690,6 +839,21 @@ def test_resolve_leaves_unselected_references_alone() -> None:
     assert field_names(view) == names(
         Text("id"), Text("name"), Text("department_id"), Text("mentor")
     )
+
+
+@pytest.mark.parametrize(
+    "then", [(), (steps.project([FieldName("name")]),)], ids=["entity", "nested"]
+)
+def test_a_resolved_reference_loses_its_default(then: tuple[steps.Step, ...]) -> None:
+    view = compile_resolving(
+        Employee,
+        steps.pipeline(
+            steps.default(FieldName("mentor_id"), None),
+            steps.resolve(named(FieldName("mentor_id")), *then),
+        ),
+    )
+
+    assert defaults(view) == {}
 
 
 def department_lookup() -> ir.Lookup:

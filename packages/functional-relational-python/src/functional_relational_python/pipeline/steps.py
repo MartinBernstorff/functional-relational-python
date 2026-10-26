@@ -88,6 +88,21 @@ def retype_to(fields: FieldName | ir.Select, annotation: ir.RuntimeAnnotation) -
     return retype(fields, transform)
 
 
+def default(fields: FieldName | ir.Select, value: ir.UncheckedDefault) -> Step:
+    """Sets the default of the field named `fields`, or of every field `fields`
+    selects, in the generated model.
+
+    `value` is a literal: `None`, `MISSING`, a number, a string, a boolean, an
+    empty list or dict, or an enum member. A mapping still fills every field from
+    the Source; the default only appears in the model.
+    """
+
+    def step(node: ir.Node) -> ir.Node:
+        return ir.Default(input=node, fields=fields, value=value)
+
+    return step
+
+
 def project(fields: Iterable[ir.FieldName]) -> Step:
     """Keeps only `fields`, in the Source's field order."""
     kept = tuple(fields)

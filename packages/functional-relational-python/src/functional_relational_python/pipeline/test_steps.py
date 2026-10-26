@@ -11,6 +11,7 @@ def employee_field(name: FieldName, source: FieldName) -> ir.Field:
         name=name,
         info=Employee.model_fields[source.root],
         value=ir.SourceField(field=source),
+        default=ir.NoDefault(),
     )
 
 
@@ -32,12 +33,15 @@ def test_the_subjects_id_is_the_primary_key_under_any_name(field: ir.Field) -> N
         employee_field(FieldName("department_id"), FieldName("department_id")),
         employee_field(FieldName("id"), FieldName("department_id")),
         ir.Field.looked_up(
-            FieldName("department"), lookup(FieldName("department_id"), Department)
+            FieldName("department"),
+            lookup(FieldName("department_id"), Department),
+            ir.NoDefault(),
         ),
         ir.NestedField(
             name=FieldName("department"),
             value=lookup(FieldName("department_id"), Department),
             relation=ir.Relation.of(ir.FromSource(source=Department)),
+            default=ir.NoDefault(),
         ),
     ],
     ids=["reference", "reference renamed to id", "looked up", "nested"],

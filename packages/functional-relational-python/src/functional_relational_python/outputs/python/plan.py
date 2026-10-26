@@ -11,6 +11,7 @@ defines what it would be overwritten with) is found here, once. The renderers in
 The compiler has already checked the names themselves (`model_names`).
 """
 
+import keyword
 import types
 import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -26,6 +27,7 @@ from functional_relational_python.outputs.python.symbols import (
     ModulePath,
     Symbol,
     TypeExpression,
+    ValueExpression,
 )
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.payloads import (
@@ -195,11 +197,12 @@ type PlanDiagnostic = (
 
 
 class ModelField(pydantic.BaseModel, frozen=True):
-    """A field of a planned model: the Relation field it holds, and its type as
-    source."""
+    """A field of a planned model: the Relation field it holds, and its type and
+    default as source."""
 
     field: ir.RelationField
     type: TypeExpression
+    default: ValueExpression | ir.NoDefault
 
 
 class ModelPlan(pydantic.BaseModel, frozen=True):
@@ -338,7 +341,8 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
 
 
 class _AnnotationRenderer:
-    """Writes one field's annotation as source, collecting what it refers to.
+    """Writes one field's annotation and default as source, collecting what they
+    refer to.
 
     Problems are collected rather than returned early, so every unsupported part
     of an annotation is reported.
@@ -374,6 +378,30 @@ class _AnnotationRenderer:
         if isinstance(annotation, (type, typing.TypeAliasType)):
             return self._named(annotation)
         return self._unsupported(annotation)
+
+    def render_default(
+        self, default: ir.DefaultValue | ir.NoDefault
+    ) -> ValueExpression | ir.NoDefault:
+        match default:
+            case ir.NoDefault():
+                return default
+            case ir.ScalarDefault(root=value):
+                written = repr(value)
+            case ir.MissingDefault():
+                self.symbols.add(_AnnotationRenderer.missing)
+                written = _AnnotationRenderer.missing.reference().root
+            case ir.EmptyListDefault():
+                written = "[]"
+            case ir.EmptyDictDefault():
+                written = "{}"
+            case ir.EnumDefault(member=member):
+                enum_class = self._named(type(member)).root
+                name = member.name
+                if name.isidentifier() and not keyword.iskeyword(name):
+                    written = f"{enum_class}.{name}"
+                else:
+                    written = f"{enum_class}[{name!r}]"
+        return ValueExpression(written)
 
     def _parameterised(
         self,
@@ -473,7 +501,13 @@ class _ModelPlanner:
                     rendered = field.optionality().annotate_text(
                         model.symbol.reference()
                     )
-            fields.append(ModelField(field=field, type=rendered))
+            fields.append(
+                ModelField(
+                    field=field,
+                    type=rendered,
+                    default=renderer.render_default(field.default),
+                )
+            )
             uses |= renderer.symbols
             for symbol in renderer.symbols:
                 self.used.use_symbol(symbol)
