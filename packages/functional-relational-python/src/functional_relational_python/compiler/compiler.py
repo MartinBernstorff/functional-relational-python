@@ -5,6 +5,8 @@ recovers with the best relation it can build, so later steps and other Views are
 still checked and independent defects are all reported, once each.
 """
 
+import enum
+import math
 from collections.abc import Iterable
 from typing import Annotated
 
@@ -114,7 +116,12 @@ def _check_node(
         case ir.FromSource():
             return ir.Relation.of(node)
         case (
-            ir.Omit() | ir.Rename() | ir.RenameSelected() | ir.Project() | ir.Resolve()
+            ir.Omit()
+            | ir.Rename()
+            | ir.RenameSelected()
+            | ir.Project()
+            | ir.Resolve()
+            | ir.Default()
         ):
             match _check_node(entity_graph, view, node.input):
                 case ir.Relation() as relation:
@@ -128,7 +135,12 @@ def _check_node(
 def _check_step(
     entity_graph: EntityGraph,
     view: ViewName,
-    node: ir.Omit | ir.Rename | ir.RenameSelected | ir.Project | ir.Resolve,
+    node: ir.Omit
+    | ir.Rename
+    | ir.RenameSelected
+    | ir.Project
+    | ir.Resolve
+    | ir.Default,
     relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
     """Checks one step against the relation its input has."""
@@ -143,6 +155,8 @@ def _check_step(
             return _check_project(view, node, relation)
         case ir.Resolve():
             return _check_resolve(entity_graph, view, node, relation)
+        case ir.Default():
+            return _check_default(view, node, relation)
 
 
 def _check_omit(
@@ -212,7 +226,10 @@ def _recovered_rename(node: ir.Rename, relation: ir.Relation) -> ir.Relation:
         fields=(
             *relation.fields,
             ir.Field(
-                name=node.new, info=FieldInfo(), value=ir.SourceField(field=node.field)
+                name=node.new,
+                info=FieldInfo(),
+                value=ir.SourceField(field=node.field),
+                default=ir.NoDefault(),
             ),
         ),
     )
@@ -274,6 +291,74 @@ def _check_project(
     return Poisoned(recovered=kept, diagnostics=unknown)
 
 
+def _check_default(
+    view: ViewName, node: ir.Default, relation: ir.Relation
+) -> ir.Relation | Poisoned:
+    """Gives the named or selected fields the default, if it is a literal.
+
+    A defective default leaves the relation unchanged, so that is an exact
+    recovery: later steps never depend on a field's default.
+    """
+    reported: list[diagnostics.CompileDiagnostic] = []
+    match node.fields:
+        case ir.Select() as selected:
+            # Selecting no field is no defect, as for `omit`.
+            names = relation.selected(selected)
+        case FieldName() as field if field in relation.field_names():
+            names = (field,)
+        case FieldName() as field:
+            names = ()
+            reported.append(
+                diagnostics.UnknownField(
+                    view=view,
+                    source=relation.source,
+                    field=field,
+                    valid=relation.field_names(),
+                )
+            )
+    match _default_value(view, node.value):
+        case diagnostics.NonLiteralDefault() as invalid:
+            return Poisoned(recovered=relation, diagnostics=(*reported, invalid))
+        case default:
+            pass
+    defaulted = relation.defaulted(names, default)
+    if not reported:
+        return defaulted
+    return Poisoned(recovered=defaulted, diagnostics=tuple(reported))
+
+
+def _default_value(
+    view: ViewName, value: ir.UncheckedDefault
+) -> ir.DefaultValue | diagnostics.NonLiteralDefault:
+    """`value` as a literal default, if it is one.
+
+    Only the exact built-in types count, so a subclass that might `repr` as
+    something else is not a literal. Neither is a float without a literal, such as
+    `nan`.
+    """
+    default: ir.DefaultValue
+    match value:
+        case pydantic.MISSING:
+            default = ir.MissingDefault()
+        case enum.Enum():
+            default = ir.EnumDefault(member=value)
+        case None:
+            default = ir.ScalarDefault(None)
+        case bool() | int() | str() if type(value) in (bool, int, str):
+            default = ir.ScalarDefault(value)
+        case float() if type(value) is float and math.isfinite(value):
+            default = ir.ScalarDefault(value)
+        case list() if type(value) is list and not value:
+            default = ir.EmptyListDefault()
+        case dict() if type(value) is dict and not value:
+            default = ir.EmptyDictDefault()
+        case _:
+            return diagnostics.NonLiteralDefault(
+                view=view, value=diagnostics.DefaultText.of(value)
+            )
+    return default
+
+
 class _CheckedField(pydantic.BaseModel, frozen=True):
     """One field after `resolve`, with the diagnostics resolving it reported.
 
@@ -330,7 +415,9 @@ def _resolve_field(
         invalid := ViewModelNames.check_field(view, relation.source, name)
     ):
         return _CheckedField(field=field, diagnostics=invalid)
-    return _resolved(entity_graph, view, node, name, lookup)
+    return _resolved(
+        entity_graph, view, node, lookup, field.model_copy(update={"name": name})
+    )
 
 
 def _lookup(
@@ -384,26 +471,36 @@ def _resolved(
     entity_graph: EntityGraph,
     view: ViewName,
     node: ir.Resolve,
-    name: FieldName,
     lookup: ir.Lookup,
+    reference: ir.RelationField,
 ) -> _CheckedField:
-    """The field holding the looked-up Entity, after `node.then` if it does anything.
+    """The field holding the Entity `lookup` finds, after `node.then` if it does
+    anything.
 
-    Without a nested pipeline the field is typed by the Entity class itself.
+    `reference` is the Reference, renamed to the name the resolved field gets; the
+    resolved field keeps its default. Without a nested pipeline the field is typed
+    by the Entity class itself.
     """
+    name, default = reference.name, reference.default
     root = ir.FromSource(source=lookup.target)
     nested = node.then(root)
     if nested == root:
-        return _CheckedField(field=ir.Field.looked_up(name, lookup), diagnostics=())
+        return _CheckedField(
+            field=ir.Field.looked_up(name, lookup, default), diagnostics=()
+        )
     match _check_node(entity_graph, view, nested):
         case ir.Relation() as relation:
             return _CheckedField(
-                field=ir.NestedField(name=name, value=lookup, relation=relation),
+                field=ir.NestedField(
+                    name=name, value=lookup, relation=relation, default=default
+                ),
                 diagnostics=(),
             )
         case Poisoned(recovered=recovered, diagnostics=reported):
             return _CheckedField(
-                field=ir.NestedField(name=name, value=lookup, relation=recovered),
+                field=ir.NestedField(
+                    name=name, value=lookup, relation=recovered, default=default
+                ),
                 diagnostics=reported,
             )
 

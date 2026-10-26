@@ -1,3 +1,4 @@
+import enum
 from collections.abc import Iterable
 
 import pydantic
@@ -176,6 +177,26 @@ def test_a_models_only_layout_reports_only_what_the_models_cannot_import() -> No
             view=view.name,
             field=FieldName("team"),
             annotation=AnnotationText.of(team),
+        ),
+    )
+
+
+def test_a_default_whose_enum_cannot_be_imported_is_reported_for_its_field() -> None:
+    class LocalColour(enum.Enum):
+        RED = "red"
+
+    field = FieldName("name")
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.default(field, LocalColour.RED),
+    )
+
+    assert diagnostics_of(
+        compile_all([view]), PythonLayout.models_only(into(ModulePath.fake()))
+    ) == (
+        Unimportable(
+            view=view.name, field=field, annotation=AnnotationText.of(LocalColour)
         ),
     )
 
