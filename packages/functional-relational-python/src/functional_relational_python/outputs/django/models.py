@@ -6,6 +6,7 @@ it never imports Django. Migrations are the user's to make.
 
 import datetime
 import enum
+import keyword
 import typing
 import uuid
 from collections.abc import Iterable, Iterator, Mapping
@@ -68,8 +69,25 @@ class DjangoField(pydantic.BaseModel, frozen=True):
     def fake() -> DjangoField:
         return DjangoField.builtin(Identifier("TextField"), {})
 
+    auto_increment: typing.ClassVar[frozenset[Identifier]] = frozenset(
+        {
+            Identifier("AutoField"),
+            Identifier("BigAutoField"),
+            Identifier("SmallAutoField"),
+        }
+    )
+
     def is_builtin(self) -> bool:
         return self.field_class.module == DjangoField.models_module
+
+    def is_auto_increment(self) -> bool:
+        """Whether this is one of Django's auto-incrementing fields, which only a
+        primary key may be."""
+        match self.field_class.qualname:
+            case (name,) if self.is_builtin():
+                return name in DjangoField.auto_increment
+            case _:
+                return False
 
     def reference(self) -> TypeExpression:
         """The field class, where the generated module refers to it."""
@@ -186,7 +204,7 @@ class DjangoFieldNameClash(pydantic.BaseModel, Diagnostic, frozen=True):
     """
 
     entity: type[pydantic.BaseModel]
-    name: Identifier
+    name: FieldName
     fields: tuple[FieldName, ...]
 
     def describe(self) -> DiagnosticMessage:
@@ -209,13 +227,60 @@ class DjangoModelNameClash(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class InvalidDjangoFieldName(pydantic.BaseModel, Diagnostic, frozen=True):
+    """An Entity field would be a Django model field with a name Django or the
+    generated module cannot use: not an identifier, `pk`, `Meta`, ending in `_`,
+    containing `__`, or `models` or an imported field class, which the class body
+    would shadow.
+
+    A Reference `x_id` is the foreign key `x`, so `name` may differ from `field`.
+    """
+
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+    name: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}.{self.field.root}: '{self.name.root}' "
+            "cannot be the name of a field of its Django model."
+        )
+
+
+class AutoIncrementOnNonPrimaryKey(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A type override gives a field other than the primary key an
+    auto-incrementing Django field, e.g. an override keyed on `int`."""
+
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}.{self.field.root}: only a primary key can "
+            "auto-increment. Key the override on the Entity's ID type instead."
+        )
+
+
+type _DeclarationDiagnostic = NoDjangoFieldRule | AutoIncrementOnNonPrimaryKey
+
+
 type DjangoDiagnostic = (
     NoDjangoFieldRule
+    | InvalidDjangoFieldName
+    | AutoIncrementOnNonPrimaryKey
     | OnDeleteForNonReference
     | SetNullOnRequiredReference
     | DjangoFieldNameClash
     | DjangoModelNameClash
 )
+
+
+class FieldRole(enum.StrEnum):
+    """What an Entity field is in its Django model."""
+
+    PRIMARY_KEY = "primary key"
+    FOREIGN_KEY = "foreign key"
+    PLAIN = "plain"
 
 
 class NoFieldRuleError(Exception):
@@ -230,6 +295,10 @@ class FieldTypes(pydantic.BaseModel, frozen=True):
     The type is unwrapped one RootModel at a time, e.g. `Email` to `Text` to
     `str`. The first type with a rule, overridden or built in, gives the field.
     The field is nullable when any of those types admits `None`.
+
+    A primary key has no built-in rule for `str`: `TextField` cannot be a primary
+    key on every database, and a `CharField` needs a `max_length` only the user
+    knows. Foreign keys to it take its type.
     """
 
     builtin: typing.ClassVar[Mapping[RuntimeAnnotation, DjangoField]] = {
@@ -248,7 +317,7 @@ class FieldTypes(pydantic.BaseModel, frozen=True):
     overrides: Mapping[RuntimeAnnotation, DjangoField]
 
     def field_of(
-        self, annotation: RuntimeAnnotation
+        self, annotation: RuntimeAnnotation, role: FieldRole
     ) -> Result[_TypedField, NoFieldRuleError]:
         optionality = Optionality.REQUIRED
         current = annotation
@@ -264,7 +333,9 @@ class FieldTypes(pydantic.BaseModel, frozen=True):
             if isinstance(current, type) and issubclass(current, pydantic.RootModel):
                 current = current.model_fields["root"].annotation
                 continue
-            if current in FieldTypes.builtin:
+            if current in FieldTypes.builtin and not (
+                role == FieldRole.PRIMARY_KEY and current is str
+            ):
                 return Ok(
                     _TypedField(
                         field=FieldTypes.builtin[current], optionality=optionality
@@ -281,15 +352,37 @@ class _TypedField(pydantic.BaseModel, frozen=True):
 class _Declaration(pydantic.BaseModel, frozen=True):
     """One attribute of a Django model, e.g. `name = models.TextField()`.
 
-    `attributes` are the names it binds on the model: a foreign key `x` also
-    binds `x_id`.
+    `name` is not yet checked to be one Django accepts. `source` is the Entity
+    field it holds.
     """
 
-    name: Identifier
+    name: FieldName
     field: DjangoField
     positional: tuple[ValueExpression, ...]
     source: FieldName
-    attributes: tuple[Identifier, ...]
+    role: FieldRole
+
+    def attributes(self) -> tuple[FieldName, ...]:
+        """The names it binds on the model: a foreign key `x` also binds `x_id`,
+        its column and ID attribute."""
+        match self.role:
+            case FieldRole.FOREIGN_KEY:
+                return (self.name, FieldName(f"{self.name.root}_id"))
+            case FieldRole.PRIMARY_KEY | FieldRole.PLAIN:
+                return (self.name,)
+
+    def has_valid_name(self, imported: frozenset[Identifier]) -> bool:
+        """Whether Django accepts the name, and the class body does not shadow
+        `django.db.models`, the options class `Meta` or an `imported` name."""
+        root = self.name.root
+        return not (
+            not root.isidentifier()
+            or keyword.iskeyword(root)
+            or self.name in DjangoModelsRenderer.reserved
+            or root.endswith("_")
+            or "__" in root
+            or Identifier(root) in imported
+        )
 
     def line(self) -> FileText:
         arguments = ", ".join(
@@ -307,6 +400,7 @@ class _Declaration(pydantic.BaseModel, frozen=True):
 
 
 class _PlannedModel(pydantic.BaseModel, frozen=True):
+    entity: type[pydantic.BaseModel]
     name: Identifier
     declarations: tuple[_Declaration, ...]
 
@@ -320,6 +414,11 @@ class DjangoModelsRenderer:
         "# Migrations are yours to make, e.g. with `makemigrations`.\n"
     )
     models_import: typing.ClassVar[Identifier] = Identifier("models")
+    reserved: typing.ClassVar[frozenset[FieldName]] = frozenset(
+        {FieldName("pk"), FieldName("Meta"), FieldName("models")}
+    )
+    """Names a field cannot have: Django's alias for the primary key, the
+    model's options class, and the imported `django.db.models`."""
 
     @staticmethod
     def render(
@@ -362,20 +461,31 @@ class DjangoModelsRenderer:
                 match declared:
                     case _Declaration():
                         declarations.append(declared)
-                    case NoDjangoFieldRule():
+                    case NoDjangoFieldRule() | AutoIncrementOnNonPrimaryKey():
                         reported.append(declared)
             reported.extend(DjangoModelsRenderer._field_clashes(model, declarations))
             planned.append(
                 _PlannedModel(
-                    name=Identifier(model.__name__), declarations=tuple(declarations)
+                    entity=model,
+                    name=Identifier(model.__name__),
+                    declarations=tuple(declarations),
                 )
             )
-        imports = {
-            declaration.field.field_class
+        imports = frozenset(
+            declaration.field.field_class.imported()
             for model in planned
             for declaration in model.declarations
             if not declaration.field.is_builtin()
-        }
+        )
+        imported_names = frozenset(symbol.bound_name() for symbol in imports)
+        reported.extend(
+            InvalidDjangoFieldName(
+                entity=model.entity, field=declaration.source, name=declaration.name
+            )
+            for model in planned
+            for declaration in model.declarations
+            if not declaration.has_valid_name(imported_names)
+        )
         reported.extend(DjangoModelsRenderer._name_clashes(planned, imports))
         return DiagnosticsError.or_ok(
             sorted(reported, key=lambda diagnostic: diagnostic.describe().root),
@@ -397,7 +507,7 @@ class DjangoModelsRenderer:
         node: EntityNode,
         types: FieldTypes,
         on_delete: Mapping[ReferenceKey, OnDelete],
-    ) -> Iterator[_Declaration | NoDjangoFieldRule]:
+    ) -> Iterator[_Declaration | _DeclarationDiagnostic]:
         references = {reference.field: reference for reference in node.references}
         for name, info in model.model_fields.items():
             field = FieldName(name)
@@ -407,7 +517,12 @@ class DjangoModelsRenderer:
                     continue
                 case None:
                     pass
-            match types.field_of(info.annotation):
+            role = (
+                FieldRole.PRIMARY_KEY
+                if field == EntityNode.primary_key
+                else FieldRole.PLAIN
+            )
+            match types.field_of(info.annotation, role):
                 case Ok(typed):
                     pass
                 case Err():
@@ -417,17 +532,20 @@ class DjangoModelsRenderer:
                         annotation=AnnotationText.of(info.annotation),
                     )
                     continue
+            if role == FieldRole.PLAIN and typed.field.is_auto_increment():
+                yield AutoIncrementOnNonPrimaryKey(entity=model, field=field)
+                continue
             arguments = dict(typed.field.arguments)
             if typed.optionality == Optionality.OPTIONAL:
                 arguments[Identifier("null")] = ValueExpression("True")
-            if field == EntityNode.primary_key:
+            if role == FieldRole.PRIMARY_KEY:
                 arguments[Identifier("primary_key")] = ValueExpression("True")
             yield _Declaration(
-                name=Identifier(name),
+                name=field,
                 field=typed.field.model_copy(update={"arguments": arguments}),
                 positional=(),
                 source=field,
-                attributes=(Identifier(name),),
+                role=role,
             )
 
     @staticmethod
@@ -441,7 +559,6 @@ class DjangoModelsRenderer:
         Reverse accessors are off (`related_name='+'`), so several References to
         one Entity never clash.
         """
-        name = reference.field.root.removesuffix("_id") or reference.field.root
         deleted = on_delete.get(
             ReferenceKey(entity=model, field=reference.field), OnDelete.PROTECT
         )
@@ -452,20 +569,20 @@ class DjangoModelsRenderer:
         if reference.optionality == Optionality.OPTIONAL:
             arguments[Identifier("null")] = ValueExpression("True")
         return _Declaration(
-            name=Identifier(name),
+            name=FieldName(reference.field.root.removesuffix("_id")),
             field=DjangoField.builtin(Identifier("ForeignKey"), arguments),
             positional=(ValueExpression(repr(reference.target.__name__)),),
             source=reference.field,
-            attributes=(Identifier(name), Identifier(f"{name}_id")),
+            role=FieldRole.FOREIGN_KEY,
         )
 
     @staticmethod
     def _field_clashes(
         model: type[pydantic.BaseModel], declarations: Iterable[_Declaration]
     ) -> Iterator[DjangoFieldNameClash]:
-        bound: dict[Identifier, list[FieldName]] = {}
+        bound: dict[FieldName, list[FieldName]] = {}
         for declaration in declarations:
-            for attribute in declaration.attributes:
+            for attribute in declaration.attributes():
                 bound.setdefault(attribute, []).append(declaration.source)
         for name, fields in bound.items():
             if len(fields) > 1:
@@ -477,12 +594,13 @@ class DjangoModelsRenderer:
 
     @staticmethod
     def _name_clashes(
-        planned: list[_PlannedModel], imports: set[Symbol]
+        planned: list[_PlannedModel], imports: frozenset[Symbol]
     ) -> Iterator[DjangoModelNameClash]:
+        """`imports` are the field classes the module imports by name."""
         bound: dict[Identifier, list[Symbol | Identifier]] = {
             DjangoModelsRenderer.models_import: [DjangoModelsRenderer.models_import]
         }
-        for symbol in {symbol.imported() for symbol in imports}:
+        for symbol in imports:
             bound.setdefault(symbol.bound_name(), []).append(symbol)
         for model in planned:
             bound.setdefault(model.name, []).append(model.name)
@@ -492,12 +610,12 @@ class DjangoModelsRenderer:
 
     @staticmethod
     def _module(
-        app_label: AppLabel, planned: list[_PlannedModel], imports: set[Symbol]
+        app_label: AppLabel, planned: list[_PlannedModel], imports: frozenset[Symbol]
     ) -> FileText:
         lines = [
             f"from {symbol.module.root} import {symbol.bound_name().root}"
             for symbol in sorted(
-                {symbol.imported() for symbol in imports},
+                imports,
                 key=lambda symbol: (symbol.module.root, symbol.bound_name().root),
             )
         ]

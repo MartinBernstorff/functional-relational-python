@@ -19,12 +19,14 @@ from functional_relational_python.entity_graph.entity_graph import (
 from functional_relational_python.entity_graph.id import Id
 from functional_relational_python.outputs.django.models import (
     AppLabel,
+    AutoIncrementOnNonPrimaryKey,
     DjangoDiagnostic,
     DjangoField,
     DjangoFieldNameClash,
     DjangoModelNameClash,
     DjangoModels,
     DjangoModelsRenderer,
+    InvalidDjangoFieldName,
     NoDjangoFieldRule,
     OnDelete,
     OnDeleteForNonReference,
@@ -426,7 +428,7 @@ def test_a_foreign_key_named_like_another_field_is_a_diagnostic() -> None:
     assert diagnostics([Parent, Clashing], config({}, {})) == (
         DjangoFieldNameClash(
             entity=Clashing,
-            name=Identifier("parent"),
+            name=FieldName("parent"),
             fields=(FieldName("parent"), FieldName("parent_id")),
         ),
     )
@@ -511,3 +513,121 @@ def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None
         )
         assert result.returncode == 0, result.stdout + result.stderr
     assert (tmp_path / "app" / "migrations" / "0001_initial.py").exists()
+
+
+class BadNames(pydantic.BaseModel):
+    id: ThingId
+    # Names Django rejects.
+    pk: Text
+    name_: Text
+    first__name: Text
+    # Names the class body would shadow.
+    Meta: Text
+    models: Text
+    # A Reference loses `_id`, which can leave a keyword or a rejected name.
+    from_id: ParentId
+    owner__id: ParentId
+
+
+def test_a_field_name_django_cannot_use_is_a_diagnostic() -> None:
+    assert set(diagnostics([Parent, BadNames], config({}, {}))) == {
+        InvalidDjangoFieldName(
+            entity=BadNames, field=FieldName(field), name=FieldName(name)
+        )
+        for field, name in (
+            ("pk", "pk"),
+            ("name_", "name_"),
+            ("first__name", "first__name"),
+            ("Meta", "Meta"),
+            ("models", "models"),
+            ("from_id", "from"),
+            ("owner__id", "owner_"),
+        )
+    }
+
+
+class ShadowsImport(pydantic.BaseModel):
+    id: ThingId
+    MoneyField: Real
+
+
+def test_a_field_named_like_an_imported_field_class_is_a_diagnostic() -> None:
+    money = DjangoField(
+        field_class=Symbol(
+            module=ModulePath("app.fields"), qualname=(Identifier("MoneyField"),)
+        ),
+        arguments={},
+    )
+
+    assert diagnostics([ShadowsImport], config({Real: money}, {})) == (
+        InvalidDjangoFieldName(
+            entity=ShadowsImport,
+            field=FieldName("MoneyField"),
+            name=FieldName("MoneyField"),
+        ),
+    )
+
+
+class OwnerIdTwice(pydantic.BaseModel):
+    """The foreign key of `owner_id_id` is `owner_id`, as is the Reference
+    `owner_id`'s ID attribute."""
+
+    id: ThingId
+    owner_id_id: ParentId
+    owner_id: ParentId
+
+
+class OwnerIdAndText(pydantic.BaseModel):
+    id: ThingId
+    owner_id_id: ParentId
+    owner_id: Text
+
+
+@pytest.mark.parametrize("model", [OwnerIdTwice, OwnerIdAndText])
+def test_a_foreign_key_clashing_with_an_id_attribute_is_a_diagnostic(
+    model: type[pydantic.BaseModel],
+) -> None:
+    assert diagnostics([Parent, model], config({}, {})) == (
+        DjangoFieldNameClash(
+            entity=model,
+            name=FieldName("owner_id"),
+            fields=(FieldName("owner_id"), FieldName("owner_id_id")),
+        ),
+    )
+
+
+class SlugId(Id[str]):
+    pass
+
+
+class Article(pydantic.BaseModel):
+    id: SlugId
+    title: Text
+
+
+def test_a_primary_key_wrapping_str_needs_an_override() -> None:
+    assert diagnostics([Article], config({}, {})) == (
+        NoDjangoFieldRule(
+            entity=Article, field=FieldName("id"), annotation=AnnotationText.of(SlugId)
+        ),
+    )
+
+
+def test_a_primary_key_wrapping_str_takes_the_override_for_its_id_type() -> None:
+    text = render([Article], config({SlugId: char_field()}, {})).root
+
+    assert "    id = models.CharField(max_length=254, primary_key=True)\n" in text
+    assert "    title = models.TextField()\n" in text
+
+
+class Counter(pydantic.BaseModel):
+    id: CompanyId
+    count: Integer
+
+
+def test_an_auto_increment_override_on_another_field_is_a_diagnostic() -> None:
+    auto = DjangoField.builtin(Identifier("BigAutoField"), {})
+
+    assert diagnostics([Counter], config({int: auto}, {})) == (
+        AutoIncrementOnNonPrimaryKey(entity=Counter, field=FieldName("count")),
+    )

@@ -40,7 +40,7 @@ def version() -> None:
 
 @app.command()
 def generate() -> None:
-    """Write the modules the project's Catalog generates: View and Payload models, and Django models."""
+    """Write the modules the project's Catalog generates."""
     match commands.generate(LocalFileSystem(), Directory(Path.cwd())):
         case Ok(written):
             for path in written:
