@@ -1136,8 +1136,16 @@ class _Entry(pydantic.BaseModel, frozen=True):
 
 
 class _Lookup(pydantic.BaseModel, frozen=True):
-    """`Q(<entries>)`: true where every entry is. It is NULL in SQL where an entry
-    compares NULL, so it is only ever negated where its columns are not NULL."""
+    """`Q(<entries>)`: true where every entry is. A comparison in it is NULL in
+    SQL where a column it compares is NULL, and its negation may be too, or may
+    be true, depending on how Django negates it. So a negated one is only ever
+    combined with explicit `IS NULL` terms that decide the rows where its
+    columns are NULL: it is `and`-ed with their being not NULL, or `or`-ed with a
+    term true wherever one is NULL.
+
+    The explicit terms are needed: Django's own negation of `f == g` on two
+    nullable columns is true where both are NULL, and of `f == f` where `f` is,
+    but `None != None` is false."""
 
     entries: tuple[_Entry, ...]
 
@@ -1250,8 +1258,7 @@ class _ConditionWriter(pydantic.BaseModel, frozen=True):
         subject: type[pydantic.BaseModel],
         sense: _Sense,
     ) -> _Q:
-        """`field <operator> operand`. `!=` is written as `==` the other way. An
-        ordering compares fields that are never `None`, the compiler checks."""
+        """`field <operator> operand`. `!=` is written as `==` the other way."""
         left = compared.field
         match compared.operand:
             case ir.SourceField() as right:
@@ -1276,13 +1283,46 @@ class _ConditionWriter(pydantic.BaseModel, frozen=True):
                         _Entry(lookup=Expression(f"{column}__{suffix}"), value=value),
                     )
                 )
-                match sense:
-                    case _Sense.KEPT:
-                        return compares
-                    case _Sense.EXCLUDED:
-                        return _Negated(lookup=compares)
+                return self._ordering(subject, compares, fields, sense)
         equal = _Lookup(entries=(_Entry(lookup=Expression(column), value=value),))
         return self._equality(subject, equal, fields, sense)
+
+    def _ordering(
+        self,
+        subject: type[pydantic.BaseModel],
+        compares: _Lookup,
+        fields: Sequence[ir.SourceField],
+        sense: _Sense,
+    ) -> _Q:
+        """`compares`, an ordering of `fields`. The compiler lets through only
+        fields that are never `None`, but a column may still be NULL, e.g. for
+        a RootModel of an optional type. SQL orders no NULL, so the ordering is
+        false there, and its negation true, explicitly, rather than NULL or
+        whatever Django's negation makes of it."""
+        nullable = tuple(
+            dict.fromkeys(
+                field
+                for field in fields
+                if self._optionality(subject, field) is Optionality.OPTIONAL
+            )
+        )
+        match sense:
+            case _Sense.KEPT:
+                return compares
+            case _Sense.EXCLUDED if not nullable:
+                return _Negated(lookup=compares)
+            case _Sense.EXCLUDED:
+                return _AnyOf.of(
+                    [
+                        _AllOf.of(
+                            [
+                                _Negated(lookup=compares),
+                                self._nulls(subject, nullable, ()),
+                            ]
+                        ),
+                        *(self._nulls(subject, (side,), (side,)) for side in nullable),
+                    ]
+                )
 
     def _equality(
         self,

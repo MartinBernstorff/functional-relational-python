@@ -137,15 +137,42 @@ class Level(enum.Enum):
     GOLD = "gold"
 
 
+class Rank(pydantic.RootModel[int | None], frozen=True):
+    """Never `None` itself, so it may be ordered, but its column may be NULL.
+    Like SQL, it orders no `None`: every ordering with one is false."""
+
+    def __lt__(self, other: Rank) -> bool:
+        return (
+            self.root is not None and other.root is not None and self.root < other.root
+        )
+
+    def __le__(self, other: Rank) -> bool:
+        return (
+            self.root is not None and other.root is not None and self.root <= other.root
+        )
+
+    def __gt__(self, other: Rank) -> bool:
+        return (
+            self.root is not None and other.root is not None and self.root > other.root
+        )
+
+    def __ge__(self, other: Rank) -> bool:
+        return (
+            self.root is not None and other.root is not None and self.root >= other.root
+        )
+
+
 class Badge(pydantic.BaseModel, frozen=True):
     """Followed backwards from the Employee wearing it. `label` and `caption` are
-    both optional and of one type, so they can be compared with each other."""
+    both optional and of one type, so they can be compared with each other.
+    `rank` may be ordered, but its column may be NULL."""
 
     id: BadgeId
     employee_id: Annotated[EmployeeId, OneToOne()]
     label: Text | None
     caption: Text | None
     level: Level
+    rank: Rank
 
 
 class Note(pydantic.BaseModel, frozen=True):
@@ -1046,6 +1073,7 @@ def badges(employees: Sequence[Employee]) -> tuple[Badge, ...]:
             label=None if index % 3 == 0 else Text(f"label {index % 2}"),
             caption=None if index % 2 == 0 else Text("label 1"),
             level=Level.GOLD if index % 2 else Level.BRONZE,
+            rank=Rank(None if index % 4 == 0 else index),
         )
         for index, employee in enumerate(employees[:-1])
     )
@@ -1209,6 +1237,26 @@ def read_views() -> list[View]:
                         conditions.field(FieldName("label")),
                         conditions.field(FieldName("caption")),
                     )
+                )
+            ),
+        ),
+        View(
+            name=ViewName("NicknameIsNotItself"),
+            source=Employee,
+            step=steps.where(
+                conditions.ne(
+                    conditions.field(FieldName("nickname")),
+                    conditions.field(FieldName("nickname")),
+                )
+            ),
+        ),
+        # Some ranks are NULL: no ordering keeps them, and so its negation does.
+        View(
+            name=ViewName("NotOutranked"),
+            source=Badge,
+            step=steps.where(
+                conditions.not_(
+                    conditions.lt(conditions.field(FieldName("rank")), Rank(2))
                 )
             ),
         ),
@@ -1694,6 +1742,9 @@ def entities(draw: st.DrawFn) -> tuple[pydantic.BaseModel, ...]:
             label=draw(st.none() | texts),
             caption=draw(st.none() | texts),
             level=draw(st.sampled_from(Level)),
+            # Never `None`: a View lifting an optional Rank reads a NULL one as
+            # `None`, not `Rank(None)`, which `read_views` avoids.
+            rank=Rank(draw(st.integers(min_value=0, max_value=2))),
         )
         for index, employee_id in enumerate(worn_by)
     ]
@@ -1724,10 +1775,13 @@ def field_conditions(
     name = draw(st.sampled_from(list(source.model_fields)))
     field = conditions.field(FieldName(name))
     split = narrowing.split(source.model_fields[name].annotation)
+    # A literal is never `None`, nor a RootModel of it.
     values = [
         value
         for entity in stored
-        if type(entity) is source and (value := getattr(entity, name)) is not None
+        if type(entity) is source
+        and (value := getattr(entity, name)) is not None
+        and value != Rank(None)
     ]
     same_type = [
         other
@@ -1745,8 +1799,8 @@ def field_conditions(
         atoms.extend(
             operator(field, value) for operator in (conditions.eq, conditions.ne)
         )
-        # Of the test Entities' field types, only `Role` defines `<`.
-        if split.required is Role:
+        # Of the test Entities' field types, only `Role` and `Rank` define `<`.
+        if split.required in (Role, Rank):
             atoms.extend(
                 operator(field, value)
                 for operator in (
