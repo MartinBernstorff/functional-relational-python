@@ -11,7 +11,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, IdBase
 from functional_relational_python.outputs import engine
 from functional_relational_python.pipeline import ir, steps
 from functional_relational_python.pipeline.views import View, ViewName
@@ -45,7 +45,7 @@ class Memo(pydantic.BaseModel, frozen=True):
 
 
 def make_engine(*views: View) -> engine.InMemoryViewEngine:
-    graph = EntityGraph.build([Company]).unwrap()
+    graph = EntityGraph.build([Company], IdBase.fake()).unwrap()
     match compiler.compile_views(graph, views):
         case Ok(compiled):
             return engine.InMemoryViewEngine(graph, compiled)
@@ -282,7 +282,7 @@ class Employee(pydantic.BaseModel, frozen=True):
 
 
 def hr_engine(*views: View) -> engine.InMemoryViewEngine:
-    graph = EntityGraph.build([Company, Department, Employee]).unwrap()
+    graph = EntityGraph.build([Company, Department, Employee], IdBase.fake()).unwrap()
     match compiler.compile_views(graph, views):
         case Ok(compiled):
             return engine.InMemoryViewEngine(graph, compiled)

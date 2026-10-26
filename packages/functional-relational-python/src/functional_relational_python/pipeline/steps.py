@@ -9,12 +9,10 @@ from collections.abc import Callable, Iterable
 from typing import overload
 
 from pydantic.fields import FieldInfo
-from safe_result import Ok
 
 from functional_relational_python.entity_graph.entity_graph import (
     EntityNode,
     FieldName,
-    IdAnnotation,
 )
 from functional_relational_python.pipeline import ir
 
@@ -156,20 +154,16 @@ def select(predicate: ir.FieldPredicate) -> ir.Select:
     return ir.Select(predicate=predicate)
 
 
-def is_reference(field: ir.RelationField) -> bool:
-    """Whether `field` is a Reference: typed `X` or `X | None` for an Id `X`.
+def references() -> ir.References:
+    """Every Reference, for `resolve`: fields typed `X` or `X | None` for an ID `X`.
 
-    The primary key is not a Reference, under whatever name it has been renamed to.
-    It is told apart by where its value comes from, the subject's primary key.
+    Not a predicate for `select`, since which types are IDs depends on the
+    catalog's `IdBase`.
     """
-    match field:
-        case ir.Field(info=info, value=ir.SourceField(field=source)):
-            return isinstance(IdAnnotation.of_reference(source, info), Ok)
-        case ir.Field() | ir.NestedField():
-            return False
+    return ir.References()
 
 
-def resolve(fields: ir.Select, *then: Step) -> Step:
+def resolve(fields: ir.Select | ir.References, *then: Step) -> Step:
     """Replaces each Reference in `fields` with the Entity it points to.
 
     A `department_id` field becomes `department`. The steps in `then` form a
@@ -204,7 +198,7 @@ def flatten(fields: FieldName | ir.Select) -> Step:
 def is_primary_key(field: ir.RelationField) -> bool:
     """Whether `field` is the primary key, under whatever name it has been renamed to.
 
-    Like `is_reference`, it is told apart by where its value comes from: the
+    Like a Reference, it is told apart by where its value comes from: the
     subject's `id` field. A Reference renamed to `id` is not the primary key.
     """
     match field:
@@ -215,8 +209,8 @@ def is_primary_key(field: ir.RelationField) -> bool:
 
 
 def hydrate(*then: Step) -> Step:
-    """Resolves every Reference: `resolve(select(is_reference), *then)`."""
-    return resolve(select(is_reference), *then)
+    """Resolves every Reference: `resolve(references(), *then)`."""
+    return resolve(references(), *then)
 
 
 def pipeline(*steps: Step) -> Step:
