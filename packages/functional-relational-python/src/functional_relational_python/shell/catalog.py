@@ -40,9 +40,11 @@ class Catalog(pydantic.BaseModel, frozen=True):
 
     Views are read models, Payloads are write models. A View and a Payload cannot
     share a name. `layout` receives each compiled View and Payload. `mappings` is
-    the one module every View's mapping function goes to, see `MappingsRenderer`;
-    it cannot hold View models. `django` generates a Django model per Entity, see
-    `DjangoModels`.
+    the one module every View's mapping function goes to, see `MappingsRenderer`.
+    It cannot be a module `layout` returns, the Django module, a module defining a
+    Source or an Entity a View looks up, or a module named like a package other
+    files are generated into (`app` when generating `app.views`). `django`
+    generates a Django model per Entity, see `DjangoModels`.
 
     >>> catalog = Catalog(
     ...     entities=[Company],
@@ -110,13 +112,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
             case WithoutMappings():
                 return PythonLayout.models_only(self.layout)
             case ModulePath() as module:
-
-                def into_module(
-                    _: compiler.CompiledView | compiler.CompiledPayload,
-                ) -> ModulePath:
-                    return module
-
-                return PythonLayout(models=self.layout, mappings=into_module)
+                return PythonLayout.mappings_into(self.layout, module)
 
     def _django(
         self, graph: EntityGraph
