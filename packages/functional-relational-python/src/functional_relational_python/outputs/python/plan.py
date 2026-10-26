@@ -347,6 +347,9 @@ class _AnnotationRenderer:
     literal: typing.ClassVar[Symbol] = Symbol(
         module=ModulePath("typing"), qualname=(Identifier("Literal"),)
     )
+    missing: typing.ClassVar[Symbol] = Symbol(
+        module=ModulePath("pydantic"), qualname=(Identifier("MISSING"),)
+    )
 
     def __init__(self, view: DefinitionName, field: FieldName) -> None:
         self.view = view
@@ -365,6 +368,9 @@ class _AnnotationRenderer:
             return TypeExpression("None")
         if annotation is Ellipsis:
             return TypeExpression("...")
+        if annotation is pydantic.MISSING:
+            self.symbols.add(_AnnotationRenderer.missing)
+            return _AnnotationRenderer.missing.reference()
         if isinstance(annotation, (type, typing.TypeAliasType)):
             return self._named(annotation)
         return self._unsupported(annotation)
@@ -376,7 +382,9 @@ class _AnnotationRenderer:
         args: Sequence[ir.RuntimeAnnotation],
     ) -> TypeExpression:
         if origin is typing.Union:
-            return TypeExpression(" | ".join(self.render(arg).root for arg in args))
+            # `None` last, so a field widened with `MISSING` reads `X | MISSING | None`.
+            ordered = sorted(args, key=lambda arg: arg is types.NoneType)
+            return TypeExpression(" | ".join(self.render(arg).root for arg in ordered))
         if origin is typing.Literal and all(
             type(arg) in (str, int, bool) for arg in args
         ):

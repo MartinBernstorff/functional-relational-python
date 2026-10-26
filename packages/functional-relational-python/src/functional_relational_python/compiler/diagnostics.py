@@ -7,6 +7,7 @@ from functional_relational_python.entity_graph.entity_graph import (
 from functional_relational_python.entity_graph.id import IdType
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.payloads import DefinitionName
+from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,
@@ -105,6 +106,36 @@ class SharedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class RetypeInView(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A View's pipeline retypes a field. Its mapping copies each value unchanged,
+    so it cannot convert one to another type."""
+
+    view: ViewName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: a View cannot retype its fields, because its "
+            "mapping copies each value unchanged. Retype in a Payload instead."
+        )
+
+
+class RetypeNestedField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`retype` selected a resolved field typed by the model of a nested pipeline.
+
+    That model is generated, so there is no type to give `transform`.
+    """
+
+    view: DefinitionName
+    source: ir.SourceName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot retype {self.source.root}.{self.field.root}, "
+            "because its type is the model of a nested pipeline."
+        )
+
+
 type CompileDiagnostic = (
     UnknownField
     | RenameOntoExistingField
@@ -115,4 +146,6 @@ type CompileDiagnostic = (
     | UnresolvableReference
     | ResolvedNameCollision
     | SharedModelName
+    | RetypeInView
+    | RetypeNestedField
 )

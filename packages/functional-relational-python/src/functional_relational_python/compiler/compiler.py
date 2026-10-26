@@ -207,7 +207,12 @@ def _check_node(
         case ir.FromSource():
             return ir.Relation.of(node)
         case (
-            ir.Omit() | ir.Rename() | ir.RenameSelected() | ir.Project() | ir.Resolve()
+            ir.Omit()
+            | ir.Rename()
+            | ir.RenameSelected()
+            | ir.Retype()
+            | ir.Project()
+            | ir.Resolve()
         ):
             match _check_node(entity_graph, view, node.input):
                 case ir.Relation() as relation:
@@ -221,7 +226,9 @@ def _check_node(
 def _check_step(
     entity_graph: EntityGraph,
     view: DefinitionName,
-    node: ir.Omit | ir.Rename | ir.RenameSelected | ir.Project | ir.Resolve,
+    node: (
+        ir.Omit | ir.Rename | ir.RenameSelected | ir.Retype | ir.Project | ir.Resolve
+    ),
     relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
     """Checks one step against the relation its input has."""
@@ -232,6 +239,8 @@ def _check_step(
             return _check_rename(view, node, relation)
         case ir.RenameSelected():
             return _check_rename_selected(view, node, relation)
+        case ir.Retype():
+            return _check_retype(view, node, relation)
         case ir.Project():
             return _check_project(view, node, relation)
         case ir.Resolve():
@@ -345,6 +354,55 @@ def _check_rename_selected(
     if not reported:
         return renamed
     return Poisoned(recovered=renamed, diagnostics=tuple(reported))
+
+
+def _check_retype(
+    view: DefinitionName, node: ir.Retype, relation: ir.Relation
+) -> ir.Relation | Poisoned:
+    """Retypes the named field, or every selected field, in place.
+
+    In a View, retyping is a diagnostic. Its fields are still retyped, so later
+    steps are checked against the types the pipeline asks for.
+    """
+    reported: list[diagnostics.CompileDiagnostic] = []
+    match view:
+        case ViewName():
+            reported.append(diagnostics.RetypeInView(view=view))
+        case PayloadName():
+            pass
+    match node.fields:
+        case ir.Select() as selected:
+            retyped = relation.selected(selected)
+        case FieldName() as field:
+            retyped = (field,)
+            if field not in relation.field_names():
+                reported.append(
+                    diagnostics.UnknownField(
+                        view=view,
+                        source=relation.source,
+                        field=field,
+                        valid=relation.field_names(),
+                    )
+                )
+    fields: list[ir.RelationField] = []
+    for field in relation.fields:
+        match field:
+            case _ if field.name not in retyped:
+                fields.append(field)
+            case ir.Field():
+                fields.append(field.retyped(node.transform(field.annotation())))
+            case ir.NestedField():
+                # Left as it is, so later steps still find it.
+                reported.append(
+                    diagnostics.RetypeNestedField(
+                        view=view, source=relation.source, field=field.name
+                    )
+                )
+                fields.append(field)
+    checked = ir.Relation(source=relation.source, fields=tuple(fields))
+    if not reported:
+        return checked
+    return Poisoned(recovered=checked, diagnostics=tuple(reported))
 
 
 def _check_project(
