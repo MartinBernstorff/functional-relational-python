@@ -94,12 +94,31 @@ class DanglingReference(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class SharedOneToOneReference(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A one-to-one Reference field that several stored Entities share IDs in, so
+    following it backwards finds more than one Entity."""
+
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+    shared: tuple[IdValue, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        shared = ", ".join(repr(id_value.root) for id_value in self.shared)
+        return DiagnosticMessage(
+            f"{self.entity.__name__}.{self.field.root} is one-to-one, but several "
+            f"{self.entity.__name__} entities reference each of: {shared}"
+        )
+
+
+type ReadDiagnostic = DanglingReference | SharedOneToOneReference
+
+
 type FieldValue = object
 """A View result's field value: the Entity's own value, an Entity, or a ViewRow."""
 
 
-class _Missing:
-    """The missing IDs found while running a View, by Entity and field."""
+class _IdsFound:
+    """IDs found while running a View, by Entity and Reference field, each once."""
 
     def __init__(self) -> None:
         self.ids: dict[tuple[type[pydantic.BaseModel], FieldName], list[IdValue]] = {}
@@ -107,15 +126,63 @@ class _Missing:
     def add(
         self, entity: type[pydantic.BaseModel], field: FieldName, id_value: IdValue
     ) -> None:
-        missing = self.ids.setdefault((entity, field), [])
-        if id_value not in missing:
-            missing.append(id_value)
+        found = self.ids.setdefault((entity, field), [])
+        if id_value not in found:
+            found.append(id_value)
 
-    def dangling(self) -> tuple[DanglingReference, ...]:
-        """One per Entity and field, each with every missing ID."""
-        return tuple(
-            DanglingReference(entity=entity, field=field, missing=tuple(ids))
-            for (entity, field), ids in self.ids.items()
+
+type _Stored = Mapping[type[pydantic.BaseModel], Mapping[IdValue, pydantic.BaseModel]]
+"""The stored Entities, by model and ID."""
+
+
+class _Read:
+    """One run of a View: the IDs it found a problem with, and an index per
+    one-to-one Reference it follows backwards.
+
+    `missing` are IDs no stored Entity has, by the Entity and field holding them.
+    `shared` are IDs several Entities hold in a one-to-one field, by that Entity
+    and field. Only IDs the View looks up are reported.
+    """
+
+    def __init__(self, stored: _Stored) -> None:
+        self.missing = _IdsFound()
+        self.shared = _IdsFound()
+        self._stored = stored
+        self._indexes: dict[
+            tuple[type[pydantic.BaseModel], FieldName],
+            dict[IdValue, list[pydantic.BaseModel]],
+        ] = {}
+
+    def referencing(
+        self, lookup: ir.ReverseLookup, id_value: IdValue
+    ) -> pydantic.BaseModel | None:
+        """The Entity whose `lookup.via` holds `id_value`: the first in insertion
+        order when several do, which `shared` records, or `None`.
+
+        The index of `lookup.via` is built the first time it is followed.
+        """
+        key = (lookup.target, lookup.via)
+        if key not in self._indexes:
+            index: dict[IdValue, list[pydantic.BaseModel]] = {}
+            for entity in self._stored.get(lookup.target, {}).values():
+                index.setdefault(getattr(entity, lookup.via.root), []).append(entity)
+            self._indexes[key] = index
+        found = self._indexes[key].get(id_value, [])
+        if len(found) > 1:
+            self.shared.add(lookup.target, lookup.via, id_value)
+        return found[0] if found else None
+
+    def diagnostics(self) -> tuple[ReadDiagnostic, ...]:
+        """One per Entity and field, each with every ID found."""
+        return (
+            *(
+                DanglingReference(entity=entity, field=field, missing=tuple(ids))
+                for (entity, field), ids in self.missing.ids.items()
+            ),
+            *(
+                SharedOneToOneReference(entity=entity, field=field, shared=tuple(ids))
+                for (entity, field), ids in self.shared.ids.items()
+            ),
         )
 
 
@@ -161,9 +228,11 @@ class InMemoryViewEngine:
         self, view: ViewName
     ) -> Result[
         tuple[ViewRow, ...],
-        UnknownViewError | NonEntitySourceError | DiagnosticsError[DanglingReference],
+        UnknownViewError | NonEntitySourceError | DiagnosticsError[ReadDiagnostic],
     ]:
-        """The View's results, or every Reference that points to a missing Entity.
+        """The View's results, or every Reference that points to a missing Entity
+        and every ID several Entities share in a one-to-one Reference the View
+        follows backwards.
 
         Only Entities are stored, so a View over any other Source is an error. A
         row the View's Filters exclude is not looked up, so its References are not
@@ -176,58 +245,55 @@ class InMemoryViewEngine:
                 pass
         if compiled.source not in self._entity_graph.entities:
             return Err(NonEntitySourceError(view, compiled.source))
-        missing = _Missing()
+        run = _Read(self._entities)
         rows = tuple(
-            self._row(compiled.relation, entity, missing)
+            self._row(compiled.relation, entity, run)
             for entity in self._entities.get(compiled.source, {}).values()
             if all(
                 InMemoryViewEngine._holds(kept, entity)
                 for kept in compiled.relation.filters
             )
         )
-        return DiagnosticsError.or_ok(missing.dangling(), lambda: rows)
+        return DiagnosticsError.or_ok(run.diagnostics(), lambda: rows)
 
     def _row(
-        self, relation: ir.Relation, subject: pydantic.BaseModel, missing: _Missing
+        self, relation: ir.Relation, subject: pydantic.BaseModel, run: _Read
     ) -> ViewRow:
         return ViewRow(
-            {
-                field.name: self._field(field, subject, missing)
-                for field in relation.fields
-            }
+            {field.name: self._field(field, subject, run) for field in relation.fields}
         )
 
     def _field(
-        self, field: ir.RelationField, subject: pydantic.BaseModel, missing: _Missing
+        self, field: ir.RelationField, subject: pydantic.BaseModel, run: _Read
     ) -> FieldValue:
         match field:
             case ir.Field(value=value):
                 pass
             case ir.NestedField(value=found, relation=relation):
-                entity = self._follow(found.lookups(), subject, missing)
-                return None if entity is None else self._row(relation, entity, missing)
+                entity = self._follow(found.lookups(), subject, run)
+                return None if entity is None else self._row(relation, entity, run)
         match value:
             case ir.SourceField():
                 return getattr(subject, value.field.root)
-            case ir.Lookup() | ir.ChainedLookup():
-                return self._follow(value.lookups(), subject, missing)
+            case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
+                return self._follow(value.lookups(), subject, run)
             case ir.Lifted(through=through, field=read):
-                entity = self._follow(through, subject, missing)
+                entity = self._follow(through, subject, run)
                 return None if entity is None else getattr(entity, read.field.root)
             case ir.Added():
                 return InMemoryViewEngine._default(field)
 
     def _follow(
         self,
-        lookups: Iterable[ir.Lookup],
+        lookups: Iterable[ir.EntityLookup],
         subject: pydantic.BaseModel,
-        missing: _Missing,
+        run: _Read,
     ) -> pydantic.BaseModel | None:
         """The Entity found by following each of `lookups` in turn from `subject`,
         or `None` once one finds none."""
         found = subject
         for lookup in lookups:
-            match self._lookup(lookup, found, missing):
+            match self._lookup(lookup, found, run):
                 case None:
                     return None
                 case entity:
@@ -299,16 +365,31 @@ class InMemoryViewEngine:
                 raise UndefaultedFieldError(field.name)
 
     def _lookup(
-        self, lookup: ir.Lookup, subject: pydantic.BaseModel, missing: _Missing
+        self,
+        lookup: ir.EntityLookup,
+        subject: pydantic.BaseModel,
+        run: _Read,
     ) -> pydantic.BaseModel | None:
-        """The referenced Entity; `None` for an absent optional Reference, or when
-        the Entity is missing, which `missing` records."""
-        id_value = getattr(subject, lookup.reference.field.root)
-        if id_value is None:
-            return None
-        match self._entities.get(lookup.target, {}).get(id_value):
-            case None:
-                missing.add(type(subject), lookup.reference.field, id_value)
-                return None
-            case entity:
-                return entity
+        """The Entity `lookup` finds from `subject`, or `None`.
+
+        A Lookup gives `None` for an absent optional Reference, or when the Entity
+        is missing, which `run` records. A ReverseLookup gives `None` when no
+        Entity references the subject, and the first in insertion order when
+        several do, which `run` records.
+        """
+        match lookup:
+            case ir.Lookup():
+                reference = lookup.reference.field
+                id_value = getattr(subject, reference.root)
+                if id_value is None:
+                    return None
+                match self._entities.get(lookup.target, {}).get(id_value):
+                    case None:
+                        run.missing.add(type(subject), reference, id_value)
+                        return None
+                    case entity:
+                        return entity
+            case ir.ReverseLookup():
+                return run.referencing(
+                    lookup, getattr(subject, EntityNode.primary_key.root)
+                )

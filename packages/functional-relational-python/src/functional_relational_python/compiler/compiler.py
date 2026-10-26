@@ -5,7 +5,7 @@ recovers with the best relation it can build, so later steps and other Views and
 Payloads are still checked and independent defects are all reported, once each.
 """
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Annotated
 
 import pydantic
@@ -19,9 +19,11 @@ from functional_relational_python.compiler import (
 )
 from functional_relational_python.compiler.model_names import (
     ModelNames,
+    PascalCase,
     ViewModelNames,
 )
 from functional_relational_python.entity_graph.entity_graph import (
+    Cardinality,
     EntityGraph,
     FieldName,
     NoEntityError,
@@ -281,6 +283,7 @@ def _check_node(
             | ir.Project()
             | ir.Resolve()
             | ir.Flatten()
+            | ir.Reverse()
             | ir.Default()
             | ir.Add()
             | ir.Where()
@@ -304,6 +307,7 @@ def _check_step(
     | ir.Project
     | ir.Resolve
     | ir.Flatten
+    | ir.Reverse
     | ir.Default
     | ir.Add
     | ir.Where,
@@ -326,6 +330,8 @@ def _check_step(
             checked = _check_resolve(entity_graph, view, node, relation)
         case ir.Flatten():
             checked = _check_flatten(view, node, relation)
+        case ir.Reverse():
+            checked = _check_reverse(entity_graph, view, node, relation)
         case ir.Default():
             checked = _check_default(view, node, relation)
         case ir.Add():
@@ -682,7 +688,7 @@ def _resolve_field(
     match _lookup(entity_graph, view, relation, field):
         case _CheckedField() as unresolved:
             return unresolved
-        case ir.Lookup() | ir.ChainedLookup() as found:
+        case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() as found:
             pass
     # A field named just `_id` keeps its name rather than losing all of it.
     name = FieldName(field.name.root.removesuffix("_id") or field.name.root)
@@ -699,7 +705,7 @@ def _resolve_field(
         invalid := ViewModelNames.check_field(view, relation.source, name)
     ):
         return _CheckedField(field=field, diagnostics=invalid)
-    return _resolved(entity_graph, view, node, name, found)
+    return _resolved(entity_graph, view, node.then, name, found)
 
 
 def _lookup(
@@ -761,22 +767,130 @@ def _lookup(
             )
 
 
+def _check_reverse(
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    node: ir.Reverse,
+    relation: ir.Relation,
+) -> ir.Relation | Poisoned:
+    """Appends the field holding the Entity whose one-to-one Reference points to
+    the subject, named after that Entity.
+
+    A name the relation already has recovers with the relation unchanged, so the
+    existing field keeps it, as for `add`. A Reference that cannot be followed
+    backwards recovers with a field of unknown type, so later steps still find it.
+    """
+    source = relation.source
+    name = FieldName(PascalCase(node.entity.__name__).snake_case().root)
+    reported: list[diagnostics.CompileDiagnostic] = []
+    collides = name in relation.field_names()
+    if collides:
+        reported.append(
+            diagnostics.ReverseOntoExistingField(
+                view=view, source=source, entity=node.entity, field=name
+            )
+        )
+    reported.extend(ViewModelNames.check_field(view, source, name))
+    # The subject is what the pipeline started from, however the relation has
+    # changed since.
+    subject = node.input
+    while not isinstance(subject, ir.FromSource):
+        subject = subject.input
+    non_entities: list[diagnostics.CompileDiagnostic] = []
+    if subject.source not in entity_graph.entities:
+        non_entities.append(
+            diagnostics.ReverseFromNonEntity(
+                view=view, source=source, entity=node.entity
+            )
+        )
+    if node.entity not in entity_graph.entities:
+        non_entities.append(
+            diagnostics.ReverseOfNonEntity(view=view, source=source, entity=node.entity)
+        )
+    reported.extend(non_entities)
+    field: ir.RelationField = ir.Field(
+        name=name, info=FieldInfo(), value=ir.Added(), default=ir.NoDefault()
+    )
+    if not non_entities:
+        to_subject = tuple(
+            reference
+            for reference in entity_graph.entities[node.entity].references
+            if reference.target is subject.source
+        )
+        one_to_one = tuple(
+            reference
+            for reference in to_subject
+            if reference.cardinality == Cardinality.ONE_TO_ONE
+        )
+        # What is reported unless exactly one Reference is chosen.
+        unchosen: diagnostics.CompileDiagnostic
+        match node.via:
+            case ir.SoleReference():
+                chosen = one_to_one
+                unchosen = (
+                    diagnostics.AmbiguousReverse(
+                        view=view,
+                        source=source,
+                        entity=node.entity,
+                        references=tuple(reference.field for reference in chosen),
+                    )
+                    if chosen
+                    else diagnostics.NoOneToOneReference(
+                        view=view,
+                        source=source,
+                        entity=node.entity,
+                        many_to_one=tuple(
+                            reference.field
+                            for reference in to_subject
+                            if reference.cardinality == Cardinality.MANY_TO_ONE
+                        ),
+                    )
+                )
+            case FieldName() as via:
+                chosen = tuple(
+                    reference for reference in one_to_one if reference.field == via
+                )
+                unchosen = diagnostics.NotAOneToOneReference(
+                    view=view,
+                    source=source,
+                    entity=node.entity,
+                    field=via,
+                    valid=tuple(reference.field for reference in one_to_one),
+                )
+        if len(chosen) == 1:
+            (reference,) = chosen
+            lookup = ir.ReverseLookup(
+                target=node.entity, via=reference.field, id_type=reference.id_type
+            )
+            checked = _resolved(entity_graph, view, node.then, name, lookup)
+            field = checked.field
+            reported.extend(checked.diagnostics)
+        else:
+            reported.append(unchosen)
+    reversed_relation = (
+        relation if collides else relation.with_fields((*relation.fields, field))
+    )
+    if not reported:
+        return reversed_relation
+    return Poisoned(recovered=reversed_relation, diagnostics=tuple(reported))
+
+
 def _resolved(
     entity_graph: EntityGraph,
     view: DefinitionName,
-    node: ir.Resolve,
+    then: Callable[[ir.Node], ir.Node],
     name: FieldName,
     found: ir.EntityValue,
 ) -> _CheckedField:
-    """The field holding the looked-up Entity, after `node.then` if it does anything.
+    """The field holding the looked-up Entity, after `then` if it does anything.
 
     Without a nested pipeline the field is typed by the Entity class itself. The
-    field is new, so it has no default: the Reference's default was for an ID, and
-    need not fit the Entity.
+    field is new, so it has no default: a resolved Reference's default was for an
+    ID, and need not fit the Entity.
     """
     default = ir.NoDefault()
     root = ir.FromSource(source=found.lookups()[-1].target)
-    nested = node.then(root)
+    nested = then(root)
     if nested == root:
         return _CheckedField(
             field=ir.Field.looked_up(name, found, default), diagnostics=()
@@ -810,7 +924,9 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
     def of(field: ir.RelationField) -> _HeldEntity | ir.Field:
         """The Entity `field` holds, or `field` itself when it is not resolved."""
         match field:
-            case ir.Field(value=ir.Lookup() | ir.ChainedLookup() as found):
+            case ir.Field(
+                value=ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() as found
+            ):
                 chain = found.lookups()
                 return _HeldEntity(
                     chain=chain,
@@ -844,7 +960,7 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
                 lifted_value = ir.Lifted(through=self.chain, field=value)
             case ir.Lifted(through=through, field=read):
                 lifted_value = ir.Lifted(through=(*self.chain, *through), field=read)
-            case ir.Lookup() | ir.ChainedLookup():
+            case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
                 lifted_value = ir.ChainedLookup(chain=(*self.chain, *value.lookups()))
         lifted = field.model_copy(update={"value": lifted_value})
         match ir.Lookup.optionality_of(self.chain):

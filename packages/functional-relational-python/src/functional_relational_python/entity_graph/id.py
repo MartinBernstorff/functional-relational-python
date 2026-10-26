@@ -1,3 +1,4 @@
+import dataclasses
 from typing import Annotated, TypeIs
 
 from pydantic import ConfigDict, RootModel, SkipValidation, field_validator
@@ -62,3 +63,21 @@ class IdBase(RootModel[IdType], frozen=True):
             and issubclass(annotation, self.root)
             and annotation is not self.root
         )
+
+
+# A dataclass, not a Pydantic model: Pydantic reads a model in `Annotated` metadata
+# as a schema to apply, rather than leaving it in `FieldInfo.metadata`.
+@dataclasses.dataclass(frozen=True)
+class OneToOne:
+    """Marks a Reference as one-to-one: at most one Entity references each target.
+
+    Only a one-to-one Reference can be followed backwards to a single Entity, e.g.
+    from a `ChannelCampaign` to its `MetaCampaign` detail row. An optional
+    Reference may be marked inside or outside its `None`:
+
+    >>> class MetaCampaign(pydantic.BaseModel):
+    ...     id: MetaCampaignId
+    ...     channel_campaign_id: Annotated[ChannelCampaignId, OneToOne()]
+    ...     replaces_id: Annotated[ChannelCampaignId | None, OneToOne()]
+    ...     replaced_by_id: Annotated[ChannelCampaignId, OneToOne()] | None
+    """

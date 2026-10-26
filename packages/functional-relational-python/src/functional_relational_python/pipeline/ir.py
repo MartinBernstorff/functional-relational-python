@@ -7,6 +7,7 @@ and the Value that computes it. Backends run the Relation, not the node tree.
 
 import copy
 import enum
+import typing
 from collections.abc import Callable, Collection, Iterable, Mapping
 from typing import Annotated
 
@@ -16,6 +17,7 @@ from safe_result import Err, Ok
 
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
+    EntityNode,
     FieldName,
     NoEntityError,
     NotAReferenceError,
@@ -152,6 +154,25 @@ class Flatten(pydantic.BaseModel, frozen=True):
     fields: FieldName | Select
 
 
+class SoleReference(pydantic.BaseModel, frozen=True):
+    """The one one-to-one Reference an Entity has to the subject, whichever field
+    it is."""
+
+
+class Reverse(pydantic.BaseModel, frozen=True):
+    """Adds a field holding the `entity` whose one-to-one Reference `via` points to
+    the subject, or `None` when none does.
+
+    The subject is the View's Source, or inside a nested pipeline the Entity it
+    runs on. `then` is applied to `entity`, as if it were a View's Source.
+    """
+
+    input: Node
+    entity: type[pydantic.BaseModel]
+    via: FieldName | SoleReference
+    then: Callable[[Node], Node]
+
+
 type UncheckedDefault = object
 """A value given to `default`, before the compiler checks that it is a literal."""
 
@@ -283,6 +304,7 @@ type Node = (
     | Project
     | Resolve
     | Flatten
+    | Reverse
     | Default
     | Add
     | Where
@@ -329,33 +351,68 @@ class SourceField(pydantic.BaseModel, frozen=True):
 
     field: FieldName
 
-    def lookups(self) -> tuple[Lookup, ...]:
+    def lookups(self) -> tuple[EntityLookup, ...]:
         return ()
 
 
-class Lookup(pydantic.BaseModel, frozen=True):
-    """The Entity a Reference points to, or `None` for an absent optional one."""
+class _FindsEntity(pydantic.BaseModel, frozen=True):
+    """What every lookup has: the Entity it finds, and whether it may find none."""
 
-    reference: SourceField
-    id_type: IdType
     target: type[pydantic.BaseModel]
     optionality: Optionality
 
-    def lookups(self) -> tuple[Lookup, ...]:
-        return (self,)
-
     def annotation(self) -> type[pydantic.BaseModel | None]:
-        """The looked-up value's type: the target Entity, optional if the
-        Reference is."""
+        """The looked-up value's type: the target Entity, optional if the lookup
+        is."""
         return self.optionality.annotate(self.target)
 
     @staticmethod
-    def optionality_of(lookups: Iterable[Lookup]) -> Optionality:
+    def optionality_of(lookups: Iterable[EntityLookup]) -> Optionality:
         """Whether following `lookups` in turn may find no Entity: whether any of
         their References is optional."""
         if any(lookup.optionality is Optionality.OPTIONAL for lookup in lookups):
             return Optionality.OPTIONAL
         return Optionality.REQUIRED
+
+
+class Lookup(_FindsEntity, frozen=True):
+    """The Entity a Reference points to, or `None` for an absent optional one."""
+
+    reference: SourceField
+    id_type: IdType
+
+    def lookups(self) -> tuple[EntityLookup, ...]:
+        return (self,)
+
+    def keyed_by(self) -> FieldName:
+        """The target's field the subject's ID is matched against: its primary
+        key."""
+        return EntityNode.primary_key
+
+
+class ReverseLookup(_FindsEntity, frozen=True):
+    """The Entity whose one-to-one Reference `via` holds the subject's primary key,
+    or `None` when no Entity's does.
+
+    `id_type` is the subject's primary key type, which `via` is typed with.
+    """
+
+    # Whether a referencing Entity exists is up to the data, so a ReverseLookup
+    # is always optional. Like a tag, the one value it can have is its default.
+    optionality: typing.Literal[Optionality.OPTIONAL] = Optionality.OPTIONAL
+    via: FieldName
+    id_type: IdType
+
+    def lookups(self) -> tuple[EntityLookup, ...]:
+        return (self,)
+
+    def keyed_by(self) -> FieldName:
+        """The target's field the subject's ID is matched against: `via`."""
+        return self.via
+
+
+type EntityLookup = Lookup | ReverseLookup
+"""How a field holding an Entity finds it from the subject."""
 
 
 class ChainedLookup(pydantic.BaseModel, frozen=True):
@@ -364,9 +421,9 @@ class ChainedLookup(pydantic.BaseModel, frozen=True):
     Reference resolved.
     """
 
-    chain: Annotated[tuple[Lookup, ...], pydantic.Field(min_length=2)]
+    chain: Annotated[tuple[EntityLookup, ...], pydantic.Field(min_length=2)]
 
-    def lookups(self) -> tuple[Lookup, ...]:
+    def lookups(self) -> tuple[EntityLookup, ...]:
         return self.chain
 
     def annotation(self) -> type[pydantic.BaseModel | None]:
@@ -375,7 +432,7 @@ class ChainedLookup(pydantic.BaseModel, frozen=True):
         return Lookup.optionality_of(self.chain).annotate(self.chain[-1].target)
 
 
-type EntityValue = Lookup | ChainedLookup
+type EntityValue = EntityLookup | ChainedLookup
 """The Entity a resolved field holds."""
 
 
@@ -385,7 +442,7 @@ class Added(pydantic.BaseModel, frozen=True):
     A mapping leaves it out, so the model fills it with its default.
     """
 
-    def lookups(self) -> tuple[Lookup, ...]:
+    def lookups(self) -> tuple[EntityLookup, ...]:
         return ()
 
 
@@ -394,10 +451,10 @@ class Lifted(pydantic.BaseModel, frozen=True):
     turn from the subject: a field `flatten` lifted out of a resolved field. It is
     `None` when a Lookup on the way finds no Entity."""
 
-    through: Annotated[tuple[Lookup, ...], pydantic.Field(min_length=1)]
+    through: Annotated[tuple[EntityLookup, ...], pydantic.Field(min_length=1)]
     field: SourceField
 
-    def lookups(self) -> tuple[Lookup, ...]:
+    def lookups(self) -> tuple[EntityLookup, ...]:
         return self.through
 
 
@@ -527,7 +584,7 @@ class Field(pydantic.BaseModel, frozen=True):
                 return (source, self.info)
             case Lifted(through=through, field=read):
                 return (read.field, through[-1].target.model_fields[read.field.root])
-            case Lookup() | ChainedLookup() | Added():
+            case Lookup() | ReverseLookup() | ChainedLookup() | Added():
                 return self
 
     def admitting_none(self) -> Field:
@@ -549,7 +606,7 @@ class Field(pydantic.BaseModel, frozen=True):
 
 
 class NestedField(pydantic.BaseModel, frozen=True):
-    """A resolved field whose Entity went through a nested pipeline.
+    """A resolved or reversed field whose Entity went through a nested pipeline.
 
     Its type is a View model generated from `relation`, built from the Entity
     `value` finds.
@@ -600,22 +657,24 @@ class Relation(pydantic.BaseModel, frozen=True):
     def field_names(self) -> tuple[FieldName, ...]:
         return tuple(field.name for field in self.fields)
 
-    def lookups(self) -> tuple[Lookup, ...]:
-        """One Lookup per Entity this relation looks up, nested ones included.
+    def lookups(self) -> tuple[EntityLookup, ...]:
+        """One lookup per Entity this relation looks up and the field it is
+        matched on, nested ones included.
 
-        They are in the order the Entities are first looked up.
+        Every Lookup of one Entity matches its primary key, so they count once;
+        each ReverseLookup counts once per Entity and `via`. They are in the
+        order they are first used.
         """
-        used: list[Lookup] = []
+        used: list[EntityLookup] = []
         for field in self.fields:
             match field:
                 case Field(value=value):
                     used.extend(value.lookups())
                 case NestedField(value=value, relation=nested):
                     used.extend((*value.lookups(), *nested.lookups()))
-        first: dict[type[pydantic.BaseModel], Lookup] = {}
+        first: dict[tuple[type[pydantic.BaseModel], FieldName], EntityLookup] = {}
         for lookup in used:
-            if lookup.target not in first:
-                first[lookup.target] = lookup
+            _ = first.setdefault((lookup.target, lookup.keyed_by()), lookup)
         return tuple(first.values())
 
     def selected(self, fields: Select) -> tuple[FieldName, ...]:
