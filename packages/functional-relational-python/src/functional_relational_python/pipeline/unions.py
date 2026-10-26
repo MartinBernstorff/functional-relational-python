@@ -14,21 +14,26 @@ class UnionName(pydantic.RootModel[str], frozen=True):
 
 
 class Union(pydantic.BaseModel, frozen=True):
-    """A tagged union of Views: a name, a Discriminator and the Variants.
+    """A tagged union of Views, or of Payloads: a name, a Discriminator and the
+    Variants.
 
     Its model is `Annotated[A | B, Discriminator("<discriminator>")]`, named
-    `name`. Each Variant is a View, which generates its own model and mapping
-    function as if the Catalog listed it, or a nested Union, which generates its
-    own model and mapping function too.
-
-    Every Variant reads one Source. A Source row gives the result of the first
-    Variant, in order, whose Filters keep it; a row no Variant keeps gives no
-    result. Each Variant's model has the field `discriminator`, typed by one Tag
-    (`Literal[<tag>]`): a Source column a Variant's `where` narrows with `==`, or
-    a field `add` declares. Two Variants may not share a Tag, and a nested Union's
+    `name`. Each Variant's model has the field `discriminator`, typed by one Tag
+    (`Literal[<tag>]`). Two Variants may not share a Tag, and a nested Union's
     Variants all have the same Tag for `discriminator`, its own Tag here.
 
-    Payloads are Variants only in Unions of Payloads, which are not supported yet.
+    A Union of Views has Views and nested Unions of Views as Variants. Each View
+    generates its own model and mapping function as if the Catalog listed it, and
+    so does each nested Union. Every Variant reads one Source. A Source row gives
+    the result of the first Variant, in order, whose Filters keep it; a row no
+    Variant keeps gives no result. A Variant's Tag is a Source column its `where`
+    narrows with `==`, or a field `add` declares.
+
+    A Union of Payloads has Payloads and nested Unions of Payloads as Variants,
+    which may read different Sources. Each Payload generates its own model as if
+    the Catalog listed it. A Union of Payloads is a write model, so it generates
+    only its model, no mapping function. A Payload has no Filters, so its Tag is
+    a field `retype_to` types, or `add` declares, as a `Literal` of one value.
     """
 
     name: UnionName
@@ -51,13 +56,22 @@ class Union(pydantic.BaseModel, frozen=True):
     def views(self) -> tuple[View, ...]:
         """The Views among this Union's Variants and those of the Unions nested in
         it, in Variant order, once each."""
-        found: list[View] = []
-        for variant in self.variants:
-            match variant:
-                case View():
-                    found.append(variant)
-                case Union():
-                    found.extend(variant.views())
-                case Payload():
-                    pass
-        return tuple(dict.fromkeys(found))
+        return tuple(
+            dict.fromkeys(leaf for leaf in self.leaves() if isinstance(leaf, View))
+        )
+
+    def payloads(self) -> tuple[Payload, ...]:
+        """The Payloads among this Union's Variants and those of the Unions nested
+        in it, in Variant order, once each."""
+        return tuple(
+            dict.fromkeys(leaf for leaf in self.leaves() if isinstance(leaf, Payload))
+        )
+
+    def leaves(self) -> tuple[View | Payload, ...]:
+        """The Views and Payloads among this Union's Variants and those of the
+        Unions nested in it, in Variant order."""
+        return tuple(
+            leaf
+            for variant in self.variants
+            for leaf in (variant.leaves() if isinstance(variant, Union) else (variant,))
+        )

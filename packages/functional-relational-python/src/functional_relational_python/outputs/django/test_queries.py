@@ -48,11 +48,15 @@ from functional_relational_python.outputs.django.queries import (
     ViewModelIntoDjangoModelsModule,
     ViewModelIntoQueriesModule,
 )
+from functional_relational_python.outputs.python import test_plan
 from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import (
+    LayoutRole,
     NameClash,
+    NoModuleFromLayout,
     PythonLayout,
     PythonPlan,
+    ReturnedText,
     Scope,
 )
 from functional_relational_python.outputs.python.symbols import (
@@ -709,6 +713,37 @@ def any_employee_queryset(
     )
 
 
+def test_a_layout_giving_a_union_no_module_is_a_diagnostic() -> None:
+    union = any_employee()
+    compiled = compile_all([], [union])
+
+    def views_only(
+        placed: compiler.CompiledView
+        | compiler.CompiledPayload
+        | compiler.CompiledUnion
+        | compiler.CompiledPayloadUnion,
+    ) -> ModulePath:
+        match placed:
+            case compiler.CompiledUnion():
+                return test_plan.unplaced(placed)
+            case _:
+                return Generated.models
+
+    match DjangoQueriesRenderer.render(
+        entity_graph(), Modules.config(), compiled.views, views_only, compiled.unions
+    ):
+        case Ok(files):
+            pytest.fail(f"expected diagnostics, got {files}")
+        case Err(error):
+            assert error.diagnostics == (
+                NoModuleFromLayout(
+                    definition=union.name,
+                    role=LayoutRole.MODELS,
+                    returned=ReturnedText.of(None),
+                ),
+            )
+
+
 def test_golden_union_from_row() -> None:
     """The last Variant is the default: the QuerySet keeps no row no Variant
     keeps."""
@@ -857,6 +892,7 @@ class Database:
                 views=compiled.views,
                 payloads=(),
                 unions=compiled.unions,
+                payload_unions=(),
                 one_to_one_marker=OneToOneMarker.fake(),
             ),
             PythonLayout.models_only(into(Generated.models)),

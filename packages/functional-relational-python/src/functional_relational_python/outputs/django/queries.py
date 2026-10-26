@@ -83,10 +83,12 @@ from functional_relational_python.outputs.python.mappings import (
 )
 from functional_relational_python.outputs.python.plan import (
     FunctionPlan,
+    LayoutRole,
     ModelPlan,
     ModuleLayout,
     NameClash,
     Namespace,
+    NoModuleFromLayout,
     Scope,
     Unimportable,
 )
@@ -99,6 +101,7 @@ from functional_relational_python.outputs.python.symbols import (
     ValueExpression,
 )
 from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline.unions import UnionName
 from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
@@ -163,6 +166,7 @@ type DjangoQueriesDiagnostic = (
     | ViewModelIntoQueriesModule
     | ViewModelIntoDjangoModelsModule
     | Unimportable
+    | NoModuleFromLayout
     | NameClash
 )
 
@@ -186,13 +190,12 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def of(
-        view: compiler.CompiledView, config: DjangoModels, layout: ModuleLayout
+        view: compiler.CompiledView, config: DjangoModels, module: ModulePath
     ) -> ViewQueries:
+        """`module` is the one the View's model is generated into."""
         return ViewQueries(
             view=view,
-            model=Symbol(
-                module=layout(view), qualname=(view.names.model.name.identifier(),)
-            ),
+            model=Symbol(module=module, qualname=(view.names.model.name.identifier(),)),
             source=config.model_of(view.source),
         )
 
@@ -263,16 +266,21 @@ class UnionQueries(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def of(
-        union: compiler.CompiledUnion, config: DjangoModels, layout: ModuleLayout
+        union: compiler.CompiledUnion,
+        config: DjangoModels,
+        placed: Mapping[ViewName | UnionName, ModulePath],
     ) -> UnionQueries:
+        """`placed` has the module of the Union's model, and of each of its
+        leaves'."""
         return UnionQueries(
             union=union,
             model=Symbol(
-                module=layout(union), qualname=(union.names.model.identifier(),)
+                module=placed[union.name], qualname=(union.names.model.identifier(),)
             ),
             source=config.model_of(union.source),
             leaves=tuple(
-                ViewQueries.of(leaf, config, layout) for leaf in union.leaves()
+                ViewQueries.of(leaf, config, placed[leaf.name])
+                for leaf in union.leaves()
             ),
         )
 
@@ -441,10 +449,19 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         order.
         """
         views = tuple(views)
+        unions = tuple(unions)
+        placed: dict[ViewName | UnionName, ModulePath] = {}
+        misplaced: list[DjangoQueriesDiagnostic] = []
+        for compiled in (*views, *unions):
+            match NoModuleFromLayout.check(layout, LayoutRole.MODELS, compiled):
+                case ModulePath() as module:
+                    placed[compiled.name] = module
+                case NoModuleFromLayout() as diagnostic:
+                    misplaced.append(diagnostic)
         queries = tuple(
-            ViewQueries.of(view, config, layout)
+            ViewQueries.of(view, config, placed[view.name])
             for view in views
-            if view.source in graph.entities
+            if view.source in graph.entities and view.name in placed
         )
         enums: dict[type[enum.Enum], Symbol] = {}
         unimportable: list[DjangoQueriesDiagnostic] = []
@@ -466,16 +483,24 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             config=config,
             queries=queries,
             unions=tuple(
-                UnionQueries.of(union, config, layout)
+                UnionQueries.of(union, config, placed)
                 for union in unions
                 if union.source in graph.entities
+                and all(
+                    placed_name in placed
+                    for placed_name in (
+                        union.name,
+                        *(leaf.name for leaf in union.leaves()),
+                    )
+                )
             ),
             enums=enums,
         )
         entities = sorted(graph.entities, key=lambda entity: entity.__name__)
         return DiagnosticsError.or_ok(
             (
-                *DjangoQueriesRenderer._modules(config, views, layout),
+                *misplaced,
+                *DjangoQueriesRenderer._modules(config, views, placed),
                 *unimportable,
                 *renderer._clashes(entities),
             ),
@@ -493,14 +518,17 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     def _modules(
         config: DjangoModels,
         views: Iterable[compiler.CompiledView],
-        layout: ModuleLayout,
+        placed: Mapping[ViewName | UnionName, ModulePath],
     ) -> Iterator[DjangoQueriesDiagnostic]:
         """The Django models, the Django queries and the View models each need
-        their own module."""
+        their own module. `placed` has the module of each View's model the
+        layout gives one."""
         if config.queries == config.module:
             yield QueriesIntoDjangoModelsModule(module=config.module)
         for view in views:
-            module = layout(view)
+            if view.name not in placed:
+                continue
+            module = placed[view.name]
             if module == config.queries:
                 yield ViewModelIntoQueriesModule(view=view.name, module=module)
             if module == config.module:

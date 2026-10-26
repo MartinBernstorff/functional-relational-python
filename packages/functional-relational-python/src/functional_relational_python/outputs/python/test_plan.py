@@ -1,11 +1,12 @@
 import enum
+import typing
 from collections.abc import Iterable
 
 import pydantic
 import pytest
 from safe_result import Err, Ok
 
-from functional_relational_python.compiler import compiler
+from functional_relational_python.compiler import compiler, test_compiler
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     EntityNode,
@@ -15,12 +16,15 @@ from functional_relational_python.entity_graph.id import Id, IdBase, OneToOneMar
 from functional_relational_python.outputs.python.plan import (
     FunctionPlan,
     GeneratedIntoDefiningModule,
+    LayoutRole,
     LookupParameter,
     ModelsAndMappingsInOneModule,
     NameClash,
+    NoModuleFromLayout,
     PlanDiagnostic,
     PythonLayout,
     PythonPlan,
+    ReturnedText,
     Scope,
     Unimportable,
     UnsupportedAnnotation,
@@ -67,6 +71,7 @@ def plan_of(compiled: compiler.CompiledViews, python: PythonLayout) -> PythonPla
             views=compiled.views,
             payloads=(),
             unions=compiled.unions,
+            payload_unions=(),
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         python,
@@ -85,6 +90,7 @@ def diagnostics_of(
             views=compiled.views,
             payloads=(),
             unions=compiled.unions,
+            payload_unions=(),
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         python,
@@ -580,4 +586,78 @@ def test_a_union_named_like_a_class_its_module_imports_clashes() -> None:
                 symbol(Text).describe(),
             ),
         ),
+    )
+
+
+def unplaced(
+    _: compiler.CompiledView
+    | compiler.CompiledPayload
+    | compiler.CompiledUnion
+    | compiler.CompiledPayloadUnion,
+) -> ModulePath:
+    """A layout returning `None`, as one that does not handle what it receives
+    does, though its type says otherwise."""
+    returned: object = None
+    return typing.cast("ModulePath", returned)
+
+
+def test_a_layout_giving_a_union_of_payloads_no_module_is_a_diagnostic() -> None:
+    union = test_compiler.paid_or_free()
+    compiled = compiler.compile_catalog(
+        test_compiler.empty_graph(), (), (), [union]
+    ).unwrap()
+
+    def views_and_payloads(
+        placed: compiler.CompiledView
+        | compiler.CompiledPayload
+        | compiler.CompiledUnion
+        | compiler.CompiledPayloadUnion,
+    ) -> ModulePath:
+        match placed:
+            case compiler.CompiledPayloadUnion():
+                return unplaced(placed)
+            case _:
+                return ModulePath("app.payloads")
+
+    match PythonPlan.of(compiled, PythonLayout.models_only(views_and_payloads)):
+        case Ok(plan):
+            pytest.fail(f"expected diagnostics, got {plan}")
+        case Err(error):
+            assert error.diagnostics == (
+                NoModuleFromLayout(
+                    definition=union.name,
+                    role=LayoutRole.MODELS,
+                    returned=ReturnedText.of(None),
+                ),
+            )
+
+
+def test_a_mappings_layout_giving_a_view_no_module_is_a_diagnostic() -> None:
+    view = overview()
+
+    assert diagnostics_of(
+        compile_all([view]),
+        PythonLayout(
+            models=into(ModulePath("app.views")),
+            mappings=unplaced,
+        ),
+    ) == (
+        NoModuleFromLayout(
+            definition=view.name,
+            role=LayoutRole.MAPPINGS,
+            returned=ReturnedText.of(None),
+        ),
+    )
+
+
+def test_a_layout_diagnostic_message_names_the_definition() -> None:
+    diagnostic = NoModuleFromLayout(
+        definition=UnionName("Writes"),
+        role=LayoutRole.MODELS,
+        returned=ReturnedText.of(None),
+    )
+
+    assert diagnostic.describe().root == (
+        "Writes: the models layout returned None for it, not a ModulePath. A "
+        "layout returns a ModulePath for every View, Payload and Union it receives."
     )
