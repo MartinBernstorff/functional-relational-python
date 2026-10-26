@@ -1,6 +1,8 @@
 """The parts generated Python source is written from: module paths, the Symbols
 it imports, and annotations as source text."""
 
+import enum
+import keyword
 import sys
 from collections.abc import Iterable
 from pathlib import PurePosixPath
@@ -73,8 +75,37 @@ class TypeExpression(pydantic.RootModel[str], frozen=True):
     """An annotation as it is written in generated source."""
 
 
+class PythonString(pydantic.RootModel[str], frozen=True):
+    """A string generated source writes as a string literal."""
+
+    def literal(self) -> ValueExpression:
+        """The string in the quotes ruff writes: double quotes, unless the string
+        has more double quotes than single ones."""
+        written = repr(self.root)
+        body = written[1:-1]
+        if written.startswith("'"):
+            # `repr` escapes single quotes only when it quotes with them.
+            body = body.replace("\\'", "'")
+        quote = "'" if self.root.count('"') > self.root.count("'") else '"'
+        escaped = body.replace(quote, f"\\{quote}")
+        return ValueExpression(f"{quote}{escaped}{quote}")
+
+
 class ValueExpression(pydantic.RootModel[str], frozen=True):
     """A value as it is written in generated source, e.g. a field's default."""
+
+    @staticmethod
+    def of_enum_member(
+        enum_class: TypeExpression, member: enum.Enum
+    ) -> ValueExpression:
+        """`member` as an attribute of `enum_class`, or by subscription when its
+        name is no identifier."""
+        name = member.name
+        if name.isidentifier() and not keyword.iskeyword(name):
+            return ValueExpression(f"{enum_class.root}.{name}")
+        return ValueExpression(
+            f"{enum_class.root}[{PythonString(name).literal().root}]"
+        )
 
 
 class Symbol(pydantic.BaseModel, frozen=True):
