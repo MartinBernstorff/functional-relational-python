@@ -639,6 +639,7 @@ class Database:
                 views=compiled.views,
                 payloads=(),
                 unions=(),
+                payload_unions=(),
                 one_to_one_marker=OneToOneMarker.fake(),
             ),
             PythonLayout.models_only(into(Generated.models)),

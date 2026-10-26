@@ -38,14 +38,15 @@ from functional_relational_python.support.identifier import Identifier
 
 class Catalog(pydantic.BaseModel, frozen=True):
     """The Entities, the class their ID types subclass, the Views over them, the
-    Payloads, the Unions of Views, the module each View's, Payload's or Union's
-    model goes to, and whether and where mapping functions and Django models go.
+    Payloads, the Unions of Views or of Payloads, the module each View's,
+    Payload's or Union's model goes to, and whether and where mapping functions
+    and Django models go.
 
     Views are read models, Payloads are write models. A View and a Payload cannot
-    share a name. A Union's Variants are generated as if `views` listed them.
-    `layout` receives each compiled View, Payload and Union. `mappings` is the one
-    module every View's and Union's mapping function goes to, see
-    `MappingsRenderer`.
+    share a name. A Union's Variants are generated as if `views` or `payloads`
+    listed them. `layout` receives each compiled View, Payload and Union.
+    `mappings` is the one module every View's and Union of Views' mapping
+    function goes to, see `MappingsRenderer`.
     It cannot be a module `layout` returns, a Django module, a module defining a
     Source or an Entity a View looks up, or a module named like a package other
     files are generated into (`app` when generating `app.views`). `django`
