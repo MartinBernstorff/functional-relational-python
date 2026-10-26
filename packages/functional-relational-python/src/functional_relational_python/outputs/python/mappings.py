@@ -205,7 +205,8 @@ class Indent(pydantic.RootModel[int], frozen=True):
     def condition(self, absent: Expression) -> Expression:
         """`if <absent>` on a line at this indentation, split as ruff format
         splits one that does not fit: before its comparison, then its left
-        operand as `fitted` splits it."""
+        operand as `fitted` splits it. One without a comparison, e.g.
+        `not hasattr(...)`, is split as `fitted` splits it."""
         line = Expression(f"if {absent.root}")
         if len(f"{self.pad().root}{line.root}") <= LineLength.default().root:
             return line
@@ -215,7 +216,7 @@ class Indent(pydantic.RootModel[int], frozen=True):
                 operand = self.fitted(Expression(f"if {left}"), Expression(""))
                 compared = f"{operator.strip()} {right}".strip()
                 return Expression(f"{operand.root}\n{self.pad().root}{compared}")
-        return line
+        return self.fitted(line, Expression(""))
 
 
 class _Unbracketed(pydantic.BaseModel, frozen=True):
@@ -366,7 +367,7 @@ class MappingsRenderer:
             )
         )
         helper = (
-            f"\n\n{MappingsRenderer._required_helper().root}"
+            f"\n\n{MappingsRenderer.required_function().root}"
             if module in plan.requiring
             else ""
         )
@@ -380,7 +381,7 @@ class MappingsRenderer:
         return FileText(f"{MappingsRenderer.header.root}\n{imports}{helper}{rendered}")
 
     @staticmethod
-    def _required_helper() -> FunctionText:
+    def required_function() -> FunctionText:
         """The function giving a value a View requires, or raising when it is
         `None`. `of` is the subject holding it, named by its ID if it has one."""
         return FunctionText(

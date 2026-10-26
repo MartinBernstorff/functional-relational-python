@@ -18,6 +18,7 @@ from functional_relational_python.outputs.django.models import (
 from functional_relational_python.outputs.django.queries import DjangoQueriesRenderer
 from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
+    PlacedModels,
     PythonLayout,
     PythonPlan,
     WithoutMappings,
@@ -98,19 +99,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
                 pass
         parts: list[GeneratedFiles] = []
         reported: list[Diagnostic] = []
-        # Django models need no compiled Views, so their diagnostics are reported
-        # even when compiling fails.
-        match compiler.compile_catalog(graph, self.views, self.payloads, self.unions):
-            case Err(compile_error):
-                reported.extend(compile_error.diagnostics)
-                outputs = [self._django_models(graph)]
-            case Ok(compiled):
-                outputs = [
-                    self._python(compiled),
-                    self._django_models(graph),
-                    self._django_queries(graph, compiled),
-                ]
-        for generated in outputs:
+        for generated in self._outputs(graph):
             match generated:
                 case Ok(files):
                     parts.append(files)
@@ -127,21 +116,46 @@ class Catalog(pydantic.BaseModel, frozen=True):
             case Err(merge_error):
                 return Err(merge_error)
 
+    def _outputs(
+        self, graph: EntityGraph
+    ) -> list[Result[GeneratedFiles, DiagnosticsError[Diagnostic]]]:
+        """Each output, with compiling and placing the models as outputs too.
+
+        Django models need no compiled Views, so their diagnostics are reported
+        even when compiling fails. The layout places every model once, for every
+        output that refers to it.
+        """
+        django_models = self._django_models(graph)
+        match compiler.compile_catalog(graph, self.views, self.payloads, self.unions):
+            case Err(compile_error):
+                return [Err(compile_error), django_models]
+            case Ok(compiled):
+                pass
+        match PlacedModels.of_catalog(self.layout, compiled):
+            case Err(layout_error):
+                return [Err(layout_error), django_models]
+            case Ok(placed):
+                return [
+                    self._python(compiled, placed),
+                    django_models,
+                    self._django_queries(graph, compiled, placed),
+                ]
+
     def _python(
-        self, compiled: compiler.CompiledCatalog
+        self, compiled: compiler.CompiledCatalog, placed: PlacedModels
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
-        match PythonPlan.of(compiled, self._python_layout()):
+        match PythonPlan.of(compiled, self._python_layout(placed)):
             case Err(plan_error):
                 return Err(plan_error)
             case Ok(plan):
                 return Ok(PythonRenderer.render(plan))
 
-    def _python_layout(self) -> PythonLayout:
+    def _python_layout(self, placed: PlacedModels) -> PythonLayout:
         match self.mappings:
             case WithoutMappings():
-                return PythonLayout.models_only(self.layout)
+                return PythonLayout.models_only(placed.module_of)
             case ModulePath() as module:
-                return PythonLayout.mappings_into(self.layout, module)
+                return PythonLayout.mappings_into(placed.module_of, module)
 
     def _django_models(
         self, graph: EntityGraph
@@ -158,7 +172,10 @@ class Catalog(pydantic.BaseModel, frozen=True):
                 return Err(error)
 
     def _django_queries(
-        self, graph: EntityGraph, compiled: compiler.CompiledCatalog
+        self,
+        graph: EntityGraph,
+        compiled: compiler.CompiledCatalog,
+        placed: PlacedModels,
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
         match self.django:
             case WithoutDjangoModels():
@@ -166,7 +183,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
             case DjangoModels() as django:
                 pass
         match DjangoQueriesRenderer.render(
-            graph, django, compiled.views, self.layout, compiled.unions
+            graph, django, compiled.views, placed, compiled.unions
         ):
             case Ok(files):
                 return Ok(files)

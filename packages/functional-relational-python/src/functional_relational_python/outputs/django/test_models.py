@@ -33,13 +33,16 @@ from functional_relational_python.outputs.django.models import (
     DjangoModels,
     DjangoModelsRenderer,
     InvalidDjangoFieldName,
+    InvalidReverseAccessorName,
     NoDjangoFieldRule,
     OnDelete,
     OnDeleteForNonReference,
     ReferenceKey,
+    ReverseAccessorClash,
     SetNullOnRequiredReference,
 )
 from functional_relational_python.outputs.django.queries import DjangoQueriesRenderer
+from functional_relational_python.outputs.python.plan import PlacedModels
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     ModulePath,
@@ -341,15 +344,124 @@ class CompanyDetails(pydantic.BaseModel):
     successor_id: Annotated[CompanyId | None, OneToOne()]
 
 
-def test_a_one_to_one_reference_is_a_one_to_one_field() -> None:
+def test_a_one_to_one_reference_is_a_one_to_one_field_with_a_reverse_accessor() -> None:
     text = render([Company, CompanyDetails], config({}, {})).root
 
     assert (
         "    company = models.OneToOneField('Company', on_delete=models.PROTECT, "
-        "related_name='+')\n"
+        "related_name='company_details_by_company')\n"
         "    successor = models.OneToOneField('Company', on_delete=models.PROTECT, "
-        "related_name='+', null=True)\n"
+        "related_name='company_details_by_successor', null=True)\n"
     ) in text
+
+
+class HolderId(Id[int]):
+    pass
+
+
+class Holder(pydantic.BaseModel):
+    """Its Django model has the field `holder_details_by_holder`, the reverse
+    accessor of `HolderDetails.holder_id`."""
+
+    id: HolderId
+    holder_details_by_holder: Text
+
+
+class HolderDetailsId(Id[int]):
+    pass
+
+
+class HolderDetails(pydantic.BaseModel):
+    id: HolderDetailsId
+    holder_id: Annotated[HolderId, OneToOne()]
+
+
+def test_a_reverse_accessor_named_like_a_field_is_a_diagnostic() -> None:
+    assert diagnostics([Holder, HolderDetails], config({}, {})) == (
+        ReverseAccessorClash(
+            entity=Holder,
+            name=FieldName("holder_details_by_holder"),
+            references=(
+                ReferenceKey(entity=HolderDetails, field=FieldName("holder_id")),
+            ),
+        ),
+    )
+
+
+def test_reverse_accessors_named_alike_are_a_diagnostic() -> None:
+    """`Owned.team_by_owner_id` and `OwnedByTeam.owner_id` both have the reverse
+    accessor `owned_by_team_by_owner`."""
+
+    class OwnedId(Id[int]):
+        pass
+
+    class Owned(pydantic.BaseModel):
+        id: OwnedId
+        team_by_owner_id: Annotated[CompanyId, OneToOne()]
+
+    class OwnedByTeamId(Id[int]):
+        pass
+
+    class OwnedByTeam(pydantic.BaseModel):
+        id: OwnedByTeamId
+        owner_id: Annotated[CompanyId, OneToOne()]
+
+    assert diagnostics([Company, Owned, OwnedByTeam], config({}, {})) == (
+        ReverseAccessorClash(
+            entity=Company,
+            name=FieldName("owned_by_team_by_owner"),
+            references=(
+                ReferenceKey(entity=Owned, field=FieldName("team_by_owner_id")),
+                ReferenceKey(entity=OwnedByTeam, field=FieldName("owner_id")),
+            ),
+        ),
+    )
+
+
+def test_a_reverse_accessor_django_rejects_is_a_diagnostic() -> None:
+    """An Entity named with `__` gives a reverse accessor holding `__`."""
+
+    class DoubleId(Id[int]):
+        pass
+
+    double = pydantic.create_model(
+        "Holder__Details",
+        id=(DoubleId, ...),
+        holder_id=(Annotated[HolderId, OneToOne()], ...),
+    )
+
+    assert diagnostics([Holder, double], config({}, {})) == (
+        InvalidReverseAccessorName(
+            name=FieldName("holder__details_by_holder"),
+            reference=ReferenceKey(entity=double, field=FieldName("holder_id")),
+        ),
+    )
+
+
+def test_the_invalid_reverse_accessor_message_names_the_reference() -> None:
+    diagnostic = InvalidReverseAccessorName(
+        name=FieldName("holder__details_by_holder"),
+        reference=ReferenceKey(entity=HolderDetails, field=FieldName("holder_id")),
+    )
+
+    assert diagnostic.describe().root == (
+        "HolderDetails.holder_id: its reverse accessor 'holder__details_by_holder' "
+        "cannot be a Django related name, since Django rejects one ending in '_' "
+        "or holding '__'. Rename the Entity or the field."
+    )
+
+
+def test_the_reverse_accessor_clash_message_names_the_references() -> None:
+    diagnostic = ReverseAccessorClash(
+        entity=Holder,
+        name=FieldName("holder_details_by_holder"),
+        references=(ReferenceKey(entity=HolderDetails, field=FieldName("holder_id")),),
+    )
+
+    assert diagnostic.describe().root == (
+        "Holder: 'holder_details_by_holder', the reverse accessor of "
+        "HolderDetails.holder_id, is bound more than once on its Django model."
+    )
 
 
 @pytest.mark.parametrize(
@@ -523,7 +635,7 @@ def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None
             DjangoModelsRenderer.render(graph, models).unwrap(),
             # No Views, so only the QuerySets the models' managers use.
             DjangoQueriesRenderer.render(
-                graph, models, (), lambda _: ModulePath("app.views")
+                graph, models, (), PlacedModels(modules={})
             ).unwrap(),
         ]
     ).unwrap()
