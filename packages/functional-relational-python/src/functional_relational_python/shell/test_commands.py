@@ -10,6 +10,10 @@ from functional_relational_python.outputs.django.models import (
     DjangoModels,
     NoDjangoFieldRule,
 )
+from functional_relational_python.outputs.python.plan import (
+    ModelsAndMappingsInOneModule,
+    WithoutMappings,
+)
 from functional_relational_python.outputs.python.symbols import ModulePath
 from functional_relational_python.pipeline import steps
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
@@ -30,6 +34,8 @@ from functional_relational_python.support.filesystem import (
     InMemoryFileSystem,
 )
 from functional_relational_python.support.generated_files import (
+    FileGeneratedTwice,
+    ModuleShadowsPackage,
     StaleFilesError,
     Staleness,
 )
@@ -67,8 +73,21 @@ catalog = Catalog(
         )
     ],
     layout=by_kind,
+    mappings=ModulePath("app.mappings"),
     django=DjangoModels.fake(),
 )
+
+without_mappings_catalog = catalog.model_copy(update={"mappings": WithoutMappings()})
+
+
+def mappings_into(module: ModulePath) -> Catalog:
+    return catalog.model_copy(update={"mappings": module})
+
+
+mappings_into_a_view_module_catalog = mappings_into(ModulePath("app.cards"))
+mappings_into_a_payload_module_catalog = mappings_into(ModulePath("app.payloads"))
+mappings_into_the_django_module_catalog = mappings_into(DjangoModels.fake().module)
+mappings_over_a_package_catalog = mappings_into(ModulePath("app"))
 
 invalid_catalog = catalog.model_copy(
     update={
@@ -129,14 +148,54 @@ def test_generate_writes_files_that_check_accepts() -> None:
     assert written == (
         root.file(ModulePath("app.cards").file_path()),
         root.file(ModulePath("app.payloads").file_path()),
+        root.file(ModulePath("app.mappings").file_path()),
         root.file(DjangoModels.fake().module.file_path()),
     )
     assert commands.check(filesystem, root) == Ok(None)
 
 
+def test_generate_writes_the_mapping_functions_into_the_mappings_module() -> None:
+    filesystem, root = project(in_this_module(Text("catalog")))
+    _ = commands.generate(filesystem, root).unwrap()
+
+    mappings = filesystem.files[root.file(ModulePath("app.mappings").file_path())]
+
+    assert "def company_card(" in mappings.root
+
+
+def test_generate_writes_no_mappings_module_without_mappings() -> None:
+    filesystem, root = project(in_this_module(Text("without_mappings_catalog")))
+
+    written = commands.generate(filesystem, root).unwrap()
+
+    assert root.file(ModulePath("app.mappings").file_path()) not in written
+    assert commands.check(filesystem, root) == Ok(None)
+
+
+def test_check_reports_a_missing_mappings_module() -> None:
+    filesystem, root = project(in_this_module(Text("without_mappings_catalog")))
+    _ = commands.generate(filesystem, root).unwrap()
+    filesystem.write(
+        root.file(ConfigFile.name),
+        ProjectConfig.default()
+        .model_copy(update={"catalog": in_this_module(Text("catalog"))})
+        .to_toml(),
+    )
+
+    match commands.check(filesystem, root):
+        case Ok(_):
+            pytest.fail("expected stale files")
+        case Err(error):
+            assert isinstance(error, StaleFilesError)
+            assert [(file.path, file.staleness) for file in error.stale] == [
+                (root.file(ModulePath("app.mappings").file_path()), Staleness.MISSING)
+            ]
+
+
 def test_check_reports_an_edited_file() -> None:
     filesystem, root = project(in_this_module(Text("catalog")))
-    (_, path, _) = commands.generate(filesystem, root).unwrap()
+    _ = commands.generate(filesystem, root).unwrap()
+    path = root.file(ModulePath("app.cards").file_path())
     filesystem.write(path, FileText(f"{filesystem.files[path].root}# edited\n"))
 
     match commands.check(filesystem, root):
@@ -174,6 +233,43 @@ def test_generate_reports_why_it_cannot_run(
         case Err(error):
             assert isinstance(error, error_type)
     assert list(filesystem.files) == [root.file(ConfigFile.name)]
+
+
+@pytest.mark.parametrize(
+    ("attribute", "diagnostic"),
+    [
+        (
+            Text("mappings_into_a_view_module_catalog"),
+            ModelsAndMappingsInOneModule(module=ModulePath("app.cards")),
+        ),
+        (
+            Text("mappings_into_a_payload_module_catalog"),
+            ModelsAndMappingsInOneModule(module=ModulePath("app.payloads")),
+        ),
+        (
+            Text("mappings_into_the_django_module_catalog"),
+            FileGeneratedTwice(path=DjangoModels.fake().module.file_path()),
+        ),
+        (
+            Text("mappings_over_a_package_catalog"),
+            ModuleShadowsPackage(path=ModulePath("app").file_path()),
+        ),
+    ],
+)
+def test_generate_reports_a_mappings_module_another_output_uses(
+    attribute: Text,
+    diagnostic: ModelsAndMappingsInOneModule
+    | FileGeneratedTwice
+    | ModuleShadowsPackage,
+) -> None:
+    filesystem, root = project(in_this_module(attribute))
+
+    match commands.generate(filesystem, root):
+        case Ok(written):
+            pytest.fail(f"expected diagnostics, wrote {written}")
+        case Err(error):
+            assert isinstance(error, DiagnosticsError)
+            assert error.diagnostics == (diagnostic,)
 
 
 def test_generate_reports_the_diagnostics_of_every_output() -> None:

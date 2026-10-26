@@ -79,6 +79,25 @@ class FileGeneratedTwice(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class ModuleShadowsPackage(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A generated module, e.g. `app.py`, has the name of a package other files are
+    generated into, e.g. `app/views.py`, so importing the package would import the
+    module instead."""
+
+    path: RelativePath
+
+    def describe(self) -> DiagnosticMessage:
+        package = self.path.root.with_suffix("")
+        return DiagnosticMessage(
+            f"{self.path.root}: other files are generated into the package "
+            f"{package}, which this module would shadow. Generate it into another "
+            "module."
+        )
+
+
+type MergeDiagnostic = FileGeneratedTwice | ModuleShadowsPackage
+
+
 class GeneratedFiles(pydantic.BaseModel, frozen=True):
     """Generated files, each starting with the line `header`.
 
@@ -96,14 +115,21 @@ class GeneratedFiles(pydantic.BaseModel, frozen=True):
     @staticmethod
     def merged(
         parts: Iterable[GeneratedFiles],
-    ) -> Result[GeneratedFiles, DiagnosticsError[FileGeneratedTwice]]:
-        """Every file of every part, or a diagnostic per path several generate."""
+    ) -> Result[GeneratedFiles, DiagnosticsError[MergeDiagnostic]]:
+        """Every file of every part, or a diagnostic per path several generate and
+        per module that shadows a package files are generated into."""
         files = tuple(file for part in parts for file in part.files)
         counts = collections.Counter(file.path for file in files)
-        return DiagnosticsError.or_ok(
-            (FileGeneratedTwice(path=path) for path, n in counts.items() if n > 1),
-            lambda: GeneratedFiles(files=files),
+        packages = {parent for path in counts for parent in path.root.parents}
+        diagnostics: list[MergeDiagnostic] = [
+            FileGeneratedTwice(path=path) for path, n in counts.items() if n > 1
+        ]
+        diagnostics.extend(
+            ModuleShadowsPackage(path=path)
+            for path in counts
+            if path.root.with_suffix("") in packages
         )
+        return DiagnosticsError.or_ok(diagnostics, lambda: GeneratedFiles(files=files))
 
     def write(
         self, filesystem: FileSystem, output: Directory
