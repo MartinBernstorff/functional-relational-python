@@ -8,6 +8,7 @@ import functools
 from collections.abc import Callable, Iterable
 from typing import overload
 
+from pydantic.fields import FieldInfo
 from safe_result import Ok
 
 from functional_relational_python.entity_graph.entity_graph import (
@@ -74,6 +75,33 @@ def default(fields: FieldName | ir.Select, value: ir.UncheckedDefault) -> Step:
 
     def step(node: ir.Node) -> ir.Node:
         return ir.Default(input=node, fields=fields, value=value)
+
+    return step
+
+
+def add(
+    name: FieldName,
+    annotation: ir.DeclaredType,
+    default: ir.UncheckedDefault = ir.NoDefault,
+) -> Step:
+    """Declares a new field `name`, typed `annotation`, with no value from the
+    Source, e.g. the literal tag of a tagged union.
+
+    `default` is a literal, as for `default`. A View's added field needs one: its
+    mapping leaves the field out, so the model fills it with its default. In a
+    Payload it is optional. Leaving `default` out, or passing the `NoDefault` class,
+    gives the field none.
+    """
+    # The class, not an instance, so the signature's default calls nothing.
+    given = ir.NoDefault() if default is ir.NoDefault else default
+
+    def step(node: ir.Node) -> ir.Node:
+        return ir.Add(
+            input=node,
+            name=name,
+            info=FieldInfo.from_annotation(annotation),
+            default=given,
+        )
 
     return step
 

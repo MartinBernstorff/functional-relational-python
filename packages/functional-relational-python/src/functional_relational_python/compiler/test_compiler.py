@@ -1,6 +1,7 @@
 import enum
 import types
 from collections.abc import Iterable, Sequence
+from typing import Literal
 
 import pydantic
 import pytest
@@ -13,6 +14,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
     Optionality,
+    RuntimeAnnotation,
 )
 from functional_relational_python.entity_graph.id import Id, IdType
 from functional_relational_python.pipeline import ir, steps, test_ir
@@ -605,6 +607,137 @@ def test_building_a_default_checks_nothing() -> None:
     node = steps.default(unknown, value)(root)
 
     assert node == ir.Default(input=root, fields=unknown, value=value)
+
+
+class AddedField(pydantic.BaseModel, frozen=True):
+    """An added field as the compiler sees it: name, type, value and default."""
+
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
+    name: FieldName
+    annotation: RuntimeAnnotation
+    value: ir.Value
+    default: ir.DefaultValue | ir.NoDefault
+
+    @staticmethod
+    def of(field: ir.RelationField) -> AddedField:
+        match field:
+            case ir.Field():
+                return AddedField(
+                    name=field.name,
+                    annotation=field.annotation(),
+                    value=field.value,
+                    default=field.default,
+                )
+            case ir.NestedField():
+                pytest.fail(f"expected an added field, got {field}")
+
+
+def test_add_appends_a_field_with_no_value_from_the_source() -> None:
+    kind = FieldName("kind")
+
+    view = compile_one(steps.add(kind, Literal["company"], default="company"))
+
+    assert field_names(view) == [*map(FieldName, Company.model_fields), kind]
+    assert AddedField.of(view.relation.fields[-1]) == AddedField(
+        name=kind,
+        annotation=Literal["company"],
+        value=ir.Declared(),
+        default=ir.ScalarDefault("company"),
+    )
+
+
+def test_a_later_default_replaces_an_added_fields_default() -> None:
+    kind = FieldName("kind")
+
+    view = compile_one(
+        steps.pipeline(
+            steps.add(kind, str | None, default="company"), steps.default(kind, None)
+        )
+    )
+
+    assert defaults(view) == {kind: ir.ScalarDefault(None)}
+
+
+def test_a_view_that_adds_a_field_without_a_default_is_a_diagnostic() -> None:
+    kind = FieldName("kind")
+    view = View(
+        name=ViewName.fake(), source=Company, step=steps.add(kind, Literal["company"])
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.AddWithoutDefault(view=view.name, field=kind),
+    )
+
+
+def test_a_payload_may_add_a_field_without_a_default() -> None:
+    kind = FieldName("kind")
+    payload = Payload(
+        name=PayloadName.fake(), source=Company, step=steps.add(kind, Literal["a"])
+    )
+
+    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+
+    assert AddedField.of(compiled.relation.fields[-1]) == AddedField(
+        name=kind, annotation=Literal["a"], value=ir.Declared(), default=ir.NoDefault()
+    )
+
+
+def test_adding_a_field_the_relation_already_has_is_a_diagnostic() -> None:
+    existing = FieldName("name")
+    view = View(
+        name=ViewName.fake(), source=Company, step=steps.add(existing, str, default="")
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.AddOntoExistingField(view=view.name, field=existing),
+    )
+
+
+def test_steps_after_a_defective_add_find_the_added_field() -> None:
+    kind, value = FieldName("kind"), object()
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.pipeline(
+            steps.add(kind, str, default=value), steps.rename(kind, FieldName("tag"))
+        ),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.NonLiteralDefault(
+            view=view.name, value=diagnostics.DefaultText.of(value)
+        ),
+    )
+
+
+def test_the_add_diagnostic_messages_contain_the_field() -> None:
+    field = FieldName("kind")
+
+    messages = [
+        diagnostics.AddOntoExistingField(view=ViewName.fake(), field=field).describe(),
+        diagnostics.AddWithoutDefault(view=ViewName.fake(), field=field).describe(),
+    ]
+
+    assert all(field.root in message.root for message in messages)
+
+
+def test_building_an_add_checks_nothing() -> None:
+    root = ir.FromSource(source=Company)
+    existing, value = FieldName("name"), object()
+
+    node = steps.add(existing, str, default=value)(root)
+
+    match node:
+        case ir.Add(input=input_node, name=name, info=info, default=default):
+            assert (input_node, name, info.annotation, default) == (
+                root,
+                existing,
+                str,
+                value,
+            )
+        case _:
+            pytest.fail(f"expected an Add, got {node}")
 
 
 # The prefix keeps these from ever being a field of `Company` or `Wide`.
@@ -1207,9 +1340,10 @@ def pipelines(
     source: type[pydantic.BaseModel],
     depth: Depth,
 ) -> steps.Step:
-    """A valid pipeline of omits, renames, projects and resolves over `source`.
+    """A valid pipeline of omits, renames, projects, adds and resolves over `source`.
 
-    Omits and renames name one field or select several.
+    Omits and renames name one field or select several. It may start by adding a
+    field.
 
     Each step names only fields the earlier steps kept, and each rename gets a name
     no field has, so it never collides. A resolve selects Reference fields only,
@@ -1220,7 +1354,10 @@ def pipelines(
         reference.field: reference.target
         for reference in graph.entities[source].references
     }
-    drawn: list[steps.Step] = []
+    # An added field comes first, so later steps can omit, rename or project it.
+    added = [FieldName("added") for _ in range(draw(st.integers(0, 1)))]
+    fields.extend(added)
+    drawn: list[steps.Step] = [steps.add(name, str, default="tag") for name in added]
     for index in range(draw(st.integers(min_value=0, max_value=len(fields)))):
         if not fields:
             break

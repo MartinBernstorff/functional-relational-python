@@ -108,7 +108,29 @@ class Default(pydantic.BaseModel, frozen=True):
     value: UncheckedDefault
 
 
-type Node = FromSource | Omit | Rename | RenameSelected | Project | Resolve | Default
+type DeclaredType = type[object]
+"""The type `add` gives a field, e.g. `Literal["company"]` or `Text | None`."""
+
+
+class Add(pydantic.BaseModel, frozen=True):
+    """Declares a new field, typed by `info.annotation`, that has no value from the
+    subject.
+
+    `default` is unchecked, or `NoDefault` when none was given: the compiler checks
+    that it is a literal, and that a View's added field has one.
+    """
+
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
+    input: Node
+    name: FieldName
+    info: FieldInfo
+    default: UncheckedDefault | NoDefault
+
+
+type Node = (
+    FromSource | Omit | Rename | RenameSelected | Project | Resolve | Default | Add
+)
 
 
 class NoDefault(pydantic.BaseModel, frozen=True):
@@ -166,7 +188,14 @@ class Lookup(pydantic.BaseModel, frozen=True):
         return self.optionality.annotate(self.target)
 
 
-type Value = SourceField | Lookup
+class Declared(pydantic.BaseModel, frozen=True):
+    """No value from the subject: a field `add` declared.
+
+    A mapping leaves it out, so the model fills it with its default.
+    """
+
+
+type Value = SourceField | Lookup | Declared
 """How a field of a View result is computed from the subject."""
 
 
@@ -254,7 +283,7 @@ class Relation(pydantic.BaseModel, frozen=True):
             match field:
                 case Field(value=value):
                     match value:
-                        case SourceField():
+                        case SourceField() | Declared():
                             pass
                         case Lookup():
                             used.append(value)
@@ -279,6 +308,23 @@ class Relation(pydantic.BaseModel, frozen=True):
                 if field.name in names
                 else field
                 for field in self.fields
+            ),
+        )
+
+    def added(
+        self, name: FieldName, info: FieldInfo, default: DefaultValue | NoDefault
+    ) -> Relation:
+        """Appends a field `add` declared, named `name` and typed by `info`."""
+        return Relation(
+            source=self.source,
+            fields=(
+                *self.fields,
+                Field(
+                    name=name,
+                    info=info,
+                    value=Declared(),
+                    default=default,
+                ),
             ),
         )
 

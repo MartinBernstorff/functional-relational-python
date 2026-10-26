@@ -41,6 +41,10 @@ class Expression(pydantic.RootModel[str], frozen=True):
     """
 
 
+class LeftOut(pydantic.BaseModel, frozen=True):
+    """A field the call leaves out, so the model fills it with its default."""
+
+
 class FunctionText(pydantic.RootModel[str], frozen=True):
     """The source text of one mapping function."""
 
@@ -131,9 +135,9 @@ class _Construction:
         `subject`."""
         inner = _Construction(self.function, self.indent.deeper())
         arguments = "".join(
-            f"{inner.indent.pad().root}{field.field.name.root}="
-            f"{inner.value(model, field.field, subject).root},\n"
+            f"{inner.indent.pad().root}{field.field.name.root}={value.root},\n"
             for field in model.fields
+            if isinstance(value := inner.value(model, field.field, subject), Expression)
         )
         name = model.symbol.qualified().root
         if not arguments:
@@ -142,7 +146,7 @@ class _Construction:
 
     def value(
         self, model: ModelPlan, field: ir.RelationField, subject: Expression
-    ) -> Expression:
+    ) -> Expression | LeftOut:
         """The argument for `field` of `model`, on a line at this indentation."""
         match field:
             case ir.Field(value=value):
@@ -152,6 +156,8 @@ class _Construction:
                     case ir.Lookup():
                         entity = self._entity(value, subject)
                         return self._optional(field, value, subject, lambda _: entity)
+                    case ir.Declared():
+                        return LeftOut()
             case ir.NestedField(value=lookup):
                 nested = model.nested_in(field)
                 return self._optional(

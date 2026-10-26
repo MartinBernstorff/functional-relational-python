@@ -7,6 +7,7 @@ from functional_relational_python.entity_graph.entity_graph import (
 from functional_relational_python.entity_graph.id import IdType
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.payloads import DefinitionName
+from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,
@@ -127,6 +128,33 @@ class NonLiteralDefault(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class AddOntoExistingField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`add` named a field the relation already has at that point."""
+
+    view: DefinitionName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot add '{self.field.root}', because it already "
+            f"has a field '{self.field.root}'."
+        )
+
+
+class AddWithoutDefault(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A View's `add` gave no default, so its mapping has nothing to fill the
+    field with."""
+
+    view: ViewName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot add '{self.field.root}' without a default, "
+            "because a View's mapping fills an added field with its default."
+        )
+
+
 type CompileDiagnostic = (
     UnknownField
     | RenameOntoExistingField
@@ -137,5 +165,7 @@ type CompileDiagnostic = (
     | UnresolvableReference
     | ResolvedNameCollision
     | NonLiteralDefault
+    | AddOntoExistingField
+    | AddWithoutDefault
     | SharedModelName
 )

@@ -215,6 +215,7 @@ def _check_node(
             | ir.Project()
             | ir.Resolve()
             | ir.Default()
+            | ir.Add()
         ):
             match _check_node(entity_graph, view, node.input):
                 case ir.Relation() as relation:
@@ -233,23 +234,28 @@ def _check_step(
     | ir.RenameSelected
     | ir.Project
     | ir.Resolve
-    | ir.Default,
+    | ir.Default
+    | ir.Add,
     relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
     """Checks one step against the relation its input has."""
+    checked: ir.Relation | Poisoned
     match node:
         case ir.Omit():
-            return _check_omit(view, node, relation)
+            checked = _check_omit(view, node, relation)
         case ir.Rename():
-            return _check_rename(view, node, relation)
+            checked = _check_rename(view, node, relation)
         case ir.RenameSelected():
-            return _check_rename_selected(view, node, relation)
+            checked = _check_rename_selected(view, node, relation)
         case ir.Project():
-            return _check_project(view, node, relation)
+            checked = _check_project(view, node, relation)
         case ir.Resolve():
-            return _check_resolve(entity_graph, view, node, relation)
+            checked = _check_resolve(entity_graph, view, node, relation)
         case ir.Default():
-            return _check_default(view, node, relation)
+            checked = _check_default(view, node, relation)
+        case ir.Add():
+            checked = _check_add(view, node, relation)
+    return checked
 
 
 def _check_omit(
@@ -418,6 +424,42 @@ def _check_default(
     if not reported:
         return defaulted
     return Poisoned(recovered=defaulted, diagnostics=tuple(reported))
+
+
+def _check_add(
+    view: DefinitionName, node: ir.Add, relation: ir.Relation
+) -> ir.Relation | Poisoned:
+    """Appends the declared field, if its name is new and its default a literal.
+
+    A View's added field needs a default. A defective default recovers with the
+    field added without one, so later steps still find it. A name the relation
+    already has recovers with the relation unchanged, so the existing field keeps
+    it, as for a rename.
+    """
+    reported: list[diagnostics.CompileDiagnostic] = []
+    collides = node.name in relation.field_names()
+    if collides:
+        reported.append(diagnostics.AddOntoExistingField(view=view, field=node.name))
+    reported.extend(ViewModelNames.check_field(view, relation.source, node.name))
+    default: ir.DefaultValue | ir.NoDefault
+    match node.default:
+        case ir.NoDefault():
+            default = node.default
+            if isinstance(view, ViewName):
+                reported.append(
+                    diagnostics.AddWithoutDefault(view=view, field=node.name)
+                )
+        case value:
+            match _default_value(view, value):
+                case diagnostics.NonLiteralDefault() as invalid:
+                    default = ir.NoDefault()
+                    reported.append(invalid)
+                case literal:
+                    default = literal
+    added = relation if collides else relation.added(node.name, node.info, default)
+    if not reported:
+        return added
+    return Poisoned(recovered=added, diagnostics=tuple(reported))
 
 
 def _default_value(
