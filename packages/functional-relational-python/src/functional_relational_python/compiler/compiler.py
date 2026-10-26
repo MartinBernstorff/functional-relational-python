@@ -119,15 +119,9 @@ def compile_catalog(
         (
             *(
                 diagnostic
-                for view in checked_views
-                if isinstance(view, PoisonedView)
-                for diagnostic in view.diagnostics
-            ),
-            *(
-                diagnostic
-                for payload in checked_payloads
-                if isinstance(payload, PoisonedPayload)
-                for diagnostic in payload.diagnostics
+                for checked in (*checked_views, *checked_payloads)
+                if isinstance(checked, PoisonedView | PoisonedPayload)
+                for diagnostic in checked.diagnostics
             ),
             *(diagnostics.SharedModelName(view=name) for name in shared_names),
         ),

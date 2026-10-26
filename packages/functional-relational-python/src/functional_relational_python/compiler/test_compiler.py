@@ -1441,6 +1441,19 @@ def test_a_name_shared_by_a_view_and_a_payload_is_one_diagnostic() -> None:
             assert error.diagnostics == (diagnostics.SharedModelName(view=view.name),)
 
 
+def test_an_update_payload_composes_the_create_pipeline_with_more_steps() -> None:
+    create = steps.omit(FieldName("secret"))
+    update = Payload(
+        name=PayloadName.fake(),
+        source=Company,
+        step=steps.pipeline(create, steps.omit(FieldName("revenue"))),
+    )
+
+    (compiled,) = compile_catalog([], [update]).unwrap().payloads
+
+    assert [field.name for field in compiled.relation.fields] == names(Text("name"))
+
+
 def test_views_and_payloads_of_distinct_names_compile() -> None:
     view = View(name=ViewName.fake(), source=Company, step=steps.pipeline())
     payload = Payload(name=PayloadName.fake(), source=Company, step=steps.pipeline())

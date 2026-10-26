@@ -7,7 +7,6 @@ from functional_relational_python.entity_graph.entity_graph import (
 from functional_relational_python.entity_graph.id import IdType
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.payloads import DefinitionName
-from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,
@@ -96,7 +95,7 @@ class SharedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
     Reported once per name, however many Views and Payloads share it.
     """
 
-    view: ViewName
+    view: DefinitionName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(

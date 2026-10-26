@@ -222,17 +222,6 @@ class ModelPlan(pydantic.BaseModel, frozen=True):
     def nested_in(self, field: ir.NestedField) -> ModelPlan:
         return self.nested[field.name]
 
-    def origin(self) -> AnnotationText:
-        """The model, and the View or Payload it is generated for."""
-        match self.view:
-            case ViewName():
-                definition = f"View {self.view.root}"
-            case PayloadName():
-                definition = f"Payload {self.view.root}"
-        return AnnotationText(
-            f"{self.symbol.describe().root} (the model of {definition})"
-        )
-
     def with_nested(self) -> tuple[ModelPlan, ...]:
         """This model and every model nested in it, each after those it refers to."""
         return (
@@ -553,7 +542,17 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         for module, models in self.models.items():
             namespace = _Namespace(Scope(module.root))
             for model in (m for own in models for m in own.with_nested()):
-                namespace.define(model.symbol.bound_name(), model.origin())
+                match model.view:
+                    case ViewName():
+                        definition = f"View {model.view.root}"
+                    case PayloadName():
+                        definition = f"Payload {model.view.root}"
+                namespace.define(
+                    model.symbol.bound_name(),
+                    AnnotationText(
+                        f"{model.symbol.describe().root} (the model of {definition})"
+                    ),
+                )
                 for symbol in model.uses:
                     if symbol.module != module:
                         namespace.refer(
