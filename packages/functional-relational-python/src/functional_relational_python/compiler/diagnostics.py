@@ -6,7 +6,7 @@ from functional_relational_python.entity_graph.entity_graph import (
 )
 from functional_relational_python.entity_graph.id import IdType
 from functional_relational_python.pipeline import ir
-from functional_relational_python.pipeline.views import ViewName
+from functional_relational_python.pipeline.payloads import DefinitionName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,
@@ -16,7 +16,7 @@ from functional_relational_python.support.diagnostic import (
 class UnknownField(pydantic.BaseModel, Diagnostic, frozen=True):
     """A step names a field the relation does not have at that point."""
 
-    view: ViewName
+    view: DefinitionName
     source: ir.SourceName
     field: FieldName
     valid: tuple[FieldName, ...]
@@ -32,14 +32,14 @@ class UnknownField(pydantic.BaseModel, Diagnostic, frozen=True):
 class RenameOntoExistingField(pydantic.BaseModel, Diagnostic, frozen=True):
     """A rename's new name is a field the relation already has at that point."""
 
-    view: ViewName
+    view: DefinitionName
     renamed: FieldName
     field: FieldName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
             f"{self.view.root}: cannot rename '{self.renamed.root}' to "
-            f"'{self.field.root}', because the View already has a field "
+            f"'{self.field.root}', because it already has a field "
             f"'{self.field.root}'."
         )
 
@@ -47,7 +47,7 @@ class RenameOntoExistingField(pydantic.BaseModel, Diagnostic, frozen=True):
 class NotAReference(pydantic.BaseModel, Diagnostic, frozen=True):
     """`resolve` selected a field that is not typed with an Id, optional or not."""
 
-    view: ViewName
+    view: DefinitionName
     source: ir.SourceName
     field: FieldName
 
@@ -61,7 +61,7 @@ class NotAReference(pydantic.BaseModel, Diagnostic, frozen=True):
 class UnresolvableReference(pydantic.BaseModel, Diagnostic, frozen=True):
     """`resolve` selected a Reference whose ID type keys no Entity."""
 
-    view: ViewName
+    view: DefinitionName
     source: ir.SourceName
     field: FieldName
     id_type: IdType
@@ -76,7 +76,7 @@ class UnresolvableReference(pydantic.BaseModel, Diagnostic, frozen=True):
 class ResolvedNameCollision(pydantic.BaseModel, Diagnostic, frozen=True):
     """A resolved field's new name is a field the relation already has."""
 
-    view: ViewName
+    view: DefinitionName
     source: ir.SourceName
     field: FieldName
     existing: FieldName
@@ -86,6 +86,22 @@ class ResolvedNameCollision(pydantic.BaseModel, Diagnostic, frozen=True):
             f"{self.view.root}: resolving {self.source.root}.{self.field.root} "
             f"would name it '{self.existing.root}', but {self.source.root} already "
             f"has a field '{self.existing.root}'."
+        )
+
+
+class SharedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A View and a Payload have the same name, so their models would too.
+
+    Reported once per name, however many Views and Payloads share it.
+    """
+
+    view: DefinitionName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: a View and a Payload are both named "
+            f"'{self.view.root}'. Model names must be unique across Views and "
+            "Payloads."
         )
 
 
@@ -100,7 +116,7 @@ class DefaultText(pydantic.RootModel[str], frozen=True):
 class NonLiteralDefault(pydantic.BaseModel, Diagnostic, frozen=True):
     """`default` got a value that is not a literal a generated model can write out."""
 
-    view: ViewName
+    view: DefinitionName
     value: DefaultText
 
     def describe(self) -> DiagnosticMessage:
@@ -121,4 +137,5 @@ type CompileDiagnostic = (
     | UnresolvableReference
     | ResolvedNameCollision
     | NonLiteralDefault
+    | SharedModelName
 )

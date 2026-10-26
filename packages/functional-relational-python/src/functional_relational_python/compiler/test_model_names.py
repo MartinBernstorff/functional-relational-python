@@ -230,7 +230,7 @@ def test_a_view_that_does_not_compile_still_reports_its_invalid_name() -> None:
     [
         (
             InvalidModelName(view=ViewName("not a class")),
-            "not a class: the View name is not a valid Python class name.",
+            "not a class: the name is not a valid Python class name.",
         ),
         (
             InvalidNestedModelName(

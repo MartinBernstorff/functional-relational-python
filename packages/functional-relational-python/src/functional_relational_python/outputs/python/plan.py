@@ -1,8 +1,9 @@
-"""Plans the Python output of compiled Views: what each generated name refers to.
+"""Plans the Python output of compiled Views and Payloads: what each generated
+name refers to.
 
-For each View the plan decides its model's Symbol, the Symbols of the models
-nested in it, and, when the layout asks for them, its mapping function's Symbol
-and lookup parameters. Every problem that depends on where things are generated
+For each View and Payload the plan decides its model's Symbol and the Symbols of
+the models nested in it. For each View, when the layout asks for them, it also
+decides its mapping function's Symbol and lookup parameters. Every problem that depends on where things are generated
 (a name bound twice in one module, a type that cannot be imported, a module that
 defines what it would be overwritten with) is found here, once. The renderers in
 `models` and `mappings` read the plan and cannot fail.
@@ -29,6 +30,10 @@ from functional_relational_python.outputs.python.symbols import (
     ValueExpression,
 )
 from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline.payloads import (
+    DefinitionName,
+    PayloadName,
+)
 from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
@@ -37,16 +42,21 @@ from functional_relational_python.support.diagnostic import (
 )
 from functional_relational_python.support.identifier import Identifier
 
-type ModuleLayout = Callable[[compiler.CompiledView], ModulePath]
-"""Maps each compiled View to the module something of it is generated into."""
+type ModuleLayout = Callable[
+    [compiler.CompiledView | compiler.CompiledPayload], ModulePath
+]
+"""Maps each compiled View or Payload to the module something of it is generated
+into. Only Views have mapping functions, so a layout for mappings receives only
+Views."""
 
 
 class WithoutMappings(pydantic.BaseModel, frozen=True):
-    """Plan View models only, without mapping functions."""
+    """Plan models only, without mapping functions."""
 
 
 class PythonLayout(pydantic.BaseModel, frozen=True):
-    """Where each View's model, and its mapping function, are generated."""
+    """Where each View's and Payload's model, and each View's mapping function,
+    are generated."""
 
     models: ModuleLayout
     mappings: ModuleLayout | WithoutMappings
@@ -62,10 +72,11 @@ class Scope(pydantic.RootModel[str], frozen=True):
 
 
 class GeneratedIntoDefiningModule(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View's model or mapping function would be generated into a module that
-    defines classes the View uses, overwriting their definitions."""
+    """A View's or Payload's model, or a View's mapping function, would be
+    generated into a module that defines classes it uses, overwriting their
+    definitions."""
 
-    view: ViewName
+    view: DefinitionName
     module: ModulePath
     defined: tuple[AnnotationText, ...]
 
@@ -78,10 +89,11 @@ class GeneratedIntoDefiningModule(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class _DefinitionsUsed:
-    """The classes a View's model or mapping function uses that the module it is
-    generated into defines. Generating would overwrite their definitions."""
+    """The classes a View's or Payload's model, or a View's mapping function, uses
+    that the module it is generated into defines. Generating would overwrite their
+    definitions."""
 
-    def __init__(self, view: ViewName, module: ModulePath) -> None:
+    def __init__(self, view: DefinitionName, module: ModulePath) -> None:
         self.view = view
         self.module = module
         self.defined: set[AnnotationText] = set()
@@ -110,7 +122,7 @@ class _DefinitionsUsed:
 class UnsupportedAnnotation(pydantic.BaseModel, Diagnostic, frozen=True):
     """A field's type has a form the generator cannot write out."""
 
-    view: ViewName
+    view: DefinitionName
     field: FieldName
     annotation: AnnotationText
 
@@ -130,7 +142,7 @@ class Unimportable(pydantic.BaseModel, Diagnostic, frozen=True):
     or what only a mapping function's parameters refer to.
     """
 
-    view: ViewName
+    view: DefinitionName
     field: FieldName | None
     annotation: AnnotationText
 
@@ -204,7 +216,7 @@ class ModelPlan(pydantic.BaseModel, frozen=True):
         module=ModulePath("pydantic"), qualname=(Identifier("BaseModel"),)
     )
 
-    view: ViewName
+    view: DefinitionName
     symbol: Symbol
     fields: tuple[ModelField, ...]
     uses: frozenset[Symbol]
@@ -343,7 +355,7 @@ class _AnnotationRenderer:
         module=ModulePath("pydantic"), qualname=(Identifier("MISSING"),)
     )
 
-    def __init__(self, view: ViewName, field: FieldName) -> None:
+    def __init__(self, view: DefinitionName, field: FieldName) -> None:
         self.view = view
         self.field = field
         self.symbols: set[Symbol] = set()
@@ -436,26 +448,32 @@ class _AnnotationRenderer:
 
 
 class _PlannedModel(pydantic.BaseModel, frozen=True):
-    """A View's model, planned even when that found problems."""
+    """A View's or Payload's model, planned even when that found problems."""
 
     plan: ModelPlan
     diagnostics: tuple[PlanDiagnostic, ...]
 
 
 class _ModelPlanner:
-    """Plans the model of one View, and one per nested resolved field."""
+    """Plans the model of one View or Payload, and one per nested resolved field."""
 
-    def __init__(self, view: ViewName, module: ModulePath) -> None:
+    def __init__(self, view: DefinitionName, module: ModulePath) -> None:
         self.view = view
         self.module = module
         self.diagnostics: list[PlanDiagnostic] = []
         self.used = _DefinitionsUsed(view, module)
 
     @staticmethod
-    def view_model(view: compiler.CompiledView, module: ModulePath) -> _PlannedModel:
-        planner = _ModelPlanner(view.name, module)
-        planner.used.use(view.source)
-        plan = planner.plan(view.names.model, view.relation)
+    def definition_model(
+        compiled: compiler.CompiledView | compiler.CompiledPayload, module: ModulePath
+    ) -> _PlannedModel:
+        planner = _ModelPlanner(compiled.name, module)
+        planner.used.use(compiled.source)
+        match compiled:
+            case compiler.CompiledView(names=names):
+                plan = planner.plan(names.model, compiled.relation)
+            case compiler.CompiledPayload(names=names):
+                plan = planner.plan(names, compiled.relation)
         return _PlannedModel(
             plan=plan,
             diagnostics=(*planner.diagnostics, *planner.used.diagnostics()),
@@ -499,9 +517,11 @@ class _ModelPlanner:
 
 
 class PythonPlan(pydantic.BaseModel, frozen=True):
-    """Every model and mapping function to generate, by module, in View order.
+    """Every model and mapping function to generate, by module: View models in
+    View order, then Payload models in Payload order.
 
-    `models` holds each View's own model; its nested models are in it.
+    `models` holds each View's and Payload's own model; its nested models are in
+    it.
     """
 
     models: Mapping[ModulePath, tuple[ModelPlan, ...]]
@@ -509,7 +529,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def of(
-        compiled: compiler.CompiledViews, layout: PythonLayout
+        compiled: compiler.CompiledCatalog, layout: PythonLayout
     ) -> Result[PythonPlan, DiagnosticsError[PlanDiagnostic]]:
         """The plan, or every diagnostic. Each diagnostic is reported once, even
         when both a model and a mapping function run into it. A type a model field
@@ -519,7 +539,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         models: dict[ModulePath, list[ModelPlan]] = {}
         functions: dict[ModulePath, list[FunctionPlan]] = {}
         for view in compiled.views:
-            model = _ModelPlanner.view_model(view, layout.models(view))
+            model = _ModelPlanner.definition_model(view, layout.models(view))
             diagnostics.update(dict.fromkeys(model.diagnostics))
             models.setdefault(model.plan.symbol.module, []).append(model.plan)
             match layout.mappings:
@@ -544,6 +564,10 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                             or diagnostic.annotation not in unimportable_fields
                         )
                     )
+        for payload in compiled.payloads:
+            model = _ModelPlanner.definition_model(payload, layout.models(payload))
+            diagnostics.update(dict.fromkeys(model.diagnostics))
+            models.setdefault(model.plan.symbol.module, []).append(model.plan)
         plan = PythonPlan(
             models={module: tuple(planned) for module, planned in models.items()},
             functions={module: tuple(planned) for module, planned in functions.items()},
@@ -554,12 +578,16 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
     def _layout_diagnostics(self) -> Iterable[PlanDiagnostic]:
         for module, models in self.models.items():
             namespace = _Namespace(Scope(module.root))
-            for model in (m for view in models for m in view.with_nested()):
+            for model in (m for own in models for m in own.with_nested()):
+                match model.view:
+                    case ViewName():
+                        definition = f"View {model.view.root}"
+                    case PayloadName():
+                        definition = f"Payload {model.view.root}"
                 namespace.define(
                     model.symbol.bound_name(),
                     AnnotationText(
-                        f"{model.symbol.describe().root} "
-                        f"(the model of View {model.view.root})"
+                        f"{model.symbol.describe().root} (the model of {definition})"
                     ),
                 )
                 for symbol in model.uses:

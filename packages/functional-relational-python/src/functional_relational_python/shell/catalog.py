@@ -16,6 +16,7 @@ from functional_relational_python.outputs.python.plan import (
 )
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import ModulePath
+from functional_relational_python.pipeline.payloads import Payload
 from functional_relational_python.pipeline.views import View
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
@@ -27,17 +28,25 @@ from functional_relational_python.support.identifier import Identifier
 
 
 class Catalog(pydantic.BaseModel, frozen=True):
-    """The Entities, the Views over them, and the module each View model goes to.
+    """The Entities, the Views over them, the Payloads, and the module each View's
+    or Payload's model goes to.
+
+    Views are read models, Payloads are write models. A View and a Payload cannot
+    share a name. `layout` receives each compiled View and Payload.
 
     >>> catalog = Catalog(
     ...     entities=[Company],
     ...     views=[View(name=ViewName("CompanySummary"), source=Company, step=...)],
-    ...     layout=lambda view: ModulePath("myapp.views"),
+    ...     payloads=[
+    ...         Payload(name=PayloadName("CompanyCreate"), source=Company, step=...)
+    ...     ],
+    ...     layout=lambda compiled: ModulePath("myapp.models"),
     ... )
     """
 
     entities: Sequence[type[pydantic.BaseModel]]
     views: Sequence[View]
+    payloads: Sequence[Payload]
     layout: ModuleLayout
 
     def generate(
@@ -48,7 +57,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
                 return Err(graph_error)
             case Ok(graph):
                 pass
-        match compiler.compile_views(graph, self.views):
+        match compiler.compile_catalog(graph, self.views, self.payloads):
             case Err(compile_error):
                 return Err(compile_error)
             case Ok(compiled):

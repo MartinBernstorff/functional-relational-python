@@ -3,9 +3,11 @@ import pytest
 from safe_result import Err, Ok
 
 from functional_relational_python.compiler import compiler
+from functional_relational_python.entity_graph.entity_graph import FieldName
 from functional_relational_python.entity_graph.id import Id
 from functional_relational_python.outputs.python.symbols import ModulePath
 from functional_relational_python.pipeline import steps
+from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.shell import commands
 from functional_relational_python.shell.catalog import (
@@ -41,20 +43,42 @@ class Company(pydantic.BaseModel):
     name: Text
 
 
-def cards_module(_view: compiler.CompiledView) -> ModulePath:
-    return ModulePath("app.cards")
+def by_kind(compiled: compiler.CompiledView | compiler.CompiledPayload) -> ModulePath:
+    match compiled:
+        case compiler.CompiledView():
+            return ModulePath("app.cards")
+        case compiler.CompiledPayload():
+            return ModulePath("app.payloads")
 
 
 catalog = Catalog(
     entities=[Company],
     views=[View(name=ViewName("CompanyCard"), source=Company, step=steps.pipeline())],
-    layout=cards_module,
+    payloads=[
+        Payload(
+            name=PayloadName("CompanyCreate"),
+            source=Company,
+            step=steps.omit(FieldName("id")),
+        )
+    ],
+    layout=by_kind,
 )
 
 invalid_catalog = catalog.model_copy(
     update={
         "views": [
             View(name=ViewName("not valid"), source=Company, step=steps.pipeline())
+        ]
+    }
+)
+
+shared_name_catalog = catalog.model_copy(
+    update={
+        "payloads": [
+            Payload(
+                name=PayloadName(view.name.root), source=Company, step=steps.pipeline()
+            )
+            for view in catalog.views
         ]
     }
 )
@@ -78,13 +102,16 @@ def test_generate_writes_files_that_check_accepts() -> None:
 
     written = commands.generate(filesystem, root).unwrap()
 
-    assert written == (root.file(ModulePath("app.cards").file_path()),)
+    assert written == (
+        root.file(ModulePath("app.cards").file_path()),
+        root.file(ModulePath("app.payloads").file_path()),
+    )
     assert commands.check(filesystem, root) == Ok(None)
 
 
 def test_check_reports_an_edited_file() -> None:
     filesystem, root = project(in_this_module(Text("catalog")))
-    (path,) = commands.generate(filesystem, root).unwrap()
+    (_, path) = commands.generate(filesystem, root).unwrap()
     filesystem.write(path, FileText(f"{filesystem.files[path].root}# edited\n"))
 
     match commands.check(filesystem, root):
@@ -104,6 +131,7 @@ def test_check_reports_an_edited_file() -> None:
         (in_this_module(Text("no_such_attribute")), CatalogAttributeMissingError),
         (in_this_module(Text("not_a_catalog")), NotACatalogError),
         (in_this_module(Text("invalid_catalog")), DiagnosticsError),
+        (in_this_module(Text("shared_name_catalog")), DiagnosticsError),
     ],
 )
 def test_generate_reports_why_it_cannot_run(

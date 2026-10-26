@@ -6,7 +6,7 @@ import pydantic
 import pytest
 from hypothesis import event, given
 from hypothesis import strategies as st
-from safe_result import Err, Ok
+from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler, diagnostics, model_names
 from functional_relational_python.entity_graph.entity_graph import (
@@ -16,7 +16,9 @@ from functional_relational_python.entity_graph.entity_graph import (
 )
 from functional_relational_python.entity_graph.id import Id, IdType
 from functional_relational_python.pipeline import ir, steps, test_ir
+from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.views import View, ViewName
+from functional_relational_python.support.diagnostic import DiagnosticsError
 
 
 class Text(pydantic.RootModel[str], frozen=True):
@@ -322,7 +324,7 @@ def test_the_rename_onto_existing_field_message_contains_the_offending_values() 
     ).describe()
 
     assert message.root == (
-        "CompanySummary: cannot rename 'secret' to 'name', because the View "
+        "CompanySummary: cannot rename 'secret' to 'name', because it "
         "already has a field 'name'."
     )
 
@@ -1549,3 +1551,78 @@ def test_lookups_name_each_looked_up_entity_once(
         {value.target for _, value in resolved_fields(view.relation)},
         key=lambda target: target.__name__,
     )
+
+
+# Payloads.
+
+
+def compile_catalog(
+    views: Sequence[View], payloads: Sequence[Payload]
+) -> Result[compiler.CompiledCatalog, DiagnosticsError[diagnostics.CompileDiagnostic]]:
+    return compiler.compile_catalog(empty_graph(), views, payloads)
+
+
+def test_a_payload_compiles_to_the_relation_its_pipeline_builds() -> None:
+    payload = Payload(
+        name=PayloadName.fake(),
+        source=Company,
+        step=steps.omit(FieldName("secret")),
+    )
+
+    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+
+    assert compiled.name == payload.name
+    assert [field.name for field in compiled.relation.fields] == names(
+        Text("name"), Text("revenue")
+    )
+
+
+def test_a_payload_step_defect_is_reported_under_the_payload_name() -> None:
+    payload = Payload(
+        name=PayloadName.fake(),
+        source=Company,
+        step=steps.omit(FieldName("missing")),
+    )
+
+    match compile_catalog([], [payload]):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            assert [d.view for d in error.diagnostics] == [payload.name]
+
+
+def test_a_name_shared_by_a_view_and_a_payload_is_one_diagnostic() -> None:
+    name = Text("Company")
+    view = View(name=ViewName(name.root), source=Company, step=steps.pipeline())
+    payload = Payload(
+        name=PayloadName(name.root), source=Company, step=steps.pipeline()
+    )
+
+    match compile_catalog([view, view], [payload]):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            assert error.diagnostics == (diagnostics.SharedModelName(view=view.name),)
+
+
+def test_an_update_payload_composes_the_create_pipeline_with_more_steps() -> None:
+    create = steps.omit(FieldName("secret"))
+    update = Payload(
+        name=PayloadName.fake(),
+        source=Company,
+        step=steps.pipeline(create, steps.omit(FieldName("revenue"))),
+    )
+
+    (compiled,) = compile_catalog([], [update]).unwrap().payloads
+
+    assert [field.name for field in compiled.relation.fields] == names(Text("name"))
+
+
+def test_views_and_payloads_of_distinct_names_compile() -> None:
+    view = View(name=ViewName.fake(), source=Company, step=steps.pipeline())
+    payload = Payload(name=PayloadName.fake(), source=Company, step=steps.pipeline())
+
+    compiled = compile_catalog([view], [payload]).unwrap()
+
+    assert [v.name for v in compiled.views] == [view.name]
+    assert [p.name for p in compiled.payloads] == [payload.name]
