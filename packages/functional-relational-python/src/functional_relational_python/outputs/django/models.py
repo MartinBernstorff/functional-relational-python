@@ -1,5 +1,8 @@
 """Renders a Django model per Entity, so a Django project can store Entities.
 
+Each model's manager `objects` is its Entity's Manager, which `queries`
+generates with a method per View over the Entity.
+
 Everything here is pure: it builds file contents and touches no filesystem, and
 it never imports Django. Migrations are the user's to make.
 """
@@ -25,6 +28,7 @@ from functional_relational_python.entity_graph.entity_graph import (
 )
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
+    LineLength,
     ModulePath,
     Symbol,
     TypeExpression,
@@ -132,17 +136,20 @@ class AppLabel(pydantic.RootModel[str], frozen=True):
 
 
 class DjangoModels(pydantic.BaseModel, frozen=True):
-    """Generate a Django model per Entity, all into `module` with `app_label`.
+    """Generate a Django model per Entity, all into `module` with `app_label`, and
+    the Django queries for Views into `queries`.
 
     `field_types` overrides the built-in rule for a type, see `FieldTypes`.
     `on_delete` sets what deleting the referenced Entity does, per Reference; a
-    Reference not in it is `PROTECT`.
+    Reference not in it is `PROTECT`. `queries` holds a QuerySet and a Manager per
+    Entity, which its model's manager is, see `DjangoQueriesRenderer`.
     """
 
     module: ModulePath
     app_label: AppLabel
     field_types: Mapping[RuntimeAnnotation, DjangoField]
     on_delete: Mapping[ReferenceKey, OnDelete]
+    queries: ModulePath
 
     @staticmethod
     def fake() -> DjangoModels:
@@ -151,6 +158,25 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
             app_label=AppLabel.fake(),
             field_types={},
             on_delete={},
+            queries=ModulePath("app.queries"),
+        )
+
+    def model_of(self, entity: type[pydantic.BaseModel]) -> Symbol:
+        """The Django model of `entity`, named like it."""
+        return Symbol(module=self.module, qualname=(Identifier(entity.__name__),))
+
+    def query_set_of(self, entity: type[pydantic.BaseModel]) -> Symbol:
+        """The QuerySet of `entity`'s Django model, e.g. `CompanyQuerySet`."""
+        return Symbol(
+            module=self.queries,
+            qualname=(Identifier(f"{entity.__name__}QuerySet"),),
+        )
+
+    def manager_of(self, entity: type[pydantic.BaseModel]) -> Symbol:
+        """The Manager of `entity`'s Django model, e.g. `CompanyManager`."""
+        return Symbol(
+            module=self.queries,
+            qualname=(Identifier(f"{entity.__name__}Manager"),),
         )
 
 
@@ -231,8 +257,8 @@ class DjangoModelNameClash(pydantic.BaseModel, Diagnostic, frozen=True):
 class InvalidDjangoFieldName(pydantic.BaseModel, Diagnostic, frozen=True):
     """An Entity field would be a Django model field with a name Django or the
     generated module cannot use: not an identifier, `pk`, `Meta`, ending in `_`,
-    containing `__`, or `models` or an imported field class, which the class body
-    would shadow.
+    containing `__`, `objects`, which is the manager, or `models` or an imported
+    field class or Manager, which the class body would shadow.
 
     A Reference `x_id` is the foreign key `x`, so `name` may differ from `field`.
     """
@@ -368,13 +394,14 @@ class _Declaration(pydantic.BaseModel, frozen=True):
         its column and ID attribute."""
         match self.role:
             case FieldRole.FOREIGN_KEY:
-                return (self.name, FieldName(f"{self.name.root}_id"))
+                return (self.name, DjangoModelsRenderer.id_attribute(self.name))
             case FieldRole.PRIMARY_KEY | FieldRole.PLAIN:
                 return (self.name,)
 
     def has_valid_name(self, imported: frozenset[Identifier]) -> bool:
         """Whether Django accepts the name, and the class body does not shadow
-        `django.db.models`, the options class `Meta` or an `imported` name."""
+        `django.db.models`, the options class `Meta`, the manager or an
+        `imported` name."""
         root = self.name.root
         return not (
             not root.isidentifier()
@@ -401,9 +428,12 @@ class _Declaration(pydantic.BaseModel, frozen=True):
 
 
 class _PlannedModel(pydantic.BaseModel, frozen=True):
+    """`manager` is the class of its manager `objects`."""
+
     entity: type[pydantic.BaseModel]
     name: Identifier
     declarations: tuple[_Declaration, ...]
+    manager: Symbol
 
 
 class DjangoModelsRenderer:
@@ -415,11 +445,12 @@ class DjangoModelsRenderer:
         "# Migrations are yours to make, e.g. with `makemigrations`.\n"
     )
     models_import: typing.ClassVar[Identifier] = Identifier("models")
+    manager: typing.ClassVar[FieldName] = FieldName("objects")
     reserved: typing.ClassVar[frozenset[FieldName]] = frozenset(
-        {FieldName("pk"), FieldName("Meta"), FieldName("models")}
+        {FieldName("pk"), FieldName("Meta"), FieldName("models"), manager}
     )
     """Names a field cannot have: Django's alias for the primary key, the
-    model's options class, and the imported `django.db.models`."""
+    model's options class, the imported `django.db.models`, and the manager."""
 
     @staticmethod
     def render(
@@ -470,13 +501,19 @@ class DjangoModelsRenderer:
                     entity=model,
                     name=Identifier(model.__name__),
                     declarations=tuple(declarations),
+                    manager=config.manager_of(model),
                 )
             )
         imports = frozenset(
-            declaration.field.field_class.imported()
-            for model in planned
-            for declaration in model.declarations
-            if not declaration.field.is_builtin()
+            {
+                *(
+                    declaration.field.field_class.imported()
+                    for model in planned
+                    for declaration in model.declarations
+                    if not declaration.field.is_builtin()
+                ),
+                *(model.manager for model in planned),
+            }
         )
         imported_names = frozenset(symbol.bound_name() for symbol in imports)
         reported.extend(
@@ -550,6 +587,28 @@ class DjangoModelsRenderer:
             )
 
     @staticmethod
+    def foreign_key_name(reference: FieldName) -> FieldName:
+        """The foreign key holding the Reference `reference`: its name without
+        `_id`, e.g. `company_id` is `company`."""
+        return FieldName(reference.root.removesuffix("_id"))
+
+    @staticmethod
+    def id_attribute(foreign_key: FieldName) -> FieldName:
+        """The attribute holding the ID a foreign key points to, e.g. `company_id`
+        for `company`. It is also the foreign key's column."""
+        return FieldName(f"{foreign_key.root}_id")
+
+    @staticmethod
+    def attribute_of(node: EntityNode, field: FieldName) -> FieldName:
+        """The Django model attribute holding the value of the Entity's `field`:
+        the ID attribute of the foreign key for a Reference, else the field."""
+        if any(reference.field == field for reference in node.references):
+            return DjangoModelsRenderer.id_attribute(
+                DjangoModelsRenderer.foreign_key_name(field)
+            )
+        return field
+
+    @staticmethod
     def _foreign_key(
         model: type[pydantic.BaseModel],
         reference: Reference,
@@ -576,7 +635,7 @@ class DjangoModelsRenderer:
             case Cardinality.ONE_TO_ONE:
                 field_class = Identifier("OneToOneField")
         return _Declaration(
-            name=FieldName(reference.field.root.removesuffix("_id")),
+            name=DjangoModelsRenderer.foreign_key_name(reference.field),
             field=DjangoField.builtin(field_class, arguments),
             positional=(ValueExpression(repr(reference.target.__name__)),),
             source=reference.field,
@@ -603,7 +662,8 @@ class DjangoModelsRenderer:
     def _name_clashes(
         planned: list[_PlannedModel], imports: frozenset[Symbol]
     ) -> Iterator[DjangoModelNameClash]:
-        """`imports` are the field classes the module imports by name."""
+        """`imports` are the field classes and Managers the module imports by
+        name."""
         bound: dict[Identifier, list[Symbol | Identifier]] = {
             DjangoModelsRenderer.models_import: [DjangoModelsRenderer.models_import]
         }
@@ -619,17 +679,22 @@ class DjangoModelsRenderer:
     def _module(
         app_label: AppLabel, planned: list[_PlannedModel], imports: frozenset[Symbol]
     ) -> FileText:
-        lines = [
-            f"from {symbol.module.root} import {symbol.bound_name().root}"
-            for symbol in sorted(
-                imports,
-                key=lambda symbol: (symbol.module.root, symbol.bound_name().root),
-            )
-        ]
-        lines.append("from django.db import models")
+        by_module: dict[ModulePath, set[Identifier]] = {}
+        for symbol in imports:
+            by_module.setdefault(symbol.module, set()).add(symbol.bound_name())
+        lines = ["from django.db import models"]
+        for module, bound in by_module.items():
+            names = sorted(name.root for name in bound)
+            line = f"from {module.root} import {', '.join(names)}"
+            if len(line) > LineLength.default().root:
+                listed = "".join(f"    {name},\n" for name in names)
+                line = f"from {module.root} import (\n{listed})"
+            lines.append(line)
         imported = "\n".join(sorted(lines))
         classes = "\n\n".join(
             f"class {model.name.root}(models.Model):\n"
+            f"    {DjangoModelsRenderer.manager.root} = "
+            f"{model.manager.bound_name().root}()\n"
             + "".join(declaration.line().root for declaration in model.declarations)
             + "\n    class Meta:\n"
             + f"        app_label = {app_label.root!r}\n"

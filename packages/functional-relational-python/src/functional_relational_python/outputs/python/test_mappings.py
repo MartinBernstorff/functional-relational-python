@@ -18,10 +18,15 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     EntityNode,
     FieldName,
+    Optionality,
 )
 from functional_relational_python.entity_graph.id import Id, OneToOne
 from functional_relational_python.outputs import engine
-from functional_relational_python.outputs.python.mappings import MappingsRenderer
+from functional_relational_python.outputs.python.mappings import (
+    Expression,
+    Indent,
+    MappingsRenderer,
+)
 from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
@@ -796,3 +801,28 @@ def test_mapping_functions_give_the_same_view_results_as_the_engine(
             )
             event(f"reversing view has rows: {reversing and bool(mapped_rows)}")
             assert mapped_rows == engine_rows
+
+
+class Written:
+    """Writes a multi-line expression, recording each indentation it was written
+    at."""
+
+    def __init__(self) -> None:
+        self.at: list[Indent] = []
+
+    def write(self, indent: Indent) -> Expression:
+        self.at.append(indent)
+        return Expression(
+            f"call(\n{indent.deeper().pad().root}x,\n{indent.pad().root})"
+        )
+
+
+@pytest.mark.parametrize("optionality", list(Optionality))
+def test_a_looked_up_value_is_written_once(optionality: Optionality) -> None:
+    written = Written()
+
+    _ = Indent(4).looked_up(
+        optionality, Expression("field="), Expression("source.field_id"), written.write
+    )
+
+    assert len(written.at) == 1

@@ -14,7 +14,7 @@ checks this).
 """
 
 import typing
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 import pydantic
 
@@ -62,6 +62,55 @@ class Indent(pydantic.RootModel[int], frozen=True):
 
     def deeper(self) -> Indent:
         return Indent(self.root + 4)
+
+    def exploded(
+        self, opening: Expression, entries: Iterable[Expression], closing: Expression
+    ) -> Expression:
+        """`opening`, then each entry on its own line one level deeper with a
+        trailing comma, then `closing` at this indentation; `opening` directly
+        followed by `closing` when there are no entries.
+
+        The trailing comma keeps ruff format from joining the lines.
+        """
+        pad = self.deeper().pad().root
+        lines = "".join(f"{pad}{entry.root},\n" for entry in entries)
+        if not lines:
+            return Expression(f"{opening.root}{closing.root}")
+        return Expression(f"{opening.root}\n{lines}{self.pad().root}{closing.root}")
+
+    def looked_up(
+        self,
+        optionality: Optionality,
+        prefix: Expression,
+        absent: Expression,
+        present: Callable[[Indent], Expression],
+    ) -> Expression:
+        """The value of an entry at this indentation that starts with `prefix`,
+        e.g. `mentor=`, holding what a lookup finds: `present` itself, or when it
+        is optional `None if <absent> else <present>`, where `absent` is the
+        condition under which it finds nothing, e.g. `source.mentor_id is None`.
+
+        The conditional stays on one line when `present` is one line and the entry
+        fits; otherwise it is split over lines like ruff format does. `present`
+        gets the indentation to write at, and is written once: a one-line
+        expression reads the same at any indentation.
+        """
+        match optionality:
+            case Optionality.REQUIRED:
+                return present(self)
+            case Optionality.OPTIONAL:
+                pass
+        inner = self.deeper()
+        written = present(inner).root
+        inline = f"None if {absent.root} else {written}"
+        line = f"{self.pad().root}{prefix.root}{inline},"
+        if "\n" not in written and len(line) <= LineLength.default().root:
+            return Expression(inline)
+        pad = inner.pad().root
+        return Expression(
+            f"(\n{pad}None\n{pad}if {absent.root}\n"
+            f"{pad}else {written}\n{self.pad().root})"
+        )
 
 
 class MappingsRenderer:
@@ -124,30 +173,31 @@ class MappingsRenderer:
         )
 
 
-class _Construction:
+class _Construction(pydantic.BaseModel, frozen=True):
     """Writes the call that builds a View model, at one indentation.
 
     The output is ruff-format stable: calls keep a trailing comma, so they stay
     exploded, and a conditional is split over lines only when it does not fit.
     """
 
-    def __init__(self, function: FunctionPlan, indent: Indent) -> None:
-        self.function = function
-        self.indent = indent
+    function: FunctionPlan
+    indent: Indent
 
     def call(self, model: ModelPlan, subject: Expression) -> Expression:
         """`model(...)`, with a keyword argument per field, computed from
         `subject`."""
-        inner = _Construction(self.function, self.indent.deeper())
-        arguments = "".join(
-            f"{inner.indent.pad().root}{field.field.name.root}={value.root},\n"
-            for field in model.fields
-            if isinstance(value := inner.value(model, field.field, subject), Expression)
+        inner = self.model_copy(update={"indent": self.indent.deeper()})
+        return self.indent.exploded(
+            Expression(f"{model.symbol.qualified().root}("),
+            (
+                Expression(f"{field.field.name.root}={value.root}")
+                for field in model.fields
+                if isinstance(
+                    value := inner.value(model, field.field, subject), Expression
+                )
+            ),
+            Expression(")"),
         )
-        name = model.symbol.qualified().root
-        if not arguments:
-            return Expression(f"{name}()")
-        return Expression(f"{name}(\n{arguments}{self.indent.pad().root})")
 
     def value(
         self, model: ModelPlan, field: ir.RelationField, subject: Expression
@@ -160,7 +210,7 @@ class _Construction:
                         return Expression(f"{subject.root}.{value.field.root}")
                     case ir.Lookup():
                         entity = self._entity(value, subject)
-                        return self._optional(field, value, subject, lambda _: entity)
+                        return self._looked_up(field, value, subject, lambda _: entity)
                     case ir.ReverseLookup():
                         parameter = self.function.parameter_of(value).root
                         key = self._key(value, subject).root
@@ -169,11 +219,11 @@ class _Construction:
                         return LeftOut()
             case ir.NestedField(value=lookup):
                 nested = model.nested_in(field)
-                return self._optional(
+                return self._looked_up(
                     field,
                     lookup,
                     subject,
-                    lambda construction: construction.call(
+                    lambda indent: self.model_copy(update={"indent": indent}).call(
                         nested, self._entity(lookup, subject)
                     ),
                 )
@@ -192,36 +242,25 @@ class _Construction:
         parameter = self.function.parameter_of(lookup)
         return Expression(f"{parameter.root}[{self._key(lookup, subject).root}]")
 
-    def _optional(
+    def _looked_up(
         self,
         field: ir.RelationField,
         lookup: ir.EntityLookup,
         subject: Expression,
-        present: Callable[[_Construction], Expression],
+        present: Callable[[Indent], Expression],
     ) -> Expression:
         """`present` itself, or `None` when an optional Reference is absent, or no
-        Entity holds a reversed one.
-
-        `present` gets the construction to write its expression at.
-        """
-        match field.optionality():
-            case Optionality.REQUIRED:
-                return present(self)
-            case Optionality.OPTIONAL:
-                pass
+        Entity holds a reversed one."""
         key = self._key(lookup, subject).root
         match lookup:
             case ir.Lookup():
-                absent = f"{key} is None"
+                absent = Expression(f"{key} is None")
             case ir.ReverseLookup():
-                absent = f"{key} not in {self.function.parameter_of(lookup).root}"
-        inline = f"None if {absent} else {present(self).root}"
-        line = f"{self.indent.pad().root}{field.name.root}={inline},"
-        if "\n" not in inline and len(line) <= LineLength.default().root:
-            return Expression(inline)
-        inner = _Construction(self.function, self.indent.deeper())
-        pad = inner.indent.pad().root
-        return Expression(
-            f"(\n{pad}None\n{pad}if {absent}\n"
-            f"{pad}else {present(inner).root}\n{self.indent.pad().root})"
+                parameter = self.function.parameter_of(lookup).root
+                absent = Expression(f"{key} not in {parameter}")
+        return self.indent.looked_up(
+            field.optionality(),
+            Expression(f"{field.name.root}="),
+            absent,
+            present,
         )

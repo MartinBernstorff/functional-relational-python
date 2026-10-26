@@ -40,4 +40,9 @@ class OneToOne:
     >>> class MetaCampaign(pydantic.BaseModel):
     ...     id: MetaCampaignId
     ...     channel_campaign_id: Annotated[ChannelCampaignId, OneToOne()]
+    ...     replaces_id: Annotated[ChannelCampaignId | None, OneToOne()]
+
+    Mark an optional Reference as `Annotated[X | None, OneToOne()]`, not
+    `Annotated[X, OneToOne()] | None`: Pydantic keeps metadata nested in a union
+    inside the annotation, so the field is not recognised as a Reference at all.
     """
