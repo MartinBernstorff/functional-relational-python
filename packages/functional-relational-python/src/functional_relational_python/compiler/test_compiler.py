@@ -1,6 +1,6 @@
 import enum
 import types
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Annotated, Literal
 
 import pydantic
@@ -2532,3 +2532,18 @@ def test_a_where_diagnostic_message_names_the_offending_values(
     diagnostic: diagnostics.CompileDiagnostic, message: str
 ) -> None:
     assert diagnostic.describe().root == message
+
+
+@pytest.mark.parametrize(
+    "combine", [conditions.and_, conditions.or_], ids=["and", "or"]
+)
+def test_an_and_or_an_or_of_one_term_is_that_term(
+    combine: Callable[[ir.Condition], ir.Condition],
+) -> None:
+    term = conditions.is_null(deal_field(FieldName("nickname")))
+
+    view = compile_deal(steps.where(combine(term)))
+
+    assert view.relation.filters == (
+        ir.FilterIsNull(field=column(FieldName("nickname"))),
+    )

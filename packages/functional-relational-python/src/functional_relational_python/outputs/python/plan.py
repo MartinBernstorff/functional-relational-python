@@ -268,7 +268,12 @@ class LookupParameter(pydantic.BaseModel, frozen=True):
 
 class FunctionPlan(pydantic.BaseModel, frozen=True):
     """One mapping function to generate: from one instance of the View's Source,
-    and an ID mapping per Entity it looks up, to the View's model."""
+    and an ID mapping per Entity it looks up, to the View's model, or to `None`
+    for a row the View's Filters exclude.
+
+    `literals` has the Symbol of every class the Filters' literals are instances
+    of, e.g. an enum or a RootModel.
+    """
 
     source_parameter: typing.ClassVar[Identifier] = Identifier("source")
     mapping: typing.ClassVar[ModulePath] = ModulePath("collections.abc")
@@ -278,6 +283,8 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
     source: Symbol
     model: ModelPlan
     lookups: tuple[LookupParameter, ...]
+    filters: tuple[ir.Filter, ...]
+    literals: Mapping[type, Symbol]
 
     @staticmethod
     def of(
@@ -288,9 +295,17 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
         used = _DefinitionsUsed(view.name, module)
         symbols: dict[type, Symbol] = {}
         diagnostics: list[PlanDiagnostic] = []
+        literal_types = tuple(
+            dict.fromkeys(
+                literal_type
+                for kept in view.relation.filters
+                for literal_type in FunctionPlan._literal_types(kept)
+            )
+        )
         for named in (
             view.source,
             *(t for lookup in lookups for t in (lookup.target, lookup.id_type)),
+            *literal_types,
         ):
             used.use(named)
             match Symbol.of(named):
@@ -323,8 +338,47 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
                     )
                     for lookup in lookups
                 ),
+                filters=view.relation.filters,
+                literals={
+                    literal_type: symbols[literal_type]
+                    for literal_type in literal_types
+                },
             ),
         )
+
+    @staticmethod
+    def _literal_types(kept: ir.Filter) -> tuple[type, ...]:
+        """The class of every enum member and RootModel among `kept`'s literals."""
+        match kept:
+            case ir.FilterComparison(operand=operand):
+                return FunctionPlan._classes_of(operand)
+            case ir.FilterIsNull():
+                return ()
+            case ir.FilterAnd(terms=terms) | ir.FilterOr(terms=terms):
+                return tuple(
+                    literal_type
+                    for term in terms
+                    for literal_type in FunctionPlan._literal_types(term)
+                )
+            case ir.FilterNot(term=term):
+                return FunctionPlan._literal_types(term)
+
+    @staticmethod
+    def _classes_of(operand: ir.SourceField | ir.FilterLiteral) -> tuple[type, ...]:
+        match operand:
+            case ir.SourceField() | ir.ScalarLiteral():
+                return ()
+            case ir.EnumLiteral(member=member):
+                return (type(member),)
+            case ir.RootModelLiteral(instance=instance, root=root):
+                return (type(instance), *FunctionPlan._classes_of(root))
+
+    def literal_symbol(self, literal_type: type) -> Symbol:
+        """The Symbol of a class one of the Filters' literals is an instance of.
+
+        The plan has one for every such class.
+        """
+        return self.literals[literal_type]
 
     def parameter_of(self, lookup: ir.Lookup) -> Identifier:
         """The parameter holding the Entities `lookup` finds.
@@ -347,6 +401,7 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
                 *(parameter.target.module for parameter in self.lookups),
                 *(parameter.id_type.module for parameter in self.lookups),
                 *((FunctionPlan.mapping,) if self.lookups else ()),
+                *(symbol.module for symbol in self.literals.values()),
             }
         )
 

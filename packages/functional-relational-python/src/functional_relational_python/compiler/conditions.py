@@ -56,10 +56,14 @@ class ConditionChecker:
                         return defective
             case ir.And(terms=terms):
                 return self._combined(
-                    terms, lambda checked: ir.FilterAnd(terms=checked)
+                    terms,
+                    lambda checked: ConditionChecker._joined(checked, ir.FilterAnd),
                 )
             case ir.Or(terms=terms):
-                return self._combined(terms, lambda checked: ir.FilterOr(terms=checked))
+                return self._combined(
+                    terms,
+                    lambda checked: ConditionChecker._joined(checked, ir.FilterOr),
+                )
             case ir.Not(term=term):
                 return self._combined(
                     (term,), lambda checked: ir.FilterNot(term=checked[0])
@@ -77,6 +81,18 @@ class ConditionChecker:
         if len(filters) < len(checked):
             return Defective()
         return combine(filters)
+
+    @staticmethod
+    def _joined(
+        checked: tuple[ir.Filter, ...],
+        connective: type[ir.FilterAnd] | type[ir.FilterOr],
+    ) -> ir.Filter:
+        """The terms joined by `connective`, or the only term."""
+        match checked:
+            case (only,):
+                return only
+            case _:
+                return connective(terms=checked)
 
     def _column(self, reference: ir.FieldRef) -> _Column | Defective:
         """The field `reference` names, if its value is the subject's own field."""

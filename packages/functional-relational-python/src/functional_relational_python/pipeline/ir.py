@@ -359,11 +359,15 @@ class FilterIsNull(pydantic.BaseModel, frozen=True):
 
 
 class FilterAnd(pydantic.BaseModel, frozen=True):
-    terms: Annotated[tuple[Filter, ...], pydantic.Field(min_length=1)]
+    """At least two terms: an `and` of one term is checked into that term."""
+
+    terms: Annotated[tuple[Filter, ...], pydantic.Field(min_length=2)]
 
 
 class FilterOr(pydantic.BaseModel, frozen=True):
-    terms: Annotated[tuple[Filter, ...], pydantic.Field(min_length=1)]
+    """At least two terms: an `or` of one term is checked into that term."""
+
+    terms: Annotated[tuple[Filter, ...], pydantic.Field(min_length=2)]
 
 
 class FilterNot(pydantic.BaseModel, frozen=True):
