@@ -16,11 +16,14 @@ class Payload(pydantic.BaseModel, frozen=True):
     A sibling of View: a name, a Source and a pipeline of the same steps. A Payload
     generates only its model, no mapping function. An update payload is built by
     composing steps, e.g. the create pipeline followed by more steps.
+
+    `base` is the class its generated model subclasses, as for a View.
     """
 
     name: PayloadName
     source: type[pydantic.BaseModel]
     step: steps.Step
+    base: type[pydantic.BaseModel] = pydantic.BaseModel
 
 
 type DefinitionName = ViewName | PayloadName

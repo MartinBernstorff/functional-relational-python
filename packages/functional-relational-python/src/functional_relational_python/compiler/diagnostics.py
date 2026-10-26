@@ -3,6 +3,7 @@ import pydantic
 from functional_relational_python.compiler import model_names
 from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
+    RuntimeAnnotation,
 )
 from functional_relational_python.entity_graph.id import IdType
 from functional_relational_python.pipeline import ir
@@ -105,6 +106,40 @@ class SharedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class BaseFieldTypeMismatch(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A kept field's type differs from the type the definition's base declares
+    for it, so the generated model could not inherit it."""
+
+    view: DefinitionName
+    base: type[pydantic.BaseModel]
+    field: FieldName
+    declared: RuntimeAnnotation
+    kept: RuntimeAnnotation
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: the base {self.base.__qualname__} declares "
+            f"'{self.field.root}' as {self.declared!r}, but the kept field is "
+            f"{self.kept!r}."
+        )
+
+
+class BaseFieldIsNestedModel(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A kept field the definition's base declares is a resolved field typed by a
+    nested generated model, which the base cannot declare."""
+
+    view: DefinitionName
+    base: type[pydantic.BaseModel]
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: the base {self.base.__qualname__} declares "
+            f"'{self.field.root}', but the kept field is typed by a nested "
+            "generated model."
+        )
+
+
 type CompileDiagnostic = (
     UnknownField
     | RenameOntoExistingField
@@ -115,4 +150,6 @@ type CompileDiagnostic = (
     | UnresolvableReference
     | ResolvedNameCollision
     | SharedModelName
+    | BaseFieldTypeMismatch
+    | BaseFieldIsNestedModel
 )

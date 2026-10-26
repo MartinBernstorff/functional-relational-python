@@ -11,6 +11,7 @@ from functional_relational_python.outputs.python.plan import ModelPlan, PythonPl
 from functional_relational_python.outputs.python.symbols import (
     LineLength,
     ModulePath,
+    TypeExpression,
 )
 from functional_relational_python.support.filesystem import FileText
 from functional_relational_python.support.generated_files import (
@@ -70,13 +71,13 @@ class ModelsRenderer:
             sections.append(lines)
         imports = "\n\n".join("\n".join(lines) for lines in sections)
 
-        base = ModelPlan.base.reference().root
         classes = "\n\n".join(
-            f"class {model.symbol.bound_name().root}({base}, frozen=True):\n"
+            f"class {model.symbol.bound_name().root}({model.base.root}, frozen=True):\n"
             + (
                 "".join(
                     f"    {field.field.name.root}: {field.type.root}\n"
                     for field in model.fields
+                    if isinstance(field.type, TypeExpression)
                 )
                 or "    pass\n"
             )

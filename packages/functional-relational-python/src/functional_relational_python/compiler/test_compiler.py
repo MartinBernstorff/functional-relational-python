@@ -1462,3 +1462,105 @@ def test_views_and_payloads_of_distinct_names_compile() -> None:
 
     assert [v.name for v in compiled.views] == [view.name]
     assert [p.name for p in compiled.payloads] == [payload.name]
+
+
+# Base classes.
+
+
+class NamedBase(pydantic.BaseModel):
+    name: Text
+
+
+class Keyed[T](pydantic.BaseModel):
+    name: T
+
+
+class DepartmentNamedBase(pydantic.BaseModel):
+    name: DepartmentId
+
+
+@pytest.mark.parametrize("base", [NamedBase, Keyed[Text]])
+def test_a_kept_field_the_base_declares_with_the_same_type_compiles(
+    base: type[pydantic.BaseModel],
+) -> None:
+    payload = Payload(
+        name=PayloadName.fake(), source=Company, step=steps.pipeline(), base=base
+    )
+
+    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+
+    assert compiled.base is base
+
+
+@pytest.mark.parametrize("base", [DepartmentNamedBase, Keyed[DepartmentId]])
+def test_a_kept_field_the_base_declares_with_another_type_is_a_diagnostic(
+    base: type[pydantic.BaseModel],
+) -> None:
+    view = View(name=ViewName.fake(), source=Company, step=steps.pipeline(), base=base)
+
+    match compile_catalog([view], []):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            assert error.diagnostics == (
+                diagnostics.BaseFieldTypeMismatch(
+                    view=view.name,
+                    base=base,
+                    field=FieldName("name"),
+                    declared=DepartmentId,
+                    kept=Text,
+                ),
+            )
+
+
+def test_a_field_the_base_declares_is_not_checked_once_omitted() -> None:
+    payload = Payload(
+        name=PayloadName.fake(),
+        source=Company,
+        step=steps.omit(FieldName("name")),
+        base=DepartmentNamedBase,
+    )
+
+    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+
+    assert compiled.base is DepartmentNamedBase
+
+
+def test_the_base_field_type_mismatch_message_contains_the_offending_values() -> None:
+    message = diagnostics.BaseFieldTypeMismatch(
+        view=ViewName.fake(),
+        base=Keyed[DepartmentId],
+        field=FieldName("name"),
+        declared=DepartmentId,
+        kept=Text,
+    ).describe()
+
+    assert all(
+        part in message.root
+        for part in (ViewName.fake().root, "Keyed[", "'name'", "DepartmentId", "Text")
+    )
+
+
+class DepartmentBase(pydantic.BaseModel):
+    department: Department
+
+
+def test_a_nested_field_the_base_declares_is_a_diagnostic() -> None:
+    view = View(
+        name=ViewName.fake(),
+        source=Employee,
+        step=steps.resolve(
+            named(FieldName("department_id")), steps.project([FieldName("name")])
+        ),
+        base=DepartmentBase,
+    )
+
+    match compiler.compile_views(hr_graph(), [view]):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            assert error.diagnostics == (
+                diagnostics.BaseFieldIsNestedModel(
+                    view=view.name, base=DepartmentBase, field=FieldName("department")
+                ),
+            )
