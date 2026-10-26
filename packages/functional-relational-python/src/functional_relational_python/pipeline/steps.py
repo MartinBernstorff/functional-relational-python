@@ -149,6 +149,19 @@ def project(fields: Iterable[ir.FieldName]) -> Step:
     return step
 
 
+def where(condition: ir.Condition) -> Step:
+    """Keeps only the Source rows for which `condition` is true; see `conditions`.
+
+    Each kept row still gives one View result. Only a View's own pipeline may
+    filter, not a nested `resolve` pipeline or a Payload.
+    """
+
+    def step(node: ir.Node) -> ir.Node:
+        return ir.Where(input=node, condition=condition)
+
+    return step
+
+
 def select(predicate: ir.FieldPredicate) -> ir.Select:
     """The fields `predicate` accepts, for a step that acts on several fields."""
     return ir.Select(predicate=predicate)

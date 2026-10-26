@@ -8,6 +8,7 @@ and the Value that computes it. Backends run the Relation, not the node tree.
 import copy
 import enum
 from collections.abc import Callable, Collection, Mapping
+from typing import Annotated
 
 import pydantic
 from pydantic.fields import FieldInfo
@@ -185,6 +186,89 @@ class Add(pydantic.BaseModel, frozen=True):
     default: UncheckedDefault | NoDefault
 
 
+class FieldRef(pydantic.BaseModel, frozen=True):
+    """A Condition's reference to a top-level field, by its name at that point in
+    the pipeline."""
+
+    name: FieldName
+
+
+type UncheckedLiteral = object
+"""A value a Condition compares with, before the compiler checks it."""
+
+
+class ConditionLiteral(pydantic.BaseModel, frozen=True):
+    """A value a Condition compares a field with, e.g. `Text("Acme")`.
+
+    `value` is unchecked: the compiler checks that it is an instance of the
+    field's type, and a literal generated code can write out.
+    """
+
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
+    value: UncheckedLiteral
+
+
+class ComparisonOperator(enum.StrEnum):
+    EQ = "=="
+    NE = "!="
+    LT = "<"
+    LE = "<="
+    GT = ">"
+    GE = ">="
+
+    def is_ordering(self) -> bool:
+        """Whether the operator orders its operands, rather than equating them."""
+        match self:
+            case ComparisonOperator.EQ | ComparisonOperator.NE:
+                return False
+            case (
+                ComparisonOperator.LT
+                | ComparisonOperator.LE
+                | ComparisonOperator.GT
+                | ComparisonOperator.GE
+            ):
+                return True
+
+
+class Comparison(pydantic.BaseModel, frozen=True):
+    """`field <operator> operand`, with Python's two-valued null semantics."""
+
+    operator: ComparisonOperator
+    field: FieldRef
+    operand: FieldRef | ConditionLiteral
+
+
+class IsNull(pydantic.BaseModel, frozen=True):
+    field: FieldRef
+
+
+class And(pydantic.BaseModel, frozen=True):
+    terms: Annotated[tuple[Condition, ...], pydantic.Field(min_length=1)]
+
+
+class Or(pydantic.BaseModel, frozen=True):
+    terms: Annotated[tuple[Condition, ...], pydantic.Field(min_length=1)]
+
+
+class Not(pydantic.BaseModel, frozen=True):
+    term: Condition
+
+
+type Condition = Comparison | IsNull | And | Or | Not
+"""What `where` keeps a row by, before the compiler checks it."""
+
+
+class Where(pydantic.BaseModel, frozen=True):
+    """Keeps only the rows for which `condition` is true.
+
+    Only a View's own pipeline may filter, not a nested one or a Payload's.
+    """
+
+    input: Node
+    condition: Condition
+
+
 type Node = (
     FromSource
     | Omit
@@ -196,6 +280,7 @@ type Node = (
     | Flatten
     | Default
     | Add
+    | Where
 )
 
 
@@ -286,6 +371,79 @@ type Value = SubjectValue | Added
 """How a field of a View result is computed from the subject."""
 
 
+type LiteralValue = object
+"""The value a Filter's literal stands for, e.g. `Text("Acme")`."""
+
+type RootModelInstance = Annotated[pydantic.RootModel[object], pydantic.SkipValidation]
+"""An instance of any RootModel. Pydantic would check against `RootModel[object]`,
+which no RootModel subclasses, and convert the instance, so skip it."""
+
+
+class ScalarLiteral(pydantic.RootModel[bool | int | float | str], frozen=True):
+    """A Filter's literal written as its `repr`: a boolean, a finite number or a
+    string."""
+
+    def value(self) -> LiteralValue:
+        return self.root
+
+
+class EnumLiteral(pydantic.BaseModel, frozen=True):
+    member: enum.Enum
+
+    def value(self) -> LiteralValue:
+        return self.member
+
+
+class RootModelLiteral(pydantic.BaseModel, frozen=True):
+    """A RootModel instance, e.g. `Text("Acme")`, written as its class called with
+    its root."""
+
+    instance: RootModelInstance
+    root: FilterLiteral
+
+    def value(self) -> LiteralValue:
+        return self.instance
+
+
+type FilterLiteral = ScalarLiteral | EnumLiteral | RootModelLiteral
+"""A value a Filter compares with, as generated code can write it out. Never
+`None`: a comparison with `None` is checked into a FilterIsNull."""
+
+
+class FilterComparison(pydantic.BaseModel, frozen=True):
+    """`field <operator> operand`, over the subject's own fields."""
+
+    operator: ComparisonOperator
+    field: SourceField
+    operand: SourceField | FilterLiteral
+
+
+class FilterIsNull(pydantic.BaseModel, frozen=True):
+    field: SourceField
+
+
+class FilterAnd(pydantic.BaseModel, frozen=True):
+    """At least two terms: an `and` of one term is checked into that term."""
+
+    terms: Annotated[tuple[Filter, ...], pydantic.Field(min_length=2)]
+
+
+class FilterOr(pydantic.BaseModel, frozen=True):
+    """At least two terms: an `or` of one term is checked into that term."""
+
+    terms: Annotated[tuple[Filter, ...], pydantic.Field(min_length=2)]
+
+
+class FilterNot(pydantic.BaseModel, frozen=True):
+    term: Filter
+
+
+type Filter = FilterComparison | FilterIsNull | FilterAnd | FilterOr | FilterNot
+"""A checked Condition: its fields are the subject's own fields, whatever names
+the pipeline gave them, and its literals have the types of the fields they are
+compared with."""
+
+
 class Field(pydantic.BaseModel, frozen=True):
     """A field typed by `info.annotation`: a Source's own type, or an Entity."""
 
@@ -347,10 +505,16 @@ type FieldPredicate = Callable[[RelationField], bool]
 
 
 class Relation(pydantic.BaseModel, frozen=True):
-    """The checked shape of a node: the Source it starts from, and its fields."""
+    """The checked shape of a node: the Source it starts from, its fields, and the
+    Filters a row must pass to be a View result.
+
+    A row is kept when every Filter in `filters` is true. Only a View's own
+    Relation has Filters, not a nested one or a Payload's.
+    """
 
     source: SourceName
     fields: tuple[RelationField, ...]
+    filters: tuple[Filter, ...]
 
     @staticmethod
     def of(node: FromSource) -> Relation:
@@ -365,6 +529,7 @@ class Relation(pydantic.BaseModel, frozen=True):
                 )
                 for name, info in node.source.model_fields.items()
             ),
+            filters=(),
         )
 
     def field_names(self) -> tuple[FieldName, ...]:
@@ -398,11 +563,24 @@ class Relation(pydantic.BaseModel, frozen=True):
         """The names of the fields `fields` selects, in field order."""
         return tuple(field.name for field in self.fields if fields.predicate(field))
 
+    def with_fields(self, fields: tuple[RelationField, ...]) -> Relation:
+        """This relation with `fields` instead of its own, keeping its Filters."""
+        return Relation(source=self.source, fields=fields, filters=self.filters)
+
+    def filtered(self, kept: Filter) -> Relation:
+        """Also keeps only the rows for which `kept` is true."""
+        return Relation(
+            source=self.source, fields=self.fields, filters=(*self.filters, kept)
+        )
+
+    def unfiltered(self) -> Relation:
+        """This relation without its Filters, keeping every row."""
+        return Relation(source=self.source, fields=self.fields, filters=())
+
     def renamed(self, names: Mapping[FieldName, FieldName]) -> Relation:
         """Renames each key of `names` to its value in place, keeping its type."""
-        return Relation(
-            source=self.source,
-            fields=tuple(
+        return self.with_fields(
+            tuple(
                 field.model_copy(update={"name": names[field.name]})
                 if field.name in names
                 else field
@@ -414,9 +592,8 @@ class Relation(pydantic.BaseModel, frozen=True):
         self, name: FieldName, info: FieldInfo, default: DefaultValue | NoDefault
     ) -> Relation:
         """Appends a field `add` declared, named `name` and typed by `info`."""
-        return Relation(
-            source=self.source,
-            fields=(
+        return self.with_fields(
+            (
                 *self.fields,
                 Field(
                     name=name,
@@ -431,9 +608,8 @@ class Relation(pydantic.BaseModel, frozen=True):
         self, names: Collection[FieldName], default: DefaultValue
     ) -> Relation:
         """Gives each field in `names` the default `default`, replacing any other."""
-        return Relation(
-            source=self.source,
-            fields=tuple(
+        return self.with_fields(
+            tuple(
                 field.model_copy(update={"default": default})
                 if field.name in names
                 else field
@@ -442,13 +618,11 @@ class Relation(pydantic.BaseModel, frozen=True):
         )
 
     def without(self, names: Collection[FieldName]) -> Relation:
-        return Relation(
-            source=self.source,
-            fields=tuple(field for field in self.fields if field.name not in names),
+        return self.with_fields(
+            tuple(field for field in self.fields if field.name not in names),
         )
 
     def keeping(self, names: Collection[FieldName]) -> Relation:
-        return Relation(
-            source=self.source,
-            fields=tuple(field for field in self.fields if field.name in names),
+        return self.with_fields(
+            tuple(field for field in self.fields if field.name in names),
         )

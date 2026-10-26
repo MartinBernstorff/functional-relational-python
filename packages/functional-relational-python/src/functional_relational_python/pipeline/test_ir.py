@@ -128,7 +128,7 @@ def test_a_nested_field_is_as_optional_as_its_lookup() -> None:
     field = ir.NestedField(
         name=FieldName("mentor"),
         value=lookup(FieldName("mentor_id"), Employee, Optionality.OPTIONAL),
-        relation=ir.Relation(source=ir.SourceName("Employee"), fields=()),
+        relation=ir.Relation(source=ir.SourceName("Employee"), fields=(), filters=()),
         default=ir.NoDefault(),
     )
 
@@ -159,15 +159,18 @@ def test_lookups_are_one_per_entity_nested_included_in_first_use_order() -> None
                                         FieldName("company"), company, ir.NoDefault()
                                     ),
                                 ),
+                                filters=(),
                             ),
                             default=ir.NoDefault(),
                         ),
                     ),
+                    filters=(),
                 ),
                 default=ir.NoDefault(),
             ),
             ir.Field.looked_up(FieldName("department"), department, ir.NoDefault()),
         ),
+        filters=(),
     )
 
     assert relation.lookups() == (mentor, department, company)
@@ -190,6 +193,7 @@ def test_a_lifted_field_looks_up_each_entity_on_its_way_outermost_first() -> Non
                 default=ir.NoDefault(),
             ),
         ),
+        filters=(),
     )
 
     assert relation.lookups() == (mentor, department, company)

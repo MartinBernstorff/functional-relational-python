@@ -5,8 +5,6 @@ recovers with the best relation it can build, so later steps and other Views and
 Payloads are still checked and independent defects are all reported, once each.
 """
 
-import enum
-import math
 from collections.abc import Iterable
 from typing import Annotated
 
@@ -14,7 +12,11 @@ import pydantic
 from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.compiler import diagnostics
+from functional_relational_python.compiler import (
+    condition_checker,
+    diagnostics,
+    literals,
+)
 from functional_relational_python.compiler.model_names import (
     ModelNames,
     ViewModelNames,
@@ -163,7 +165,9 @@ def _check_relation(
     against its base, before its model names are checked."""
     name = definition.name
     match _check_node(
-        entity_graph, name, definition.step(ir.FromSource(source=definition.source))
+        entity_graph,
+        name,
+        definition.step(ir.FromSource(source=definition.source)),
     ):
         case ir.Relation() as relation:
             reported = _check_base(name, definition.base, relation)
@@ -241,9 +245,15 @@ def _check_payload(
 ) -> CompiledPayload | PoisonedPayload:
     match _check_relation(entity_graph, payload):
         case ir.Relation() as relation:
+            reported = ()
+        case Poisoned(recovered=relation, diagnostics=reported):
             pass
-        case Poisoned(diagnostics=reported):
-            return PoisonedPayload(name=payload.name, diagnostics=reported)
+    # One per `where`: a Payload is a write model, with no rows to filter.
+    misplaced = tuple(
+        diagnostics.WhereInPayload(view=payload.name) for _ in relation.filters
+    )
+    if reported or misplaced:
+        return PoisonedPayload(name=payload.name, diagnostics=(*reported, *misplaced))
     match ModelNames.check(payload.name, relation):
         case Ok(names):
             return CompiledPayload(
@@ -273,6 +283,7 @@ def _check_node(
             | ir.Flatten()
             | ir.Default()
             | ir.Add()
+            | ir.Where()
         ):
             match _check_node(entity_graph, view, node.input):
                 case ir.Relation() as relation:
@@ -294,7 +305,8 @@ def _check_step(
     | ir.Resolve
     | ir.Flatten
     | ir.Default
-    | ir.Add,
+    | ir.Add
+    | ir.Where,
     relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
     """Checks one step against the relation its input has."""
@@ -318,6 +330,8 @@ def _check_step(
             checked = _check_default(view, node, relation)
         case ir.Add():
             checked = _check_add(view, node, relation)
+        case ir.Where():
+            checked = _check_where(view, node, relation)
     return checked
 
 
@@ -383,9 +397,8 @@ def _recovered_rename(node: ir.Rename, relation: ir.Relation) -> ir.Relation:
         return relation.without((node.field,))
     if node.field in names:
         return relation.renamed({node.field: node.new})
-    return ir.Relation(
-        source=relation.source,
-        fields=(
+    return relation.with_fields(
+        (
             *relation.fields,
             ir.Field(
                 name=node.new,
@@ -393,7 +406,7 @@ def _recovered_rename(node: ir.Rename, relation: ir.Relation) -> ir.Relation:
                 value=ir.SourceField(field=node.field),
                 default=ir.NoDefault(),
             ),
-        ),
+        )
     )
 
 
@@ -477,7 +490,7 @@ def _check_retype(
                     )
                 )
                 fields.append(field)
-    checked = ir.Relation(source=relation.source, fields=tuple(fields))
+    checked = relation.with_fields(tuple(fields))
     if not reported:
         return checked
     return Poisoned(recovered=checked, diagnostics=tuple(reported))
@@ -575,37 +588,50 @@ def _check_add(
     return Poisoned(recovered=added, diagnostics=tuple(reported))
 
 
+def _check_where(
+    view: DefinitionName, node: ir.Where, relation: ir.Relation
+) -> ir.Relation | Poisoned:
+    """Adds the checked Condition to the relation's Filters.
+
+    A defective Condition leaves the relation unchanged, so that is an exact
+    recovery: later steps never depend on a Filter. Where a Filter is not allowed,
+    in a nested pipeline or a Payload, is reported once the pipeline is checked.
+    """
+    match condition_checker.ConditionChecker(view=view, relation=relation).check(
+        node.condition
+    ):
+        case condition_checker.Defects(diagnostics=reported):
+            return Poisoned(recovered=relation, diagnostics=reported)
+        case checked:
+            return relation.filtered(checked)
+
+
 def _default_value(
     view: DefinitionName, value: ir.UncheckedDefault
 ) -> ir.DefaultValue | diagnostics.NonLiteralDefault:
-    """`value` as a literal default, if it is one.
-
-    Only the exact built-in types count, so a subclass that might `repr` as
-    something else is not a literal. Neither is a float without a literal, such as
-    `nan`.
+    """`value` as a literal default, if it is one: `None`, `MISSING`, an empty
+    list or dict, or a scalar or enum member as `literals.classify_scalar` has it.
     """
-    default: ir.DefaultValue
+    default: ir.DefaultValue | diagnostics.NonLiteralDefault
     match value:
         case pydantic.MISSING:
             default = ir.MissingDefault()
-        case enum.Enum() if type(value).__members__.get(value.name) is value:
-            # A combination of Flag members, or an empty Flag, has no name to
-            # write out.
-            default = ir.EnumDefault(member=value)
         case None:
             default = ir.ScalarDefault(None)
-        case bool() | int() | str() if type(value) in (bool, int, str):
-            default = ir.ScalarDefault(value)
-        case float() if type(value) is float and math.isfinite(value):
-            default = ir.ScalarDefault(value)
         case list() if type(value) is list and not value:
             default = ir.EmptyListDefault()
         case dict() if type(value) is dict and not value:
             default = ir.EmptyDictDefault()
         case _:
-            return diagnostics.NonLiteralDefault(
-                view=view, value=diagnostics.DefaultText.of(value)
-            )
+            match literals.classify_scalar(value):
+                case ir.ScalarLiteral(root=scalar):
+                    default = ir.ScalarDefault(scalar)
+                case ir.EnumLiteral(member=member):
+                    default = ir.EnumDefault(member=member)
+                case literals.NotALiteral():
+                    default = diagnostics.NonLiteralDefault(
+                        view=view, value=diagnostics.DefaultText.of(value)
+                    )
     return default
 
 
@@ -639,9 +665,7 @@ def _check_resolve(
         else _CheckedField(field=field, diagnostics=())
         for field in relation.fields
     )
-    resolved = ir.Relation(
-        source=relation.source, fields=tuple(check.field for check in checked)
-    )
+    resolved = relation.with_fields(tuple(check.field for check in checked))
     reported = tuple(d for check in checked for d in check.diagnostics)
     if not reported:
         return resolved
@@ -747,19 +771,20 @@ def _resolved(
         )
     match _check_node(entity_graph, view, nested):
         case ir.Relation() as relation:
-            return _CheckedField(
-                field=ir.NestedField(
-                    name=name, value=lookup, relation=relation, default=default
-                ),
-                diagnostics=(),
-            )
-        case Poisoned(recovered=recovered, diagnostics=reported):
-            return _CheckedField(
-                field=ir.NestedField(
-                    name=name, value=lookup, relation=recovered, default=default
-                ),
-                diagnostics=reported,
-            )
+            reported = ()
+        case Poisoned(recovered=relation, diagnostics=reported):
+            pass
+    # One per `where`: each looked-up Entity is one field, with no rows to filter.
+    misplaced = tuple(
+        diagnostics.WhereInNestedPipeline(view=view, source=relation.source)
+        for _ in relation.filters
+    )
+    return _CheckedField(
+        field=ir.NestedField(
+            name=name, value=lookup, relation=relation.unfiltered(), default=default
+        ),
+        diagnostics=(*reported, *misplaced),
+    )
 
 
 class _HeldEntity(pydantic.BaseModel, frozen=True):
@@ -867,7 +892,7 @@ def _check_flatten(
                 case ir.Field():
                     taken.add(inner.name)
                     fields.append(entity.lifted(inner))
-    flattened = ir.Relation(source=relation.source, fields=tuple(fields))
+    flattened = relation.with_fields(tuple(fields))
     if not reported:
         return flattened
     return Poisoned(recovered=flattened, diagnostics=tuple(reported))
