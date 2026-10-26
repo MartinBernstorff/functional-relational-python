@@ -1682,7 +1682,7 @@ def test_resolve_accepts_exactly_the_fields_references_selects(
         resolved = compile_step(
             steps.pipeline(case.step, steps.resolve(named(field.name)))
         )
-        is_reference = steps.references().selects(field, IdBase.fake())
+        is_reference = steps.references().selects(field, case.models.graph())
         event(f"is_reference: {is_reference}")
         assert is_reference == (resolved is not None)
 

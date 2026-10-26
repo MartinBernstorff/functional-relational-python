@@ -367,3 +367,26 @@ def test_a_model_keyed_by_an_id_of_another_base_is_not_an_entity() -> None:
                 entity_graph.NotAnEntity(model=Department, id_base=IdBase(AppId)),
             )
             assert "AppId" in str(error)
+
+
+def test_the_id_base_itself_is_not_an_id_type() -> None:
+    class KeyedByTheBase(BaseModel):
+        id: AppId
+
+    match entity_graph.EntityGraph.build([KeyedByTheBase], IdBase(AppId)):
+        case Ok(graph):
+            pytest.fail(f"Expected diagnostics, got {graph}")
+        case Err(error):
+            assert error.diagnostics == (
+                entity_graph.NotAnEntity(model=KeyedByTheBase, id_base=IdBase(AppId)),
+            )
+
+
+@pytest.mark.parametrize(
+    "base",
+    [RootModel, BaseModel, Team, Name("name")],
+    ids=["RootModel itself", "not a RootModel", "a model", "not a class"],
+)
+def test_an_id_base_is_a_strict_subclass_of_root_model(base: object) -> None:
+    with pytest.raises(ValueError, match="strict subclass of RootModel"):
+        _ = IdBase.model_validate(base)

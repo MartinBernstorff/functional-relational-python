@@ -11,15 +11,17 @@ from collections.abc import Callable, Collection, Mapping
 
 import pydantic
 from pydantic.fields import FieldInfo
-from safe_result import Ok
+from safe_result import Err, Ok
 
 from functional_relational_python.entity_graph.entity_graph import (
+    EntityGraph,
     FieldName,
-    IdAnnotation,
+    NoEntityError,
+    NotAReferenceError,
     Optionality,
     RuntimeAnnotation,
 )
-from functional_relational_python.entity_graph.id import IdBase, IdType
+from functional_relational_python.entity_graph.id import IdType
 
 
 class SourceName(pydantic.RootModel[str], frozen=True):
@@ -102,18 +104,26 @@ class References(pydantic.BaseModel, frozen=True):
     Select, the compiler decides what this selects.
     """
 
-    def selects(self, field: RelationField, id_base: IdBase) -> bool:
-        """Whether `field` is a Reference: typed `X` or `X | None` for an ID `X`.
+    def selects(self, field: RelationField, entity_graph: EntityGraph) -> bool:
+        """Whether `field` is a Reference, as `EntityGraph.reference_of` decides.
 
-        The primary key is not a Reference, under whatever name it has been renamed
-        to. It is told apart by where its value comes from, the subject's primary
-        key.
+        A Reference to an ID type keying no Entity is selected, so that resolving
+        it reports why it cannot be resolved.
         """
         match field:
             case Field(info=info, value=SourceField(field=source)):
-                annotation = IdAnnotation.of_reference(source, info, id_base)
-                return isinstance(annotation, Ok)
+                pass
             case Field() | NestedField():
+                return False
+        match entity_graph.reference_of(source, info):
+            case Ok():
+                return True
+            case Err(error):
+                pass
+        match error:
+            case NoEntityError():
+                return True
+            case NotAReferenceError():
                 return False
 
 

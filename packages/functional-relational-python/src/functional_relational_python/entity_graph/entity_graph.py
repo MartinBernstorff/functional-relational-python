@@ -160,7 +160,6 @@ class NotAnIdAnnotationError(Exception):
 
     def __init__(self, info: FieldInfo, id_base: IdBase) -> None:
         self.info = info
-        self.id_base = id_base
         super().__init__(
             f"{info.annotation!r} is not a subclass of "
             f"{id_base.root.__qualname__}, optional or not"

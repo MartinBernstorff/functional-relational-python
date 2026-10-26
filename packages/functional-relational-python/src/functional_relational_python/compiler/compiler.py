@@ -626,7 +626,7 @@ def _check_resolve(
             case ir.Select(predicate=predicate):
                 return predicate(field)
             case ir.References() as references:
-                return references.selects(field, entity_graph.id_base)
+                return references.selects(field, entity_graph)
 
     checked = tuple(
         _resolve_field(entity_graph, view, node, relation, field)

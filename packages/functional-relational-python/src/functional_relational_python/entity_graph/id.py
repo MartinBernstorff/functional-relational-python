@@ -1,6 +1,6 @@
 from typing import Annotated, TypeIs
 
-from pydantic import ConfigDict, RootModel, SkipValidation
+from pydantic import ConfigDict, RootModel, SkipValidation, field_validator
 
 
 class Id[T](RootModel[T]):
@@ -32,17 +32,33 @@ class IdBase(RootModel[IdType], frozen=True):
 
     A model whose `id` field is an ID type is an Entity, and any other field typed
     with an ID type is a Reference to the Entity keyed by that type. The base is
-    a `RootModel` subclass, e.g. frp's `Id`, or an application's own:
+    a strict `RootModel` subclass, e.g. frp's `Id`, or an application's own:
 
     >>> class AppId(RootModel[UUID], frozen=True):
     ...     pass
     >>> IdBase(AppId)
+
+    `RootModel` itself is no base, since every newtype would be an ID type.
     """
+
+    @field_validator("root")
+    @classmethod
+    def _strict_root_model_subclass(cls, root: object) -> object:
+        match root:
+            case type() if issubclass(root, RootModel) and root is not RootModel:
+                return root
+            case _:
+                msg = f"{root!r} is not a strict subclass of RootModel"
+                raise ValueError(msg)
 
     @staticmethod
     def fake() -> IdBase:
         return IdBase(Id)
 
     def includes(self, annotation: object) -> TypeIs[type[RootModel[object]]]:
-        """Whether `annotation` is an ID type: a subclass of this base."""
-        return isinstance(annotation, type) and issubclass(annotation, self.root)
+        """Whether `annotation` is an ID type: a strict subclass of this base."""
+        return (
+            isinstance(annotation, type)
+            and issubclass(annotation, self.root)
+            and annotation is not self.root
+        )
