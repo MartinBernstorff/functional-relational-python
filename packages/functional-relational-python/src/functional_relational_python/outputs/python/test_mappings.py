@@ -20,7 +20,11 @@ from functional_relational_python.entity_graph.entity_graph import (
 )
 from functional_relational_python.entity_graph.id import Id
 from functional_relational_python.outputs import engine
-from functional_relational_python.outputs.python.mappings import MappingsRenderer
+from functional_relational_python.outputs.python.mappings import (
+    Expression,
+    Indent,
+    MappingsRenderer,
+)
 from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
@@ -492,13 +496,49 @@ def employee_flat(
         department_name=department_by_id[source.department_id].name,
         company=company_by_id[department_by_id[source.department_id].company_id],
         mentor_name=(
-            None
-            if source.mentor_id is None
-            else employee_by_id[source.mentor_id].name
+            None if source.mentor_id is None else employee_by_id[source.mentor_id].name
         ),
     )
 """
     )
+
+
+def test_mapping_functions_with_chained_conditionals_are_ruff_formatted() -> None:
+    """Fields lifted through two optional References check both for `None`."""
+    renamed = steps.rename(
+        steps.select(lambda _field: True), lambda field: FieldName(f"m_{field.root}")
+    )
+    view = View(
+        name=ViewName("EmployeeGrandMentor"),
+        source=Employee,
+        step=steps.pipeline(
+            steps.resolve(
+                named(FieldName("mentor_id")),
+                steps.resolve(
+                    named(FieldName("mentor_id")),
+                    steps.project([FieldName("name")]),
+                    renamed,
+                ),
+                steps.flatten(FieldName("mentor")),
+                renamed,
+            ),
+            steps.flatten(FieldName("mentor")),
+        ),
+    )
+    text = Generated.text(
+        MappingsRenderer.files(plan_of(compile_all([view]), Generated.layout()))
+    )
+
+    formatted = subprocess.run(
+        [sys.executable, "-m", "ruff", "format", "--isolated", "-"],
+        input=text.root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    assert "else None\n" in text.root
+    assert formatted == text.root
 
 
 def test_writing_the_mapping_functions_twice_succeeds() -> None:
@@ -770,3 +810,30 @@ def test_mapping_functions_give_the_same_view_results_as_the_engine(
             # Catches a strategy that stops drawing resolves over stored rows.
             event(f"resolving view has rows: {bool(lookups) and bool(mapped_rows)}")
             assert mapped_rows == engine_rows
+
+
+class Written:
+    """Writes a multi-line expression, recording each indentation it was written
+    at."""
+
+    def __init__(self) -> None:
+        self.at: list[Indent] = []
+
+    def write(self, indent: Indent) -> Expression:
+        self.at.append(indent)
+        return Expression(
+            f"call(\n{indent.deeper().pad().root}x,\n{indent.pad().root})"
+        )
+
+
+@pytest.mark.parametrize(
+    "guards",
+    [(), (Expression("source.field_id"),)],
+    ids=["required", "optional"],
+)
+def test_a_looked_up_value_is_written_once(guards: tuple[Expression, ...]) -> None:
+    written = Written()
+
+    _ = Indent(4).looked_up(Expression("field="), guards, written.write)
+
+    assert len(written.at) == 1
