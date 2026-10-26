@@ -22,7 +22,7 @@ from safe_result import Err, Ok, Result
 from functional_relational_python.compiler import compiler
 from functional_relational_python.compiler.model_names import ModelNames, PascalCase
 from functional_relational_python.entity_graph.entity_graph import FieldName
-from functional_relational_python.entity_graph.id import OneToOne
+from functional_relational_python.entity_graph.id import OneToOneMarker
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     ModulePath,
@@ -440,9 +440,15 @@ class _AnnotationRenderer:
         module=ModulePath("pydantic"), qualname=(Identifier("MISSING"),)
     )
 
-    def __init__(self, view: DefinitionName, field: FieldName | None) -> None:
+    def __init__(
+        self,
+        view: DefinitionName,
+        field: FieldName | None,
+        one_to_one_marker: OneToOneMarker,
+    ) -> None:
         self.view = view
         self.field = field
+        self.one_to_one_marker = one_to_one_marker
         self.symbols: set[Symbol] = set()
         self.diagnostics: list[PlanDiagnostic] = []
 
@@ -515,10 +521,10 @@ class _AnnotationRenderer:
                 f"{_AnnotationRenderer.literal.reference().root}[{values}]"
             )
         if origin is typing.Annotated and all(
-            isinstance(marker, OneToOne) for marker in args[1:]
+            self.one_to_one_marker.marks(marker) for marker in args[1:]
         ):
-            # A generated model is not an Entity, so it leaves `OneToOne` out, as
-            # it does when `OneToOne` marks the whole field.
+            # A generated model is not an Entity, so it leaves the one-to-one
+            # marker out, as it does when the marker marks the whole field.
             return self.render(args[0])
         if origin in (typing.Literal, typing.Annotated) or not args:
             return self._unsupported(annotation)
@@ -561,17 +567,25 @@ class _PlannedModel(pydantic.BaseModel, frozen=True):
 class _ModelPlanner:
     """Plans the model of one View or Payload, and one per nested resolved field."""
 
-    def __init__(self, view: DefinitionName, module: ModulePath) -> None:
+    def __init__(
+        self,
+        view: DefinitionName,
+        module: ModulePath,
+        one_to_one_marker: OneToOneMarker,
+    ) -> None:
         self.view = view
         self.module = module
+        self.one_to_one_marker = one_to_one_marker
         self.diagnostics: list[PlanDiagnostic] = []
         self.used = _DefinitionsUsed(view, module)
 
     @staticmethod
     def definition_model(
-        compiled: compiler.CompiledView | compiler.CompiledPayload, module: ModulePath
+        compiled: compiler.CompiledView | compiler.CompiledPayload,
+        module: ModulePath,
+        one_to_one_marker: OneToOneMarker,
     ) -> _PlannedModel:
-        planner = _ModelPlanner(compiled.name, module)
+        planner = _ModelPlanner(compiled.name, module, one_to_one_marker)
         planner.used.use(compiled.source)
         match compiled:
             case compiler.CompiledView(names=names):
@@ -597,12 +611,14 @@ class _ModelPlanner:
         """
         fields: list[ModelField] = []
         uses: set[Symbol] = set()
-        base_renderer = _AnnotationRenderer(self.view, None)
+        base_renderer = _AnnotationRenderer(self.view, None, self.one_to_one_marker)
         rendered_base = base_renderer.render_base(base)
         self._record(base_renderer, uses)
         nested: dict[FieldName, ModelPlan] = {}
         for field in relation.fields:
-            renderer = _AnnotationRenderer(self.view, field.name)
+            renderer = _AnnotationRenderer(
+                self.view, field.name, self.one_to_one_marker
+            )
             match field:
                 case _ if (
                     field.name.root in base.model_fields
@@ -664,12 +680,14 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         """The plan, or every diagnostic. Each diagnostic is reported once, even
         when both a model and a mapping function run into it. A type a model field
         cannot import is reported for that field only, not again for the mapping
-        function that looks it up."""
+        function that looks it up. Models leave the catalog's one-to-one markers out."""
         diagnostics: dict[PlanDiagnostic, None] = {}
         models: dict[ModulePath, list[ModelPlan]] = {}
         functions: dict[ModulePath, list[FunctionPlan]] = {}
         for view in compiled.views:
-            model = _ModelPlanner.definition_model(view, layout.models(view))
+            model = _ModelPlanner.definition_model(
+                view, layout.models(view), compiled.one_to_one_marker
+            )
             diagnostics.update(dict.fromkeys(model.diagnostics))
             models.setdefault(model.plan.symbol.module, []).append(model.plan)
             match layout.mappings:
@@ -695,7 +713,9 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                         )
                     )
         for payload in compiled.payloads:
-            model = _ModelPlanner.definition_model(payload, layout.models(payload))
+            model = _ModelPlanner.definition_model(
+                payload, layout.models(payload), compiled.one_to_one_marker
+            )
             diagnostics.update(dict.fromkeys(model.diagnostics))
             models.setdefault(model.plan.symbol.module, []).append(model.plan)
         plan = PythonPlan(

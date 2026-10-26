@@ -31,7 +31,12 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id, IdBase, OneToOne
+from functional_relational_python.entity_graph.id import (
+    Id,
+    IdBase,
+    OneToOne,
+    OneToOneMarker,
+)
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.python.plan import PythonLayout, PythonPlan
 from functional_relational_python.outputs.python.render import PythonRenderer
@@ -212,6 +217,7 @@ def entity_graph() -> EntityGraph:
     return EntityGraph.build(
         [Company, User, CompanyRole, CompanyMembership, Department, ShopOrder],
         IdBase.fake(),
+        OneToOneMarker.fake(),
     ).unwrap()
 
 
@@ -225,7 +231,11 @@ def compiled_views() -> compiler.CompiledViews:
 
 def test_golden_flowbase_view_models() -> None:
     match PythonPlan.of(
-        compiler.CompiledCatalog(views=compiled_views().views, payloads=()),
+        compiler.CompiledCatalog(
+            views=compiled_views().views,
+            payloads=(),
+            one_to_one_marker=OneToOneMarker.fake(),
+        ),
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
     ):
         case Ok(plan):
@@ -366,7 +376,9 @@ def campaign_view() -> View:
 
 def campaign_graph() -> EntityGraph:
     return EntityGraph.build(
-        [Company, ChannelCampaign, MetaCampaign, LinkedInCampaign], IdBase.fake()
+        [Company, ChannelCampaign, MetaCampaign, LinkedInCampaign],
+        IdBase.fake(),
+        OneToOneMarker.fake(),
     ).unwrap()
 
 
@@ -380,7 +392,11 @@ def compiled_campaign_views() -> compiler.CompiledViews:
 
 def test_golden_flowbase_campaign_view_model() -> None:
     match PythonPlan.of(
-        compiler.CompiledCatalog(views=compiled_campaign_views().views, payloads=()),
+        compiler.CompiledCatalog(
+            views=compiled_campaign_views().views,
+            payloads=(),
+            one_to_one_marker=OneToOneMarker.fake(),
+        ),
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
     ):
         case Ok(plan):

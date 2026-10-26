@@ -196,7 +196,7 @@ def reverse(entity: type[pydantic.BaseModel], *then: Step) -> Step:
     """Adds a field holding the `entity` that references the subject, or `None`
     when none does.
 
-    `entity` must have exactly one one-to-one Reference (see `OneToOne`) to the
+    `entity` must have exactly one one-to-one Reference (see `OneToOneMarker`) to the
     subject; with several, choose one with `reverse_via`. The field is named after
     `entity` in snake_case, e.g. `meta_campaign` for `MetaCampaign`. The steps in
     `then` form a pipeline applied to `entity`; without them, the field holds the
