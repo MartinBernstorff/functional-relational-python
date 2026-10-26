@@ -1,8 +1,8 @@
-"""Compiles Views to checked frp-ir.
+"""Compiles Views and Payloads to checked frp-ir.
 
 Checking uses the poisoned pattern: a failed check reports a diagnostic and
-recovers with the best relation it can build, so later steps and other Views are
-still checked and independent defects are all reported, once each.
+recovers with the best relation it can build, so later steps and other Views and
+Payloads are still checked and independent defects are all reported, once each.
 """
 
 from collections.abc import Iterable
@@ -13,14 +13,22 @@ from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import diagnostics
-from functional_relational_python.compiler.model_names import ViewModelNames
+from functional_relational_python.compiler.model_names import (
+    ModelNames,
+    ViewModelNames,
+)
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
     NoEntityError,
     NotAReferenceError,
 )
-from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline import ir, steps
+from functional_relational_python.pipeline.payloads import (
+    DefinitionName,
+    Payload,
+    PayloadName,
+)
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
@@ -59,6 +67,23 @@ class CompiledViews(pydantic.BaseModel, frozen=True):
     views: tuple[CompiledView, ...]
 
 
+class CompiledPayload(pydantic.BaseModel, frozen=True):
+    """A checked Payload: its Source, the Relation its model is generated from,
+    and the names of its models. A Payload has no mapping function."""
+
+    name: PayloadName
+    source: type[pydantic.BaseModel]
+    relation: ir.Relation
+    names: ModelNames
+
+
+class CompiledCatalog(pydantic.BaseModel, frozen=True):
+    """Every View and Payload of a Catalog, checked."""
+
+    views: tuple[CompiledView, ...]
+    payloads: tuple[CompiledPayload, ...]
+
+
 def compile_views(
     entity_graph: EntityGraph, views: Iterable[View], /
 ) -> Result[CompiledViews, DiagnosticsError[diagnostics.CompileDiagnostic]]:
@@ -66,16 +91,51 @@ def compile_views(
 
     `entity_graph` is what References are resolved against.
     """
-    checked = check(entity_graph, views)
+    match compile_catalog(entity_graph, views, ()):
+        case Ok(compiled):
+            return Ok(CompiledViews(views=compiled.views))
+        case Err(error):
+            return Err(error)
+
+
+def compile_catalog(
+    entity_graph: EntityGraph,
+    views: Iterable[View],
+    payloads: Iterable[Payload],
+    /,
+) -> Result[CompiledCatalog, DiagnosticsError[diagnostics.CompileDiagnostic]]:
+    """Compiles every View and Payload, or returns every diagnostic from all of
+    them, including one per name a View and a Payload share."""
+    checked_views = check(entity_graph, views)
+    checked_payloads = tuple(
+        _check_payload(entity_graph, payload) for payload in payloads
+    )
+    payload_names = {payload.name.root for payload in checked_payloads}
+    # One diagnostic per shared name, however many Views and Payloads have it.
+    shared_names = dict.fromkeys(
+        view.name for view in checked_views if view.name.root in payload_names
+    )
     return DiagnosticsError.or_ok(
         (
-            diagnostic
-            for view in checked
-            if isinstance(view, PoisonedView)
-            for diagnostic in view.diagnostics
+            *(
+                diagnostic
+                for view in checked_views
+                if isinstance(view, PoisonedView)
+                for diagnostic in view.diagnostics
+            ),
+            *(
+                diagnostic
+                for payload in checked_payloads
+                if isinstance(payload, PoisonedPayload)
+                for diagnostic in payload.diagnostics
+            ),
+            *(diagnostics.SharedModelName(view=name) for name in shared_names),
         ),
-        lambda: CompiledViews(
-            views=tuple(view for view in checked if isinstance(view, CompiledView))
+        lambda: CompiledCatalog(
+            views=tuple(v for v in checked_views if isinstance(v, CompiledView)),
+            payloads=tuple(
+                p for p in checked_payloads if isinstance(p, CompiledPayload)
+            ),
         ),
     )
 
@@ -87,17 +147,36 @@ def check(
     return tuple(_check_view(entity_graph, view) for view in views)
 
 
+class PoisonedPayload(pydantic.BaseModel, frozen=True):
+    name: PayloadName
+    diagnostics: Diagnostics
+
+
+def _check_relation(
+    entity_graph: EntityGraph,
+    name: DefinitionName,
+    source: type[pydantic.BaseModel],
+    step: steps.Step,
+) -> ir.Relation | Poisoned:
+    """The Relation a View's or Payload's pipeline builds over its Source, before
+    its model names are checked."""
+    match _check_node(entity_graph, name, step(ir.FromSource(source=source))):
+        case ir.Relation() as relation:
+            return relation
+        case Poisoned(recovered=recovered, diagnostics=reported):
+            # Nested model names depend on the Relation, which is only partly known.
+            return Poisoned(
+                recovered=recovered,
+                diagnostics=(*reported, *ModelNames.name_diagnostics(name)),
+            )
+
+
 def _check_view(entity_graph: EntityGraph, view: View) -> CompiledView | PoisonedView:
-    node = view.step(ir.FromSource(source=view.source))
-    match _check_node(entity_graph, view.name, node):
+    match _check_relation(entity_graph, view.name, view.source, view.step):
         case ir.Relation() as relation:
             pass
         case Poisoned(diagnostics=reported):
-            # Nested model names depend on the Relation, which is only partly known.
-            return PoisonedView(
-                name=view.name,
-                diagnostics=(*reported, *ViewModelNames.view_diagnostics(view.name)),
-            )
+            return PoisonedView(name=view.name, diagnostics=reported)
     match ViewModelNames.check(view.name, relation):
         case Ok(names):
             return CompiledView(
@@ -107,8 +186,28 @@ def _check_view(entity_graph: EntityGraph, view: View) -> CompiledView | Poisone
             return PoisonedView(name=view.name, diagnostics=error.diagnostics)
 
 
+def _check_payload(
+    entity_graph: EntityGraph, payload: Payload
+) -> CompiledPayload | PoisonedPayload:
+    match _check_relation(entity_graph, payload.name, payload.source, payload.step):
+        case ir.Relation() as relation:
+            pass
+        case Poisoned(diagnostics=reported):
+            return PoisonedPayload(name=payload.name, diagnostics=reported)
+    match ModelNames.check(payload.name, relation):
+        case Ok(names):
+            return CompiledPayload(
+                name=payload.name,
+                source=payload.source,
+                relation=relation,
+                names=names,
+            )
+        case Err(error):
+            return PoisonedPayload(name=payload.name, diagnostics=error.diagnostics)
+
+
 def _check_node(
-    entity_graph: EntityGraph, view: ViewName, node: ir.Node
+    entity_graph: EntityGraph, view: DefinitionName, node: ir.Node
 ) -> ir.Relation | Poisoned:
     match node:
         case ir.FromSource():
@@ -125,7 +224,7 @@ def _check_node(
 
 def _check_step(
     entity_graph: EntityGraph,
-    view: ViewName,
+    view: DefinitionName,
     node: ir.Omit | ir.Rename | ir.Project | ir.Resolve,
     relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
@@ -142,7 +241,7 @@ def _check_step(
 
 
 def _check_omit(
-    view: ViewName, node: ir.Omit, relation: ir.Relation
+    view: DefinitionName, node: ir.Omit, relation: ir.Relation
 ) -> ir.Relation | Poisoned:
     if node.field in relation.field_names():
         return relation.without(node.field)
@@ -162,7 +261,7 @@ def _check_omit(
 
 
 def _check_rename(
-    view: ViewName, node: ir.Rename, relation: ir.Relation
+    view: DefinitionName, node: ir.Rename, relation: ir.Relation
 ) -> ir.Relation | Poisoned:
     names = relation.field_names()
     reported: list[diagnostics.CompileDiagnostic] = []
@@ -210,7 +309,7 @@ def _recovered_rename(node: ir.Rename, relation: ir.Relation) -> ir.Relation:
 
 
 def _check_project(
-    view: ViewName, node: ir.Project, relation: ir.Relation
+    view: DefinitionName, node: ir.Project, relation: ir.Relation
 ) -> ir.Relation | Poisoned:
     kept = relation.keeping(node.fields)
     unknown = tuple(
@@ -241,7 +340,10 @@ class _CheckedField(pydantic.BaseModel, frozen=True):
 
 
 def _check_resolve(
-    entity_graph: EntityGraph, view: ViewName, node: ir.Resolve, relation: ir.Relation
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    node: ir.Resolve,
+    relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
     checked = tuple(
         _resolve_field(entity_graph, view, node, relation, field)
@@ -260,7 +362,7 @@ def _check_resolve(
 
 def _resolve_field(
     entity_graph: EntityGraph,
-    view: ViewName,
+    view: DefinitionName,
     node: ir.Resolve,
     relation: ir.Relation,
     field: ir.RelationField,
@@ -290,7 +392,7 @@ def _resolve_field(
 
 def _lookup(
     entity_graph: EntityGraph,
-    view: ViewName,
+    view: DefinitionName,
     relation: ir.Relation,
     field: ir.RelationField,
 ) -> ir.Lookup | _CheckedField:
@@ -337,7 +439,7 @@ def _lookup(
 
 def _resolved(
     entity_graph: EntityGraph,
-    view: ViewName,
+    view: DefinitionName,
     node: ir.Resolve,
     name: FieldName,
     lookup: ir.Lookup,

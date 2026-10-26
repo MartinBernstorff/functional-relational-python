@@ -181,7 +181,9 @@ def into(module: ModulePath) -> ModuleLayout:
 
 
 def plan_of(compiled: compiler.CompiledViews, layout: PythonLayout) -> PythonPlan:
-    match PythonPlan.of(compiled, layout):
+    match PythonPlan.of(
+        compiler.CompiledCatalog(views=compiled.views, payloads=()), layout
+    ):
         case Ok(plan):
             return plan
         case Err(error):

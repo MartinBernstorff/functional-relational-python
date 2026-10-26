@@ -18,6 +18,7 @@ from safe_result import Err, Ok, Result
 
 from functional_relational_python.entity_graph.entity_graph import FieldName
 from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline.payloads import DefinitionName
 from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
@@ -28,13 +29,13 @@ from functional_relational_python.support.identifier import Identifier
 
 
 class InvalidModelName(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View's name cannot be used as a class name."""
+    """A View's or Payload's name cannot be used as a class name."""
 
-    view: ViewName
+    view: DefinitionName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: the View name is not a valid Python class name."
+            f"{self.view.root}: the name is not a valid Python class name."
         )
 
 
@@ -46,7 +47,7 @@ class InvalidNestedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
     """The model of a resolved field with a nested pipeline would get a name that
     is not a valid class name."""
 
-    view: ViewName
+    view: DefinitionName
     field: FieldName
     name: CandidateName
 
@@ -58,9 +59,9 @@ class InvalidNestedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class InvalidFieldName(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A rename or resolve gives a field a name no View model field can have."""
+    """A rename or resolve gives a field a name no generated model field can have."""
 
-    view: ViewName
+    view: DefinitionName
     source: ir.SourceName
     field: FieldName
 
@@ -144,7 +145,7 @@ class ModelNames(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def of(
-        view: ViewName, name: ModelName, relation: ir.Relation
+        view: DefinitionName, name: ModelName, relation: ir.Relation
     ) -> Result[ModelNames, DiagnosticsError[InvalidNestedModelName]]:
         """The names of `relation`'s model, called `name`, and its nested models."""
         nested: dict[FieldName, ModelNames] = {}
@@ -175,6 +176,48 @@ class ModelNames(pydantic.BaseModel, frozen=True):
             reported, lambda: ModelNames(name=name, nested=nested)
         )
 
+    @staticmethod
+    def check(
+        definition: DefinitionName, relation: ir.Relation
+    ) -> Result[ModelNames, DiagnosticsError[ModelNameDiagnostic]]:
+        """The names of the models generated for `definition`, a View or a
+        Payload whose Relation is `relation`, or every reason they cannot be
+        used."""
+        match ModelNames.model_name(definition):
+            case Err(error):
+                return Err(DiagnosticsError(error.diagnostics))
+            case Ok(model):
+                pass
+        match ModelNames.of(definition, model, relation):
+            case Err(error):
+                return Err(DiagnosticsError(error.diagnostics))
+            case Ok(names):
+                return Ok(names)
+
+    @staticmethod
+    def name_diagnostics(definition: DefinitionName) -> tuple[InvalidModelName, ...]:
+        """What is wrong with the names taken from the definition's name alone.
+
+        For a View or Payload that did not compile, whose nested models are
+        unknown.
+        """
+        match ModelNames.model_name(definition):
+            case Err(error):
+                return error.diagnostics
+            case Ok(_):
+                return ()
+
+    @staticmethod
+    def model_name(
+        definition: DefinitionName,
+    ) -> Result[ModelName, DiagnosticsError[InvalidModelName]]:
+        """The name of a View's or Payload's model: its own name. Every rule that
+        name must follow is checked here."""
+        reported: list[InvalidModelName] = []
+        if isinstance(Identifier.of(definition), Err):
+            reported.append(InvalidModelName(view=definition))
+        return DiagnosticsError.or_ok(reported, lambda: ModelName(definition.root))
+
 
 class ViewModelNames(pydantic.BaseModel, frozen=True):
     """Every name the code generated for one View uses: its models' and its
@@ -189,45 +232,19 @@ class ViewModelNames(pydantic.BaseModel, frozen=True):
     ) -> Result[ViewModelNames, DiagnosticsError[ModelNameDiagnostic]]:
         """The names of the code generated for `view`, whose Relation is
         `relation`, or every reason they cannot be used."""
-        match ViewModelNames.model_name(view):
+        match ModelNames.check(view, relation):
             case Err(error):
-                return Err(DiagnosticsError(error.diagnostics))
-            case Ok(model):
-                pass
-        match ModelNames.of(view, model, relation):
-            case Err(error):
-                return Err(DiagnosticsError(error.diagnostics))
+                return Err(error)
             case Ok(names):
-                return Ok(ViewModelNames(model=names, function=FunctionName.of(model)))
-
-    @staticmethod
-    def view_diagnostics(view: ViewName) -> tuple[InvalidModelName, ...]:
-        """What is wrong with the names taken from the View's name alone.
-
-        For a View that did not compile, whose nested models are unknown.
-        """
-        match ViewModelNames.model_name(view):
-            case Err(error):
-                return error.diagnostics
-            case Ok(_):
-                return ()
-
-    @staticmethod
-    def model_name(
-        view: ViewName,
-    ) -> Result[ModelName, DiagnosticsError[InvalidModelName]]:
-        """The name of the View's model: the View's name. Every rule a View's name
-        must follow is checked here."""
-        reported: list[InvalidModelName] = []
-        if isinstance(Identifier.of(view), Err):
-            reported.append(InvalidModelName(view=view))
-        return DiagnosticsError.or_ok(reported, lambda: ModelName(view.root))
+                return Ok(
+                    ViewModelNames(model=names, function=FunctionName.of(names.name))
+                )
 
     @staticmethod
     def check_field(
-        view: ViewName, source: ir.SourceName, name: FieldName
+        view: DefinitionName, source: ir.SourceName, name: FieldName
     ) -> tuple[InvalidFieldName, ...]:
-        """Reports `name` unless a View model can have a field of that name."""
+        """Reports `name` unless a generated model can have a field of that name."""
         if (
             isinstance(Identifier.of(name), Ok)
             and not name.root.startswith("_")
