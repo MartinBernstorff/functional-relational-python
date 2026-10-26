@@ -647,9 +647,16 @@ def _check_resolve(
     node: ir.Resolve,
     relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
+    def selected(field: ir.RelationField) -> bool:
+        match node.fields:
+            case ir.Select(predicate=predicate):
+                return predicate(field)
+            case ir.References() as references:
+                return references.selects(field, entity_graph)
+
     checked = tuple(
         _resolve_field(entity_graph, view, node, relation, field)
-        if node.fields.predicate(field)
+        if selected(field)
         else _CheckedField(field=field, diagnostics=())
         for field in relation.fields
     )

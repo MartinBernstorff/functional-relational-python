@@ -16,7 +16,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
     RuntimeAnnotation,
 )
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, IdBase
 from functional_relational_python.outputs.django.models import (
     AppLabel,
     AutoIncrementOnNonPrimaryKey,
@@ -33,6 +33,7 @@ from functional_relational_python.outputs.django.models import (
     ReferenceKey,
     SetNullOnRequiredReference,
 )
+from functional_relational_python.outputs.django.queries import DjangoQueriesRenderer
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     ModulePath,
@@ -149,13 +150,16 @@ def config(
         app_label=AppLabel("app"),
         field_types=field_types,
         on_delete=on_delete,
+        queries=ModulePath("app.queries"),
     )
 
 
 def render(
     entities: Iterable[type[pydantic.BaseModel]], models: DjangoModels
 ) -> FileText:
-    match DjangoModelsRenderer.render(EntityGraph.build(entities).unwrap(), models):
+    match DjangoModelsRenderer.render(
+        EntityGraph.build(entities, IdBase.fake()).unwrap(), models
+    ):
         case Ok(files):
             (file,) = files.files
             return file.text
@@ -166,7 +170,9 @@ def render(
 def diagnostics(
     entities: Iterable[type[pydantic.BaseModel]], models: DjangoModels
 ) -> tuple[DjangoDiagnostic, ...]:
-    match DjangoModelsRenderer.render(EntityGraph.build(entities).unwrap(), models):
+    match DjangoModelsRenderer.render(
+        EntityGraph.build(entities, IdBase.fake()).unwrap(), models
+    ):
         case Ok(files):
             pytest.fail(f"expected diagnostics, got {files}")
         case Err(error):
@@ -252,7 +258,11 @@ def test_an_overridden_field_class_outside_django_is_imported() -> None:
 
     text = render([Thing], config({tuple[Text, ...]: money}, {})).root
 
-    assert "from app.fields import MoneyField\nfrom django.db import models\n" in text
+    assert (
+        "\n\nfrom app.fields import MoneyField\n"
+        "from app.queries import ThingManager\n"
+        "from django.db import models\n\n\n"
+    ) in text
     assert "    tags = MoneyField()\n" in text
 
 
@@ -349,10 +359,12 @@ def test_golden_django_models() -> None:
         # Regenerate with `frp generate`; `frp check` fails when this is stale.
         # Migrations are yours to make, e.g. with `makemigrations`.
 
+        from app.queries import CompanyManager, DepartmentManager
         from django.db import models
 
 
         class Company(models.Model):
+            objects = CompanyManager()
             id = models.BigAutoField(primary_key=True)
             name = models.TextField()
             parent = models.ForeignKey('Company', on_delete=models.SET_NULL, related_name='+', null=True)
@@ -362,6 +374,7 @@ def test_golden_django_models() -> None:
 
 
         class Department(models.Model):
+            objects = DepartmentManager()
             id = models.UUIDField(primary_key=True)
             company = models.ForeignKey('Company', on_delete=models.PROTECT, related_name='+')
             founded = models.DateField()
@@ -374,7 +387,7 @@ def test_golden_django_models() -> None:
 
 
 def test_the_module_is_written_where_the_catalog_names() -> None:
-    graph = EntityGraph.build([Company]).unwrap()
+    graph = EntityGraph.build([Company], IdBase.fake()).unwrap()
     models = config({}, {})
 
     files = DjangoModelsRenderer.render(graph, models).unwrap()
@@ -450,8 +463,9 @@ def test_entities_with_one_name_are_a_diagnostic() -> None:
 
 
 def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None:
-    """A Django project with the generated models as its one app: they pass the
-    type checker, Django's system checks, `makemigrations` and `migrate`."""
+    """A Django project with the generated models, and the QuerySets their managers
+    use, as its one app: they pass the type checker, Django's system checks,
+    `makemigrations` and `migrate`."""
     models = config(
         {
             CompanyId: DjangoField.builtin(Identifier("BigAutoField"), {}),
@@ -469,8 +483,16 @@ def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None
         department_id: DepartmentId
         born: Moment
 
-    graph = EntityGraph.build([Company, Department, Person]).unwrap()
-    files = DjangoModelsRenderer.render(graph, models).unwrap()
+    graph = EntityGraph.build([Company, Department, Person], IdBase.fake()).unwrap()
+    files = GeneratedFiles.merged(
+        [
+            DjangoModelsRenderer.render(graph, models).unwrap(),
+            # No Views, so only the QuerySets the models' managers use.
+            DjangoQueriesRenderer.render(
+                graph, models, (), lambda _: ModulePath("app.views")
+            ).unwrap(),
+        ]
+    ).unwrap()
     files.write(LocalFileSystem(), Directory(tmp_path)).unwrap()
     _ = (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
     _ = (tmp_path / "settings.py").write_text(

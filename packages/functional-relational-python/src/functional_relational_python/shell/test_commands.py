@@ -5,7 +5,7 @@ from safe_result import Err, Ok
 from functional_relational_python.compiler import compiler
 from functional_relational_python.compiler.model_names import InvalidModelName
 from functional_relational_python.entity_graph.entity_graph import FieldName
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, IdBase
 from functional_relational_python.outputs.django.models import (
     DjangoModels,
     NoDjangoFieldRule,
@@ -64,6 +64,7 @@ def by_kind(compiled: compiler.CompiledView | compiler.CompiledPayload) -> Modul
 
 catalog = Catalog(
     entities=[Company],
+    id_base=IdBase.fake(),
     views=[View(name=ViewName("CompanyCard"), source=Company, step=steps.pipeline())],
     payloads=[
         Payload(
@@ -150,6 +151,7 @@ def test_generate_writes_files_that_check_accepts() -> None:
         root.file(ModulePath("app.payloads").file_path()),
         root.file(ModulePath("app.mappings").file_path()),
         root.file(DjangoModels.fake().module.file_path()),
+        root.file(DjangoModels.fake().queries.file_path()),
     )
     assert commands.check(filesystem, root) == Ok(None)
 

@@ -25,9 +25,13 @@ from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
     Optionality,
 )
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, IdBase
 from functional_relational_python.outputs import engine
-from functional_relational_python.outputs.python.mappings import MappingsRenderer
+from functional_relational_python.outputs.python.mappings import (
+    Expression,
+    Indent,
+    MappingsRenderer,
+)
 from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
@@ -124,7 +128,9 @@ class Transfer(pydantic.BaseModel, frozen=True):
 
 
 def entity_graph() -> EntityGraph:
-    return EntityGraph.build([Company, Wide, Department, Employee]).unwrap()
+    return EntityGraph.build(
+        [Company, Wide, Department, Employee], IdBase.fake()
+    ).unwrap()
 
 
 def named(*names: FieldName) -> ir.Select:
@@ -1003,3 +1009,28 @@ def test_a_filtered_mapping_function_writes_literals_as_ruff_does(
 
     assert written.root in text.root
     assert ruff_format_diff(text) == FileText("")
+
+
+class Written:
+    """Writes a multi-line expression, recording each indentation it was written
+    at."""
+
+    def __init__(self) -> None:
+        self.at: list[Indent] = []
+
+    def write(self, indent: Indent) -> Expression:
+        self.at.append(indent)
+        return Expression(
+            f"call(\n{indent.deeper().pad().root}x,\n{indent.pad().root})"
+        )
+
+
+@pytest.mark.parametrize("optionality", list(Optionality))
+def test_a_looked_up_value_is_written_once(optionality: Optionality) -> None:
+    written = Written()
+
+    _ = Indent(4).looked_up(
+        optionality, Expression("field="), Expression("source.field_id"), written.write
+    )
+
+    assert len(written.at) == 1

@@ -693,7 +693,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
 
     def _layout_diagnostics(self) -> Iterable[PlanDiagnostic]:
         for module, models in self.models.items():
-            namespace = _Namespace(Scope(module.root))
+            namespace = Namespace(Scope(module.root))
             for model in (m for own in models for m in own.with_nested()):
                 match model.view:
                     case ViewName():
@@ -713,7 +713,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                         )
             yield from namespace.clashes()
         for module, functions in self.functions.items():
-            namespace = _Namespace(Scope(module.root))
+            namespace = Namespace(Scope(module.root))
             for function in functions:
                 namespace.define(
                     function.symbol.bound_name(),
@@ -726,7 +726,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                     namespace.refer_to_module(imported)
             yield from namespace.clashes()
             for function in functions:
-                yield from _Namespace.of_function(function).clashes()
+                yield from Namespace.of_function(function).clashes()
         yield from (
             ModelsAndMappingsInOneModule(module=module)
             for module in sorted(
@@ -736,7 +736,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         )
 
 
-class _Namespace:
+class Namespace:
     """The names generated source binds in one Scope, with what each refers to."""
 
     def __init__(self, scope: Scope) -> None:
@@ -761,9 +761,9 @@ class _Namespace:
         self.refer(top_level, AnnotationText(f"the module {top_level.root}"))
 
     @staticmethod
-    def of_function(function: FunctionPlan) -> _Namespace:
+    def of_function(function: FunctionPlan) -> Namespace:
         """A function's parameters, and the module its body builds models from."""
-        namespace = _Namespace(function.scope())
+        namespace = Namespace(function.scope())
         namespace.define(
             FunctionPlan.source_parameter,
             AnnotationText(

@@ -15,7 +15,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, IdBase
 from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
     PythonLayout,
@@ -66,7 +66,7 @@ def compile_catalog(
     views: Sequence[View], payloads: Sequence[Payload]
 ) -> compiler.CompiledCatalog:
     return compiler.compile_catalog(
-        EntityGraph.build([Company]).unwrap(), views, payloads
+        EntityGraph.build([Company], IdBase.fake()).unwrap(), views, payloads
     ).unwrap()
 
 
