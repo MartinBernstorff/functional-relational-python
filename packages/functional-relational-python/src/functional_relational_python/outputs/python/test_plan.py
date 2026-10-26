@@ -10,7 +10,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, IdBase
 from functional_relational_python.outputs.python.plan import (
     FunctionPlan,
     GeneratedIntoDefiningModule,
@@ -147,7 +147,7 @@ def test_whatever_cannot_be_imported_is_reported_once() -> None:
     team, team_id, player = local_entity_and_source()
     view = View(name=ViewName.fake(), source=player, step=steps.hydrate())
     compiled = compiler.compile_views(
-        EntityGraph.build([team]).unwrap(), [view]
+        EntityGraph.build([team], IdBase.fake()).unwrap(), [view]
     ).unwrap()
 
     # The Entity is a field's type and a looked-up Entity, yet reported once,
@@ -171,7 +171,7 @@ def test_a_models_only_layout_reports_only_what_the_models_cannot_import() -> No
     team, _, player = local_entity_and_source()
     view = View(name=ViewName.fake(), source=player, step=steps.hydrate())
     compiled = compiler.compile_views(
-        EntityGraph.build([team]).unwrap(), [view]
+        EntityGraph.build([team], IdBase.fake()).unwrap(), [view]
     ).unwrap()
 
     assert diagnostics_of(
@@ -306,7 +306,9 @@ def lookup_parameter_module() -> ModulePath:
 def test_a_name_bound_to_several_things_is_one_clash(
     views: Iterable[View], python: PythonLayout, clash: tuple[Scope, Identifier]
 ) -> None:
-    graph = EntityGraph.build([Company, Department, Employee, Archive.Department])
+    graph = EntityGraph.build(
+        [Company, Department, Employee, Archive.Department], IdBase.fake()
+    )
     compiled = compiler.compile_views(graph.unwrap(), views).unwrap()
 
     assert [

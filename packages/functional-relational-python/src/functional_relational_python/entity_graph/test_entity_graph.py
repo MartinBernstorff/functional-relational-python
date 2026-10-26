@@ -1,12 +1,13 @@
 import itertools
 from collections.abc import Sequence
+from uuid import UUID
 
 import pytest
 from pydantic import BaseModel, RootModel
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.entity_graph import entity_graph
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, IdBase
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
 
@@ -80,10 +81,32 @@ class OptionalId(BaseModel):
     id: DepartmentId | None
 
 
+class AppId(RootModel[UUID], frozen=True):
+    """An ID base an application defines, rather than subclassing frp's `Id`."""
+
+
+class TeamId(AppId):
+    pass
+
+
+class MemberId(AppId):
+    pass
+
+
+class Team(BaseModel):
+    id: TeamId
+
+
+class Member(BaseModel):
+    id: MemberId
+    team_id: TeamId
+    department_id: DepartmentId
+
+
 def _diagnostics(
     entities: Sequence[type[BaseModel]],
 ) -> frozenset[entity_graph.EntityGraphDiagnostic]:
-    match entity_graph.EntityGraph.build(entities):
+    match entity_graph.EntityGraph.build(entities, IdBase.fake()):
         case Ok(graph):
             pytest.fail(f"Expected diagnostics, got {graph}")
         case Err(error):
@@ -91,7 +114,9 @@ def _diagnostics(
 
 
 def test_references_resolve_to_the_entity_owning_their_id_type() -> None:
-    result = entity_graph.EntityGraph.build([Department, Employee, Project])
+    result = entity_graph.EntityGraph.build(
+        [Department, Employee, Project], IdBase.fake()
+    )
 
     assert isinstance(result, Ok)
     assert result.value.entities[Project].references == (
@@ -111,7 +136,7 @@ def test_references_resolve_to_the_entity_owning_their_id_type() -> None:
 
 
 def test_an_entity_may_reference_itself() -> None:
-    result = entity_graph.EntityGraph.build([Department, Employee])
+    result = entity_graph.EntityGraph.build([Department, Employee], IdBase.fake())
 
     assert isinstance(result, Ok)
     assert [
@@ -120,7 +145,7 @@ def test_an_entity_may_reference_itself() -> None:
 
 
 def test_entities_record_their_primary_key_type() -> None:
-    result = entity_graph.EntityGraph.build([Department])
+    result = entity_graph.EntityGraph.build([Department], IdBase.fake())
 
     assert isinstance(result, Ok)
     assert result.value.entities[Department].id_type is DepartmentId
@@ -200,7 +225,9 @@ def test_a_reference_without_an_entity_is_a_diagnostic(
 def test_a_model_without_an_id_primary_key_is_a_diagnostic(
     model: type[BaseModel],
 ) -> None:
-    assert _diagnostics([model]) == frozenset({entity_graph.NotAnEntity(model=model)})
+    assert _diagnostics([model]) == frozenset(
+        {entity_graph.NotAnEntity(model=model, id_base=IdBase.fake())}
+    )
 
 
 def test_every_diagnostic_is_reported_at_once() -> None:
@@ -209,7 +236,7 @@ def test_every_diagnostic_is_reported_at_once() -> None:
             id_type=DepartmentId,
             entities=frozenset({Department, OtherDepartment}),
         ),
-        entity_graph.NotAnEntity(model=Unidentified),
+        entity_graph.NotAnEntity(model=Unidentified, id_base=IdBase.fake()),
         entity_graph.UnresolvedReference(
             entity=Assignment,
             field=entity_graph.FieldName("project_id"),
@@ -230,7 +257,7 @@ def test_a_reference_to_a_duplicated_id_type_is_not_also_unresolved() -> None:
 
 
 def test_the_error_message_names_the_offending_types() -> None:
-    match entity_graph.EntityGraph.build([Employee]):
+    match entity_graph.EntityGraph.build([Employee], IdBase.fake()):
         case Ok(graph):
             pytest.fail(f"Expected diagnostics, got {graph}")
         case Err(error):
@@ -252,7 +279,7 @@ def test_reordering_the_entities_gives_the_same_result(
     entities: Sequence[type[BaseModel]],
 ) -> None:
     first, *rest = [
-        _comparable(entity_graph.EntityGraph.build(permutation))
+        _comparable(entity_graph.EntityGraph.build(permutation, IdBase.fake()))
         for permutation in itertools.permutations(entities)
     ]
 
@@ -316,3 +343,27 @@ def test_an_annotation_is_written_with_its_optionality(
     optionality: entity_graph.Optionality, text: str
 ) -> None:
     assert optionality.annotate_text(Label("Label")) == Label(text)
+
+
+def test_the_id_base_decides_which_fields_are_references() -> None:
+    graph = entity_graph.EntityGraph.build([Team, Member], IdBase(AppId)).unwrap()
+
+    assert graph.entities[Member].references == (
+        entity_graph.Reference(
+            field=entity_graph.FieldName("team_id"),
+            id_type=TeamId,
+            target=Team,
+            optionality=entity_graph.Optionality.REQUIRED,
+        ),
+    )
+
+
+def test_a_model_keyed_by_an_id_of_another_base_is_not_an_entity() -> None:
+    match entity_graph.EntityGraph.build([Department], IdBase(AppId)):
+        case Ok(graph):
+            pytest.fail(f"Expected diagnostics, got {graph}")
+        case Err(error):
+            assert error.diagnostics == (
+                entity_graph.NotAnEntity(model=Department, id_base=IdBase(AppId)),
+            )
+            assert "AppId" in str(error)

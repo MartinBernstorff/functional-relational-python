@@ -11,13 +11,15 @@ from collections.abc import Callable, Collection, Mapping
 
 import pydantic
 from pydantic.fields import FieldInfo
+from safe_result import Ok
 
 from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
+    IdAnnotation,
     Optionality,
     RuntimeAnnotation,
 )
-from functional_relational_python.entity_graph.id import IdType
+from functional_relational_python.entity_graph.id import IdBase, IdType
 
 
 class SourceName(pydantic.RootModel[str], frozen=True):
@@ -93,6 +95,28 @@ class Select(pydantic.BaseModel, frozen=True):
     predicate: FieldPredicate
 
 
+class References(pydantic.BaseModel, frozen=True):
+    """The References of a relation, in field order.
+
+    Which fields are References depends on the catalog's `IdBase`, so unlike a
+    Select, the compiler decides what this selects.
+    """
+
+    def selects(self, field: RelationField, id_base: IdBase) -> bool:
+        """Whether `field` is a Reference: typed `X` or `X | None` for an ID `X`.
+
+        The primary key is not a Reference, under whatever name it has been renamed
+        to. It is told apart by where its value comes from, the subject's primary
+        key.
+        """
+        match field:
+            case Field(info=info, value=SourceField(field=source)):
+                annotation = IdAnnotation.of_reference(source, info, id_base)
+                return isinstance(annotation, Ok)
+            case Field() | NestedField():
+                return False
+
+
 class Resolve(pydantic.BaseModel, frozen=True):
     """Replaces each selected Reference with the Entity it points to.
 
@@ -100,7 +124,7 @@ class Resolve(pydantic.BaseModel, frozen=True):
     """
 
     input: Node
-    fields: Select
+    fields: Select | References
     then: Callable[[Node], Node]
 
 

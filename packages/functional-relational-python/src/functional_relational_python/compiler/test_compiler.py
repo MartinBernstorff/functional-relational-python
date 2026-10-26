@@ -17,7 +17,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     Optionality,
     RuntimeAnnotation,
 )
-from functional_relational_python.entity_graph.id import Id, IdType
+from functional_relational_python.entity_graph.id import Id, IdBase, IdType
 from functional_relational_python.pipeline import ir, steps, test_ir
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.views import View, ViewName
@@ -36,7 +36,7 @@ class Company(pydantic.BaseModel):
 
 def empty_graph() -> EntityGraph:
     # The Sources here are not Entities; compile does not require them to be.
-    return EntityGraph.build([]).unwrap()
+    return EntityGraph.build([], IdBase.fake()).unwrap()
 
 
 def field_names(view: compiler.CompiledView) -> list[FieldName]:
@@ -897,7 +897,7 @@ class Memo(pydantic.BaseModel):
 
 
 def hr_graph() -> EntityGraph:
-    return EntityGraph.build([Department, Employee]).unwrap()
+    return EntityGraph.build([Department, Employee], IdBase.fake()).unwrap()
 
 
 def named(*fields: FieldName) -> ir.Select:
@@ -946,6 +946,46 @@ def test_hydrate_resolves_every_reference_and_drops_the_id_suffix() -> None:
         (FieldName("department"), Department),
         (FieldName("mentor"), Employee | None),
     ]
+
+
+class AppId(pydantic.RootModel[int], frozen=True):
+    """An ID base an application defines, rather than subclassing frp's `Id`."""
+
+
+class TeamId(AppId):
+    pass
+
+
+class Team(pydantic.BaseModel):
+    id: TeamId
+
+
+class MemberId(AppId):
+    pass
+
+
+class Member(pydantic.BaseModel):
+    id: MemberId
+    team_id: TeamId
+    department_id: DepartmentId
+
+
+def test_hydrate_resolves_the_references_the_id_base_decides() -> None:
+    graph = EntityGraph.build([Team, Member], IdBase(AppId)).unwrap()
+
+    match compiler.compile_views(
+        graph, [View(name=ViewName.fake(), source=Member, step=steps.hydrate())]
+    ):
+        case Ok(compiled):
+            pass
+        case Err(error):
+            pytest.fail(f"expected a compiled view, got {error}")
+
+    assert compiled.views[0].relation.field_names() == (
+        FieldName("id"),
+        FieldName("team"),
+        FieldName("department_id"),
+    )
 
 
 def test_a_reference_without_the_id_suffix_keeps_its_name() -> None:
@@ -1241,7 +1281,7 @@ class Models(pydantic.BaseModel, frozen=True):
     clash: type[pydantic.BaseModel]
 
     def graph(self) -> EntityGraph:
-        return EntityGraph.build(self.entities).unwrap()
+        return EntityGraph.build(self.entities, IdBase.fake()).unwrap()
 
     def sources(self) -> tuple[type[pydantic.BaseModel], ...]:
         return (*self.entities, self.memo, self.clash)
@@ -1454,7 +1494,7 @@ def any_steps(draw: st.DrawFn, pool: Sequence[FieldName], depth: Depth) -> steps
             return steps.project(draw(st.lists(names, unique=True)))
         case _:
             selection = draw(
-                st.just(steps.select(steps.is_reference))
+                st.just(steps.references())
                 | st.lists(names).map(lambda chosen: named(*chosen))
             )
             nested = (
@@ -1592,7 +1632,9 @@ def test_unreferenced_entities_and_entity_order_do_not_change_the_result(
     case: InvarianceCase,
 ) -> None:
     original = compiler.check(case.views.models.graph(), case.views.views)
-    varied = compiler.check(EntityGraph.build(case.varied).unwrap(), case.views.views)
+    varied = compiler.check(
+        EntityGraph.build(case.varied, IdBase.fake()).unwrap(), case.views.views
+    )
 
     reordered = [e for e in case.varied if e not in case.unreferenced] != list(
         case.views.models.entities
@@ -1621,7 +1663,7 @@ def pipeline_cases(draw: st.DrawFn) -> PipelineCase:
 
 
 @given(pipeline_cases())
-def test_resolve_accepts_exactly_the_fields_is_reference_selects(
+def test_resolve_accepts_exactly_the_fields_references_selects(
     case: PipelineCase,
 ) -> None:
     def compile_step(step: steps.Step) -> compiler.CompiledView | None:
@@ -1640,8 +1682,9 @@ def test_resolve_accepts_exactly_the_fields_is_reference_selects(
         resolved = compile_step(
             steps.pipeline(case.step, steps.resolve(named(field.name)))
         )
-        event(f"is_reference: {steps.is_reference(field)}")
-        assert steps.is_reference(field) == (resolved is not None)
+        is_reference = steps.references().selects(field, IdBase.fake())
+        event(f"is_reference: {is_reference}")
+        assert is_reference == (resolved is not None)
 
 
 # Properties of the Relations compiled Views have.

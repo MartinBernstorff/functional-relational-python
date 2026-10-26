@@ -18,7 +18,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, IdBase
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.python.mappings import MappingsRenderer
 from functional_relational_python.outputs.python.models import ModelsRenderer
@@ -112,7 +112,9 @@ class Transfer(pydantic.BaseModel, frozen=True):
 
 
 def entity_graph() -> EntityGraph:
-    return EntityGraph.build([Company, Wide, Department, Employee]).unwrap()
+    return EntityGraph.build(
+        [Company, Wide, Department, Employee], IdBase.fake()
+    ).unwrap()
 
 
 def named(*names: FieldName) -> ir.Select:

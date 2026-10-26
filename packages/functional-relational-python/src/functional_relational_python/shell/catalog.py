@@ -9,6 +9,7 @@ from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
 from functional_relational_python.entity_graph.entity_graph import EntityGraph
+from functional_relational_python.entity_graph.id import IdBase
 from functional_relational_python.outputs.django.models import (
     DjangoModels,
     DjangoModelsRenderer,
@@ -33,15 +34,19 @@ from functional_relational_python.support.identifier import Identifier
 
 
 class Catalog(pydantic.BaseModel, frozen=True):
-    """The Entities, the Views over them, the Payloads, the module each View's
-    or Payload's model goes to, and whether and where Django models go.
+    """The Entities, the class their ID types subclass, the Views over them, the
+    Payloads, the module each View's or Payload's model goes to, and whether and
+    where Django models go.
 
     Views are read models, Payloads are write models. A View and a Payload cannot
     share a name. `layout` receives each compiled View and Payload. `django`
-    generates a Django model per Entity, see `DjangoModels`.
+    generates a Django model per Entity, see `DjangoModels`. `id_base` is frp's
+    `Id`, or an application's own base, so that the ID types, and with them the
+    generated code, do not need frp installed.
 
     >>> catalog = Catalog(
     ...     entities=[Company],
+    ...     id_base=IdBase(Id),
     ...     views=[View(name=ViewName("CompanySummary"), source=Company, step=...)],
     ...     payloads=[
     ...         Payload(name=PayloadName("CompanyCreate"), source=Company, step=...)
@@ -52,6 +57,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
     """
 
     entities: Sequence[type[pydantic.BaseModel]]
+    id_base: IdBase
     views: Sequence[View]
     payloads: Sequence[Payload]
     layout: ModuleLayout
@@ -61,7 +67,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
         self,
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
         """Every generated file, or every diagnostic of every output."""
-        match EntityGraph.build(self.entities):
+        match EntityGraph.build(self.entities, self.id_base):
             case Err(graph_error):
                 return Err(graph_error)
             case Ok(graph):
