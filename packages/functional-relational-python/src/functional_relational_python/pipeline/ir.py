@@ -5,7 +5,7 @@ and derives its Relation: the fields a View result will have, each with its type
 and the Value that computes it. Backends run the Relation, not the node tree.
 """
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 
 import pydantic
 from pydantic.fields import FieldInfo
@@ -37,14 +37,31 @@ class FromSource(pydantic.BaseModel, frozen=True):
 
 
 class Omit(pydantic.BaseModel, frozen=True):
+    """Removes one named field, or every selected field."""
+
     input: Node
-    field: FieldName
+    fields: FieldName | Select
 
 
 class Rename(pydantic.BaseModel, frozen=True):
     input: Node
     field: FieldName
     new: FieldName
+
+
+type FieldRenaming = Callable[[FieldName], FieldName]
+"""Gives a field its new name from its old one."""
+
+
+class RenameSelected(pydantic.BaseModel, frozen=True):
+    """Renames every selected field to `new` of its name, all at once.
+
+    Because the renames happen together, selected fields can swap names.
+    """
+
+    input: Node
+    fields: Select
+    new: FieldRenaming
 
 
 class Project(pydantic.BaseModel, frozen=True):
@@ -71,7 +88,7 @@ class Resolve(pydantic.BaseModel, frozen=True):
     then: Callable[[Node], Node]
 
 
-type Node = FromSource | Omit | Rename | Project | Resolve
+type Node = FromSource | Omit | Rename | RenameSelected | Project | Resolve
 
 
 class SourceField(pydantic.BaseModel, frozen=True):
@@ -190,20 +207,26 @@ class Relation(pydantic.BaseModel, frozen=True):
                 first[lookup.target] = lookup
         return tuple(first.values())
 
-    def renamed(self, old: FieldName, new: FieldName) -> Relation:
-        """Renames `old` to `new` in place, keeping its type."""
+    def selected(self, fields: Select) -> tuple[FieldName, ...]:
+        """The names of the fields `fields` selects, in field order."""
+        return tuple(field.name for field in self.fields if fields.predicate(field))
+
+    def renamed(self, names: Mapping[FieldName, FieldName]) -> Relation:
+        """Renames each key of `names` to its value in place, keeping its type."""
         return Relation(
             source=self.source,
             fields=tuple(
-                field.model_copy(update={"name": new}) if field.name == old else field
+                field.model_copy(update={"name": names[field.name]})
+                if field.name in names
+                else field
                 for field in self.fields
             ),
         )
 
-    def without(self, name: FieldName) -> Relation:
+    def without(self, names: Collection[FieldName]) -> Relation:
         return Relation(
             source=self.source,
-            fields=tuple(field for field in self.fields if field.name != name),
+            fields=tuple(field for field in self.fields if field.name not in names),
         )
 
     def keeping(self, names: Collection[FieldName]) -> Relation:

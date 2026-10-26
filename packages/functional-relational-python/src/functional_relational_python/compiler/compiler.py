@@ -113,7 +113,9 @@ def _check_node(
     match node:
         case ir.FromSource():
             return ir.Relation.of(node)
-        case ir.Omit() | ir.Rename() | ir.Project() | ir.Resolve():
+        case (
+            ir.Omit() | ir.Rename() | ir.RenameSelected() | ir.Project() | ir.Resolve()
+        ):
             match _check_node(entity_graph, view, node.input):
                 case ir.Relation() as relation:
                     return _check_step(entity_graph, view, node, relation)
@@ -126,7 +128,7 @@ def _check_node(
 def _check_step(
     entity_graph: EntityGraph,
     view: ViewName,
-    node: ir.Omit | ir.Rename | ir.Project | ir.Resolve,
+    node: ir.Omit | ir.Rename | ir.RenameSelected | ir.Project | ir.Resolve,
     relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
     """Checks one step against the relation its input has."""
@@ -135,6 +137,8 @@ def _check_step(
             return _check_omit(view, node, relation)
         case ir.Rename():
             return _check_rename(view, node, relation)
+        case ir.RenameSelected():
+            return _check_rename_selected(view, node, relation)
         case ir.Project():
             return _check_project(view, node, relation)
         case ir.Resolve():
@@ -144,8 +148,14 @@ def _check_step(
 def _check_omit(
     view: ViewName, node: ir.Omit, relation: ir.Relation
 ) -> ir.Relation | Poisoned:
-    if node.field in relation.field_names():
-        return relation.without(node.field)
+    match node.fields:
+        case ir.Select() as selected:
+            # Selecting no field is no defect, as for `resolve`.
+            return relation.without(relation.selected(selected))
+        case FieldName() as field:
+            pass
+    if field in relation.field_names():
+        return relation.without((field,))
     # Omitting a field that is not there leaves the relation unchanged, so that is
     # an exact recovery.
     return Poisoned(
@@ -154,7 +164,7 @@ def _check_omit(
             diagnostics.UnknownField(
                 view=view,
                 source=relation.source,
-                field=node.field,
+                field=field,
                 valid=relation.field_names(),
             ),
         ),
@@ -181,7 +191,7 @@ def _check_rename(
         )
     reported.extend(ViewModelNames.check_field(view, relation.source, node.new))
     if not reported:
-        return relation.renamed(node.field, node.new)
+        return relation.renamed({node.field: node.new})
     return Poisoned(
         recovered=_recovered_rename(node, relation), diagnostics=tuple(reported)
     )
@@ -195,9 +205,9 @@ def _recovered_rename(node: ir.Rename, relation: ir.Relation) -> ir.Relation:
     """
     names = relation.field_names()
     if node.new in names:
-        return relation.without(node.field)
+        return relation.without((node.field,))
     if node.field in names:
-        return relation.renamed(node.field, node.new)
+        return relation.renamed({node.field: node.new})
     return ir.Relation(
         source=relation.source,
         fields=(
@@ -207,6 +217,37 @@ def _recovered_rename(node: ir.Rename, relation: ir.Relation) -> ir.Relation:
             ),
         ),
     )
+
+
+def _check_rename_selected(
+    view: ViewName, node: ir.RenameSelected, relation: ir.Relation
+) -> ir.Relation | Poisoned:
+    """Renames every selected field at once, so selected fields can swap names.
+
+    A selected field renamed onto a name that an unselected field, or an earlier
+    selected field, ends up with is a diagnostic. It is dropped, so the field that
+    has the name keeps it, as for a single rename.
+    """
+    selected = relation.selected(node.fields)
+    taken = {name for name in relation.field_names() if name not in selected}
+    renames: dict[FieldName, FieldName] = {}
+    dropped: list[FieldName] = []
+    reported: list[diagnostics.CompileDiagnostic] = []
+    for old in selected:
+        new = node.new(old)
+        reported.extend(ViewModelNames.check_field(view, relation.source, new))
+        if new in taken:
+            reported.append(
+                diagnostics.RenameOntoExistingField(view=view, renamed=old, field=new)
+            )
+            dropped.append(old)
+        else:
+            taken.add(new)
+            renames[old] = new
+    renamed = relation.without(dropped).renamed(renames)
+    if not reported:
+        return renamed
+    return Poisoned(recovered=renamed, diagnostics=tuple(reported))
 
 
 def _check_project(
