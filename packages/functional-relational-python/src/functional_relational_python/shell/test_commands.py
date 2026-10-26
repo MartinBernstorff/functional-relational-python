@@ -3,8 +3,13 @@ import pytest
 from safe_result import Err, Ok
 
 from functional_relational_python.compiler import compiler
+from functional_relational_python.compiler.model_names import InvalidModelName
 from functional_relational_python.entity_graph.entity_graph import FieldName
 from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.outputs.django.models import (
+    DjangoModels,
+    NoDjangoFieldRule,
+)
 from functional_relational_python.outputs.python.symbols import ModulePath
 from functional_relational_python.pipeline import steps
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
@@ -62,6 +67,7 @@ catalog = Catalog(
         )
     ],
     layout=by_kind,
+    django=DjangoModels.fake(),
 )
 
 invalid_catalog = catalog.model_copy(
@@ -81,6 +87,24 @@ shared_name_catalog = catalog.model_copy(
             for view in catalog.views
         ]
     }
+)
+
+django_into_a_python_module_catalog = catalog.model_copy(
+    update={
+        "django": DjangoModels.fake().model_copy(
+            update={"module": ModulePath("app.cards")}
+        )
+    }
+)
+
+
+class Untyped(pydantic.BaseModel):
+    id: CompanyId
+    labels: frozenset[Text]
+
+
+invalid_view_and_django_catalog = invalid_catalog.model_copy(
+    update={"entities": [Untyped]}
 )
 
 not_a_catalog = Text("catalog")
@@ -105,13 +129,14 @@ def test_generate_writes_files_that_check_accepts() -> None:
     assert written == (
         root.file(ModulePath("app.cards").file_path()),
         root.file(ModulePath("app.payloads").file_path()),
+        root.file(DjangoModels.fake().module.file_path()),
     )
     assert commands.check(filesystem, root) == Ok(None)
 
 
 def test_check_reports_an_edited_file() -> None:
     filesystem, root = project(in_this_module(Text("catalog")))
-    (_, path) = commands.generate(filesystem, root).unwrap()
+    (_, path, _) = commands.generate(filesystem, root).unwrap()
     filesystem.write(path, FileText(f"{filesystem.files[path].root}# edited\n"))
 
     match commands.check(filesystem, root):
@@ -132,6 +157,10 @@ def test_check_reports_an_edited_file() -> None:
         (in_this_module(Text("not_a_catalog")), NotACatalogError),
         (in_this_module(Text("invalid_catalog")), DiagnosticsError),
         (in_this_module(Text("shared_name_catalog")), DiagnosticsError),
+        (
+            in_this_module(Text("django_into_a_python_module_catalog")),
+            DiagnosticsError,
+        ),
     ],
 )
 def test_generate_reports_why_it_cannot_run(
@@ -145,3 +174,17 @@ def test_generate_reports_why_it_cannot_run(
         case Err(error):
             assert isinstance(error, error_type)
     assert list(filesystem.files) == [root.file(ConfigFile.name)]
+
+
+def test_generate_reports_the_diagnostics_of_every_output() -> None:
+    filesystem, root = project(in_this_module(Text("invalid_view_and_django_catalog")))
+
+    match commands.generate(filesystem, root):
+        case Ok(written):
+            pytest.fail(f"expected diagnostics, wrote {written}")
+        case Err(error):
+            assert isinstance(error, DiagnosticsError)
+            assert {type(diagnostic) for diagnostic in error.diagnostics} == {
+                InvalidModelName,
+                NoDjangoFieldRule,
+            }
