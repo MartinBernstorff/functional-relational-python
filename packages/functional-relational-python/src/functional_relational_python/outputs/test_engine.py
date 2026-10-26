@@ -1,4 +1,5 @@
 import enum
+from typing import Annotated
 
 import pydantic
 import pytest
@@ -11,7 +12,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, OneToOne
 from functional_relational_python.outputs import engine
 from functional_relational_python.pipeline import ir, steps
 from functional_relational_python.pipeline.views import View, ViewName
@@ -403,6 +404,116 @@ def test_a_dangling_reference_names_the_entity_the_field_and_the_ids() -> None:
     )
 
 
+class ProfileId(Id[int]):
+    pass
+
+
+class Profile(pydantic.BaseModel, frozen=True):
+    """An Employee's detail row: at most one per Employee."""
+
+    id: ProfileId
+    employee_id: Annotated[EmployeeId, OneToOne()]
+    bio: Text
+
+    @staticmethod
+    def fake(profile_id: ProfileId, employee_id: EmployeeId) -> Profile:
+        return Profile(id=profile_id, employee_id=employee_id, bio=Text("Hi"))
+
+
+def profile_engine(*views: View) -> engine.InMemoryViewEngine:
+    graph = EntityGraph.build([Company, Department, Employee, Profile]).unwrap()
+    match compiler.compile_views(graph, views):
+        case Ok(compiled):
+            return engine.InMemoryViewEngine(graph, compiled)
+        case Err(error):
+            pytest.fail(f"expected compiled views, got {error}")
+
+
+def test_reverse_gives_the_entity_referencing_each_row_or_none() -> None:
+    view = employee_view(
+        steps.pipeline(steps.project([FieldName("id")]), steps.reverse(Profile))
+    )
+    view_engine = profile_engine(view)
+    department = DepartmentId(1)
+    with_profile = Employee.fake(EmployeeId(1), department, None)
+    without_profile = Employee.fake(EmployeeId(2), department, None)
+    profile = Profile.fake(ProfileId(1), with_profile.id)
+    for entity in (with_profile, without_profile, profile):
+        view_engine.put(entity).unwrap()
+
+    assert read(view_engine, view.name) == tuple(
+        engine.ViewRow({FieldName("id"): employee.id, FieldName("profile"): found})
+        for employee, found in ((with_profile, profile), (without_profile, None))
+    )
+
+
+def test_a_nested_pipeline_runs_on_the_reversed_entity() -> None:
+    view = employee_view(
+        steps.pipeline(
+            steps.project([FieldName("id")]),
+            steps.reverse(Profile, steps.project([FieldName("bio")])),
+        )
+    )
+    view_engine = profile_engine(view)
+    employee = Employee.fake(EmployeeId(1), DepartmentId(1), None)
+    profile = Profile.fake(ProfileId(1), employee.id)
+    for entity in (employee, profile):
+        view_engine.put(entity).unwrap()
+
+    assert read(view_engine, view.name) == (
+        engine.ViewRow(
+            {
+                FieldName("id"): employee.id,
+                FieldName("profile"): engine.ViewRow({FieldName("bio"): profile.bio}),
+            }
+        ),
+    )
+
+
+def test_every_id_several_entities_share_in_a_one_to_one_reference_is_reported() -> (
+    None
+):
+    view = employee_view(steps.reverse(Profile))
+    view_engine = profile_engine(view)
+    employees = tuple(
+        Employee.fake(EmployeeId(index), DepartmentId(1), None) for index in (1, 2, 3)
+    )
+    profiles = (
+        Profile.fake(ProfileId(1), employees[0].id),
+        Profile.fake(ProfileId(2), employees[0].id),
+        Profile.fake(ProfileId(3), employees[1].id),
+        Profile.fake(ProfileId(4), employees[1].id),
+        Profile.fake(ProfileId(5), employees[2].id),
+    )
+    for entity in (*employees, *profiles):
+        view_engine.put(entity).unwrap()
+
+    match view_engine.read(view.name):
+        case Err(DiagnosticsError() as error):
+            assert error.diagnostics == (
+                engine.SharedOneToOneReference(
+                    entity=Profile,
+                    field=FieldName("employee_id"),
+                    shared=(employees[0].id, employees[1].id),
+                ),
+            )
+        case result:
+            pytest.fail(f"expected shared one-to-one References, got {result}")
+
+
+def test_a_shared_one_to_one_reference_names_the_entity_the_field_and_the_ids() -> None:
+    shared = engine.SharedOneToOneReference(
+        entity=Profile,
+        field=FieldName("employee_id"),
+        shared=(EmployeeId(1), EmployeeId(2)),
+    )
+
+    assert shared.describe().root == (
+        "Profile.employee_id is one-to-one, but several Profile entities reference "
+        "each of: 1, 2"
+    )
+
+
 # Property-based tests: the engine runs every View the compiler compiles, over
 # EntityGraphs generated per example (see `test_compiler`).
 
@@ -529,8 +640,8 @@ def with_ids_again(
                 values[reference.field.root] = (
                     vars(value)["id"] if isinstance(value, pydantic.BaseModel) else None
                 )
-            case ir.Added():
-                # An added field holds no value of the Source.
+            case ir.Added() | ir.ReverseLookup():
+                # Neither holds a value of the Source.
                 pass
     return source(**values)
 

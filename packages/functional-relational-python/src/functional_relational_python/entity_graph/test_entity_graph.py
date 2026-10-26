@@ -1,12 +1,13 @@
 import itertools
 from collections.abc import Sequence
+from typing import Annotated
 
 import pytest
 from pydantic import BaseModel, RootModel
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.entity_graph import entity_graph
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, OneToOne
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
 
@@ -80,6 +81,25 @@ class OptionalId(BaseModel):
     id: DepartmentId | None
 
 
+class ProjectDetailId(Id[int]):
+    pass
+
+
+class ProjectDetail(BaseModel):
+    id: ProjectDetailId
+    project_id: Annotated[ProjectId, OneToOne()]
+    successor_id: Annotated[ProjectId | None, OneToOne()]
+
+
+class MarkedPlainField(BaseModel):
+    id: ProjectDetailId
+    name: Annotated[Name, OneToOne()]
+
+
+class MarkedPrimaryKey(BaseModel):
+    id: Annotated[ProjectDetailId, OneToOne()]
+
+
 def _diagnostics(
     entities: Sequence[type[BaseModel]],
 ) -> frozenset[entity_graph.EntityGraphDiagnostic]:
@@ -100,12 +120,14 @@ def test_references_resolve_to_the_entity_owning_their_id_type() -> None:
             id_type=EmployeeId,
             target=Employee,
             optionality=entity_graph.Optionality.REQUIRED,
+            cardinality=entity_graph.Cardinality.MANY_TO_ONE,
         ),
         entity_graph.Reference(
             field=entity_graph.FieldName("department_id"),
             id_type=DepartmentId,
             target=Department,
             optionality=entity_graph.Optionality.OPTIONAL,
+            cardinality=entity_graph.Cardinality.MANY_TO_ONE,
         ),
     )
 
@@ -316,3 +338,50 @@ def test_an_annotation_is_written_with_its_optionality(
     optionality: entity_graph.Optionality, text: str
 ) -> None:
     assert optionality.annotate_text(Label("Label")) == Label(text)
+
+
+def test_a_reference_marked_one_to_one_is_one_to_one_whether_optional_or_not() -> None:
+    graph = entity_graph.EntityGraph.build(
+        [Department, Employee, Project, ProjectDetail]
+    ).unwrap()
+
+    assert [
+        (reference.field, reference.optionality, reference.cardinality)
+        for reference in graph.entities[ProjectDetail].references
+    ] == [
+        (
+            entity_graph.FieldName("project_id"),
+            entity_graph.Optionality.REQUIRED,
+            entity_graph.Cardinality.ONE_TO_ONE,
+        ),
+        (
+            entity_graph.FieldName("successor_id"),
+            entity_graph.Optionality.OPTIONAL,
+            entity_graph.Cardinality.ONE_TO_ONE,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("model", "field"),
+    [
+        pytest.param(MarkedPlainField, entity_graph.FieldName("name"), id="plain"),
+        pytest.param(MarkedPrimaryKey, entity_graph.FieldName("id"), id="primary key"),
+    ],
+)
+def test_marking_a_field_that_is_not_a_reference_one_to_one_is_a_diagnostic(
+    model: type[BaseModel], field: entity_graph.FieldName
+) -> None:
+    assert _diagnostics([model]) == {
+        entity_graph.OneToOneOnNonReference(entity=model, field=field)
+    }
+
+
+def test_the_one_to_one_on_non_reference_message_names_the_field() -> None:
+    diagnostic = entity_graph.OneToOneOnNonReference(
+        entity=MarkedPlainField, field=entity_graph.FieldName("name")
+    )
+
+    assert diagnostic.describe().root == (
+        "MarkedPlainField.name is marked OneToOne, but is not a Reference"
+    )

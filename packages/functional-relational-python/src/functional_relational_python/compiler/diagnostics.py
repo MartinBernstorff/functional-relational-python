@@ -91,6 +91,113 @@ class ResolvedNameCollision(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class ReverseFromNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`reverse` was applied to a subject that is not an Entity, so no Reference
+    can point to it."""
+
+    view: DefinitionName
+    source: ir.SourceName
+    entity: type[pydantic.BaseModel]
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot reverse {self.entity.__qualname__} onto "
+            f"{self.source.root}, because {self.source.root} is not an entity."
+        )
+
+
+class ReverseOfNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`reverse` named a model that is not an Entity in the EntityGraph."""
+
+    view: DefinitionName
+    source: ir.SourceName
+    entity: type[pydantic.BaseModel]
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot reverse {self.entity.__qualname__} onto "
+            f"{self.source.root}, because {self.entity.__qualname__} is not an "
+            "entity."
+        )
+
+
+class NoOneToOneReference(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`reverse` named an Entity with no one-to-one Reference to the subject.
+
+    `many_to_one` are its References to the subject that are not marked
+    `OneToOne`; following one backwards would give several Entities.
+    """
+
+    view: DefinitionName
+    source: ir.SourceName
+    entity: type[pydantic.BaseModel]
+    many_to_one: tuple[FieldName, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        message = (
+            f"{self.view.root}: cannot reverse {self.entity.__qualname__} onto "
+            f"{self.source.root}, because it has no one-to-one Reference to "
+            f"{self.source.root}."
+        )
+        if self.many_to_one:
+            fields = ", ".join(f"'{field.root}'" for field in self.many_to_one)
+            message += f" Its References {fields} are not marked OneToOne."
+        return DiagnosticMessage(message)
+
+
+class AmbiguousReverse(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`reverse` named an Entity with several one-to-one References to the subject,
+    without choosing one with `reverse_via`."""
+
+    view: DefinitionName
+    source: ir.SourceName
+    entity: type[pydantic.BaseModel]
+    references: tuple[FieldName, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        fields = ", ".join(f"'{field.root}'" for field in self.references)
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot reverse {self.entity.__qualname__} onto "
+            f"{self.source.root}, because each of {fields} is a one-to-one "
+            f"Reference to {self.source.root}. Choose one with reverse_via."
+        )
+
+
+class NotAOneToOneReference(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`reverse_via` named a field that is not one of the Entity's one-to-one
+    References to the subject. `valid` are those it has."""
+
+    view: DefinitionName
+    source: ir.SourceName
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+    valid: tuple[FieldName, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        valid = ", ".join(f"'{field.root}'" for field in self.valid)
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot reverse {self.entity.__qualname__}."
+            f"{self.field.root} onto {self.source.root}, because it is not a "
+            f"one-to-one Reference to {self.source.root}. Valid fields: {valid}."
+        )
+
+
+class ReverseOntoExistingField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A reversed field's name is a field the relation already has."""
+
+    view: DefinitionName
+    source: ir.SourceName
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: reversing {self.entity.__qualname__} would name it "
+            f"'{self.field.root}', but {self.source.root} already has a field "
+            f"'{self.field.root}'."
+        )
+
+
 class SharedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
     """A View and a Payload have the same name, so their models would too.
 
@@ -229,6 +336,12 @@ type CompileDiagnostic = (
     | NotAReference
     | UnresolvableReference
     | ResolvedNameCollision
+    | ReverseFromNonEntity
+    | ReverseOfNonEntity
+    | NoOneToOneReference
+    | AmbiguousReverse
+    | NotAOneToOneReference
+    | ReverseOntoExistingField
     | NonLiteralDefault
     | AddOntoExistingField
     | AddWithoutDefault

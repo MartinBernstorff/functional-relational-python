@@ -8,6 +8,7 @@ import functools
 from collections.abc import Callable, Iterable
 from typing import overload
 
+import pydantic
 from pydantic.fields import FieldInfo
 from safe_result import Ok
 
@@ -180,6 +181,39 @@ def resolve(fields: ir.Select, *then: Step) -> Step:
 
     def step(node: ir.Node) -> ir.Node:
         return ir.Resolve(input=node, fields=fields, then=nested)
+
+    return step
+
+
+def reverse(entity: type[pydantic.BaseModel], *then: Step) -> Step:
+    """Adds a field holding the `entity` that references the subject, or `None`
+    when none does.
+
+    `entity` must have exactly one one-to-one Reference (see `OneToOne`) to the
+    subject; with several, choose one with `reverse_via`. The field is named after
+    `entity` in snake_case, e.g. `meta_campaign` for `MetaCampaign`. The steps in
+    `then` form a pipeline applied to `entity`; without them, the field holds the
+    Entity itself.
+    """
+    nested = pipeline(*then)
+
+    def step(node: ir.Node) -> ir.Node:
+        return ir.Reverse(
+            input=node, entity=entity, via=ir.SoleReference(), then=nested
+        )
+
+    return step
+
+
+def reverse_via(entity: type[pydantic.BaseModel], via: FieldName, *then: Step) -> Step:
+    """Like `reverse`, following `entity`'s one-to-one Reference `via` backwards.
+
+    For an `entity` with several one-to-one References to the subject.
+    """
+    nested = pipeline(*then)
+
+    def step(node: ir.Node) -> ir.Node:
+        return ir.Reverse(input=node, entity=entity, via=via, then=nested)
 
     return step
 

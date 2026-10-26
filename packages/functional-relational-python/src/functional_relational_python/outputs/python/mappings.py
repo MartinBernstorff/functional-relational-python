@@ -2,7 +2,9 @@
 
 Each View becomes a function from one instance of its Source to its View model.
 A View that resolves References also takes, per Entity it looks up, a keyword
-parameter mapping IDs to Entities; a dangling ID raises `KeyError` there. A
+parameter mapping IDs to Entities; a dangling ID raises `KeyError` there. A View
+that reverses a one-to-one Reference takes a parameter mapping the IDs in that
+Reference to the Entities holding them; a missing ID gives `None`. A
 module of mapping functions imports only the Source, Entity and View model
 modules, so it runs and type checks without this library installed.
 
@@ -16,7 +18,10 @@ from collections.abc import Callable, Sequence
 
 import pydantic
 
-from functional_relational_python.entity_graph.entity_graph import Optionality
+from functional_relational_python.entity_graph.entity_graph import (
+    EntityNode,
+    Optionality,
+)
 from functional_relational_python.outputs.python.plan import (
     FunctionPlan,
     ModelPlan,
@@ -156,6 +161,10 @@ class _Construction:
                     case ir.Lookup():
                         entity = self._entity(value, subject)
                         return self._optional(field, value, subject, lambda _: entity)
+                    case ir.ReverseLookup():
+                        parameter = self.function.parameter_of(value).root
+                        key = self._key(value, subject).root
+                        return Expression(f"{parameter}.get({key})")
                     case ir.Added():
                         return LeftOut()
             case ir.NestedField(value=lookup):
@@ -169,20 +178,29 @@ class _Construction:
                     ),
                 )
 
-    def _entity(self, lookup: ir.Lookup, subject: Expression) -> Expression:
+    def _key(self, lookup: ir.EntityLookup, subject: Expression) -> Expression:
+        """The subject's value `lookup` finds its Entity by: the Reference's ID,
+        or for a reversed Reference the subject's own ID."""
+        match lookup:
+            case ir.Lookup():
+                field = lookup.reference.field
+            case ir.ReverseLookup():
+                field = EntityNode.primary_key
+        return Expression(f"{subject.root}.{field.root}")
+
+    def _entity(self, lookup: ir.EntityLookup, subject: Expression) -> Expression:
         parameter = self.function.parameter_of(lookup)
-        return Expression(
-            f"{parameter.root}[{subject.root}.{lookup.reference.field.root}]"
-        )
+        return Expression(f"{parameter.root}[{self._key(lookup, subject).root}]")
 
     def _optional(
         self,
         field: ir.RelationField,
-        lookup: ir.Lookup,
+        lookup: ir.EntityLookup,
         subject: Expression,
         present: Callable[[_Construction], Expression],
     ) -> Expression:
-        """`present` itself, or `None` when an optional Reference is absent.
+        """`present` itself, or `None` when an optional Reference is absent, or no
+        Entity holds a reversed one.
 
         `present` gets the construction to write its expression at.
         """
@@ -191,14 +209,19 @@ class _Construction:
                 return present(self)
             case Optionality.OPTIONAL:
                 pass
-        reference = f"{subject.root}.{lookup.reference.field.root}"
-        inline = f"None if {reference} is None else {present(self).root}"
+        key = self._key(lookup, subject).root
+        match lookup:
+            case ir.Lookup():
+                absent = f"{key} is None"
+            case ir.ReverseLookup():
+                absent = f"{key} not in {self.function.parameter_of(lookup).root}"
+        inline = f"None if {absent} else {present(self).root}"
         line = f"{self.indent.pad().root}{field.name.root}={inline},"
         if "\n" not in inline and len(line) <= LineLength.default().root:
             return Expression(inline)
         inner = _Construction(self.function, self.indent.deeper())
         pad = inner.indent.pad().root
         return Expression(
-            f"(\n{pad}None\n{pad}if {reference} is None\n"
+            f"(\n{pad}None\n{pad}if {absent}\n"
             f"{pad}else {present(inner).root}\n{self.indent.pad().root})"
         )

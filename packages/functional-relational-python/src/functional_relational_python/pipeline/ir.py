@@ -7,12 +7,14 @@ and the Value that computes it. Backends run the Relation, not the node tree.
 
 import copy
 import enum
+import typing
 from collections.abc import Callable, Collection, Mapping
 
 import pydantic
 from pydantic.fields import FieldInfo
 
 from functional_relational_python.entity_graph.entity_graph import (
+    EntityNode,
     FieldName,
     Optionality,
     RuntimeAnnotation,
@@ -104,6 +106,25 @@ class Resolve(pydantic.BaseModel, frozen=True):
     then: Callable[[Node], Node]
 
 
+class SoleReference(pydantic.BaseModel, frozen=True):
+    """The one one-to-one Reference an Entity has to the subject, whichever field
+    it is."""
+
+
+class Reverse(pydantic.BaseModel, frozen=True):
+    """Adds a field holding the `entity` whose one-to-one Reference `via` points to
+    the subject, or `None` when none does.
+
+    The subject is the View's Source, or inside a nested pipeline the Entity it
+    runs on. `then` is applied to `entity`, as if it were a View's Source.
+    """
+
+    input: Node
+    entity: type[pydantic.BaseModel]
+    via: FieldName | SoleReference
+    then: Callable[[Node], Node]
+
+
 type UncheckedDefault = object
 """A value given to `default`, before the compiler checks that it is a literal."""
 
@@ -151,6 +172,7 @@ type Node = (
     | Retype
     | Project
     | Resolve
+    | Reverse
     | Default
     | Add
 )
@@ -210,6 +232,39 @@ class Lookup(pydantic.BaseModel, frozen=True):
         Reference is."""
         return self.optionality.annotate(self.target)
 
+    def keyed_by(self) -> FieldName:
+        """The target's field the subject's ID is matched against: its primary
+        key."""
+        return EntityNode.primary_key
+
+
+class ReverseLookup(pydantic.BaseModel, frozen=True):
+    """The Entity whose one-to-one Reference `via` holds the subject's primary key,
+    or `None` when no Entity's does.
+
+    `id_type` is the subject's primary key type, which `via` is typed with.
+    """
+
+    optionality: typing.ClassVar[Optionality] = Optionality.OPTIONAL
+    """Whether a referencing Entity exists is up to the data, so it is always
+    optional."""
+
+    target: type[pydantic.BaseModel]
+    via: FieldName
+    id_type: IdType
+
+    def annotation(self) -> type[pydantic.BaseModel | None]:
+        """The looked-up value's type: the target Entity, or `None`."""
+        return self.optionality.annotate(self.target)
+
+    def keyed_by(self) -> FieldName:
+        """The target's field the subject's ID is matched against: `via`."""
+        return self.via
+
+
+type EntityLookup = Lookup | ReverseLookup
+"""How a field holding an Entity finds it from the subject."""
+
 
 class Added(pydantic.BaseModel, frozen=True):
     """No value from the subject: a field `add` declared.
@@ -218,7 +273,7 @@ class Added(pydantic.BaseModel, frozen=True):
     """
 
 
-type Value = SourceField | Lookup | Added
+type Value = SourceField | Lookup | ReverseLookup | Added
 """How a field of a View result is computed from the subject."""
 
 
@@ -234,7 +289,7 @@ class Field(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def looked_up(
-        name: FieldName, lookup: Lookup, default: DefaultValue | NoDefault
+        name: FieldName, lookup: EntityLookup, default: DefaultValue | NoDefault
     ) -> Field:
         """The field holding the Entity `lookup` finds, typed by `lookup.annotation()`."""
         return Field(
@@ -262,14 +317,14 @@ class Field(pydantic.BaseModel, frozen=True):
 
 
 class NestedField(pydantic.BaseModel, frozen=True):
-    """A resolved field whose Entity went through a nested pipeline.
+    """A resolved or reversed field whose Entity went through a nested pipeline.
 
     Its type is a View model generated from `relation`, built from the Entity
     `value` looks up.
     """
 
     name: FieldName
-    value: Lookup
+    value: EntityLookup
     relation: Relation
     default: DefaultValue | NoDefault
 
@@ -306,26 +361,28 @@ class Relation(pydantic.BaseModel, frozen=True):
     def field_names(self) -> tuple[FieldName, ...]:
         return tuple(field.name for field in self.fields)
 
-    def lookups(self) -> tuple[Lookup, ...]:
-        """One Lookup per Entity this relation looks up, nested ones included.
+    def lookups(self) -> tuple[EntityLookup, ...]:
+        """One lookup per Entity this relation looks up and the field it is
+        matched on, nested ones included.
 
-        They are in the order the Entities are first looked up.
+        Every Lookup of one Entity matches its primary key, so they count once;
+        each ReverseLookup counts once per Entity and `via`. They are in the
+        order they are first used.
         """
-        used: list[Lookup] = []
+        used: list[EntityLookup] = []
         for field in self.fields:
             match field:
                 case Field(value=value):
                     match value:
                         case SourceField() | Added():
                             pass
-                        case Lookup():
+                        case Lookup() | ReverseLookup():
                             used.append(value)
                 case NestedField(value=lookup, relation=nested):
                     used.extend((lookup, *nested.lookups()))
-        first: dict[type[pydantic.BaseModel], Lookup] = {}
+        first: dict[tuple[type[pydantic.BaseModel], FieldName], EntityLookup] = {}
         for lookup in used:
-            if lookup.target not in first:
-                first[lookup.target] = lookup
+            _ = first.setdefault((lookup.target, lookup.keyed_by()), lookup)
         return tuple(first.values())
 
     def selected(self, fields: Select) -> tuple[FieldName, ...]:

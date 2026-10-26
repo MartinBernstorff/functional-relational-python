@@ -7,7 +7,7 @@ Payloads are still checked and independent defects are all reported, once each.
 
 import enum
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Annotated
 
 import pydantic
@@ -17,9 +17,11 @@ from safe_result import Err, Ok, Result
 from functional_relational_python.compiler import diagnostics
 from functional_relational_python.compiler.model_names import (
     ModelNames,
+    PascalCase,
     ViewModelNames,
 )
 from functional_relational_python.entity_graph.entity_graph import (
+    Cardinality,
     EntityGraph,
     FieldName,
     NoEntityError,
@@ -269,6 +271,7 @@ def _check_node(
             | ir.Retype()
             | ir.Project()
             | ir.Resolve()
+            | ir.Reverse()
             | ir.Default()
             | ir.Add()
         ):
@@ -290,6 +293,7 @@ def _check_step(
     | ir.Retype
     | ir.Project
     | ir.Resolve
+    | ir.Reverse
     | ir.Default
     | ir.Add,
     relation: ir.Relation,
@@ -309,6 +313,8 @@ def _check_step(
             checked = _check_project(view, node, relation)
         case ir.Resolve():
             checked = _check_resolve(entity_graph, view, node, relation)
+        case ir.Reverse():
+            checked = _check_reverse(entity_graph, view, node, relation)
         case ir.Default():
             checked = _check_default(view, node, relation)
         case ir.Add():
@@ -663,7 +669,7 @@ def _resolve_field(
         invalid := ViewModelNames.check_field(view, relation.source, name)
     ):
         return _CheckedField(field=field, diagnostics=invalid)
-    return _resolved(entity_graph, view, node, name, lookup)
+    return _resolved(entity_graph, view, node.then, name, lookup)
 
 
 def _lookup(
@@ -713,22 +719,152 @@ def _lookup(
             )
 
 
+def _check_reverse(
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    node: ir.Reverse,
+    relation: ir.Relation,
+) -> ir.Relation | Poisoned:
+    """Appends the field holding the Entity whose one-to-one Reference points to
+    the subject, named after that Entity.
+
+    A name the relation already has recovers with the relation unchanged, so the
+    existing field keeps it, as for `add`. A Reference that cannot be followed
+    backwards recovers with a field of unknown type, so later steps still find it.
+    """
+    name = FieldName(PascalCase(node.entity.__name__).snake_case().root)
+    reported: list[diagnostics.CompileDiagnostic] = []
+    collides = name in relation.field_names()
+    if collides:
+        reported.append(
+            diagnostics.ReverseOntoExistingField(
+                view=view, source=relation.source, entity=node.entity, field=name
+            )
+        )
+    reported.extend(ViewModelNames.check_field(view, relation.source, name))
+    # The subject is what the pipeline started from, however the relation has
+    # changed since.
+    subject = node.input
+    while not isinstance(subject, ir.FromSource):
+        subject = subject.input
+    field: ir.RelationField
+    match _reverse_lookup(entity_graph, view, relation.source, subject.source, node):
+        case ir.ReverseLookup() as lookup:
+            checked = _resolved(entity_graph, view, node.then, name, lookup)
+            field = checked.field
+            reported.extend(checked.diagnostics)
+        case unresolvable:
+            field = ir.Field(
+                name=name, info=FieldInfo(), value=ir.Added(), default=ir.NoDefault()
+            )
+            reported.extend(unresolvable)
+    reversed_relation = (
+        relation
+        if collides
+        else ir.Relation(source=relation.source, fields=(*relation.fields, field))
+    )
+    if not reported:
+        return reversed_relation
+    return Poisoned(recovered=reversed_relation, diagnostics=tuple(reported))
+
+
+def _reverse_lookup(
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    source: ir.SourceName,
+    subject: type[pydantic.BaseModel],
+    node: ir.Reverse,
+) -> ir.ReverseLookup | tuple[diagnostics.CompileDiagnostic, ...]:
+    """How `node.entity` is found from `subject`, or why it can't be.
+
+    `source` is the subject's name in diagnostics.
+    """
+    reported: list[diagnostics.CompileDiagnostic] = []
+    if subject not in entity_graph.entities:
+        reported.append(
+            diagnostics.ReverseFromNonEntity(
+                view=view, source=source, entity=node.entity
+            )
+        )
+    if node.entity not in entity_graph.entities:
+        reported.append(
+            diagnostics.ReverseOfNonEntity(view=view, source=source, entity=node.entity)
+        )
+    if reported:
+        return tuple(reported)
+    to_subject = tuple(
+        reference
+        for reference in entity_graph.entities[node.entity].references
+        if reference.target is subject
+    )
+    one_to_one = tuple(
+        reference
+        for reference in to_subject
+        if reference.cardinality == Cardinality.ONE_TO_ONE
+    )
+    match node.via:
+        case ir.SoleReference():
+            chosen = one_to_one
+        case FieldName() as via:
+            chosen = tuple(
+                reference for reference in one_to_one if reference.field == via
+            )
+    if len(chosen) == 1:
+        (reference,) = chosen
+        return ir.ReverseLookup(
+            target=node.entity, via=reference.field, id_type=reference.id_type
+        )
+    match node.via:
+        case ir.SoleReference():
+            if chosen:
+                return (
+                    diagnostics.AmbiguousReverse(
+                        view=view,
+                        source=source,
+                        entity=node.entity,
+                        references=tuple(reference.field for reference in chosen),
+                    ),
+                )
+            return (
+                diagnostics.NoOneToOneReference(
+                    view=view,
+                    source=source,
+                    entity=node.entity,
+                    many_to_one=tuple(
+                        reference.field
+                        for reference in to_subject
+                        if reference.cardinality == Cardinality.MANY_TO_ONE
+                    ),
+                ),
+            )
+        case FieldName() as via:
+            return (
+                diagnostics.NotAOneToOneReference(
+                    view=view,
+                    source=source,
+                    entity=node.entity,
+                    field=via,
+                    valid=tuple(reference.field for reference in one_to_one),
+                ),
+            )
+
+
 def _resolved(
     entity_graph: EntityGraph,
     view: DefinitionName,
-    node: ir.Resolve,
+    then: Callable[[ir.Node], ir.Node],
     name: FieldName,
-    lookup: ir.Lookup,
+    lookup: ir.EntityLookup,
 ) -> _CheckedField:
-    """The field holding the looked-up Entity, after `node.then` if it does anything.
+    """The field holding the looked-up Entity, after `then` if it does anything.
 
     Without a nested pipeline the field is typed by the Entity class itself. The
-    field is new, so it has no default: the Reference's default was for an ID, and
-    need not fit the Entity.
+    field is new, so it has no default: a resolved Reference's default was for an
+    ID, and need not fit the Entity.
     """
     default = ir.NoDefault()
     root = ir.FromSource(source=lookup.target)
-    nested = node.then(root)
+    nested = then(root)
     if nested == root:
         return _CheckedField(
             field=ir.Field.looked_up(name, lookup, default), diagnostics=()

@@ -15,6 +15,7 @@ import pydantic
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.entity_graph.entity_graph import (
+    Cardinality,
     EntityGraph,
     EntityNode,
     FieldName,
@@ -554,7 +555,8 @@ class DjangoModelsRenderer:
         reference: Reference,
         on_delete: Mapping[ReferenceKey, OnDelete],
     ) -> _Declaration:
-        """A foreign key to the referenced Entity's model, named without `_id`.
+        """A foreign key to the referenced Entity's model, named without `_id`: a
+        `OneToOneField` for a one-to-one Reference, else a `ForeignKey`.
 
         Reverse accessors are off (`related_name='+'`), so several References to
         one Entity never clash.
@@ -568,9 +570,14 @@ class DjangoModelsRenderer:
         }
         if reference.optionality == Optionality.OPTIONAL:
             arguments[Identifier("null")] = ValueExpression("True")
+        match reference.cardinality:
+            case Cardinality.MANY_TO_ONE:
+                field_class = Identifier("ForeignKey")
+            case Cardinality.ONE_TO_ONE:
+                field_class = Identifier("OneToOneField")
         return _Declaration(
             name=FieldName(reference.field.root.removesuffix("_id")),
-            field=DjangoField.builtin(Identifier("ForeignKey"), arguments),
+            field=DjangoField.builtin(field_class, arguments),
             positional=(ValueExpression(repr(reference.target.__name__)),),
             source=reference.field,
             role=FieldRole.FOREIGN_KEY,
