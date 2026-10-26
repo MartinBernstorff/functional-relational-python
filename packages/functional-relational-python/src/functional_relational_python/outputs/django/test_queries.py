@@ -1,4 +1,6 @@
 import contextlib
+import enum
+import inspect
 import subprocess
 import sys
 import types
@@ -11,7 +13,7 @@ import pydantic
 import pytest
 from django.apps import apps
 from django.conf import settings as django_settings
-from django.db import connection, transaction
+from django.db import NotSupportedError, connection, transaction
 from django.db.models import Model, QuerySet
 from django.test.utils import CaptureQueriesContext
 from hypothesis import event, given, settings
@@ -28,11 +30,16 @@ from functional_relational_python.entity_graph.id import Id
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.django.models import (
     AppLabel,
+    DjangoField,
     DjangoModels,
     DjangoModelsRenderer,
 )
 from functional_relational_python.outputs.django.queries import (
+    DjangoQueriesDiagnostic,
     DjangoQueriesRenderer,
+    QueriesIntoDjangoModelsModule,
+    ViewModelIntoDjangoModelsModule,
+    ViewModelIntoQueriesModule,
 )
 from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import (
@@ -92,10 +99,18 @@ class EmployeeId(Id[int]):
     pass
 
 
+class Role(enum.StrEnum):
+    """Django stores it as text, and returns a `str`."""
+
+    STAFF = "staff"
+    LEAD = "lead"
+
+
 class Employee(pydantic.BaseModel, frozen=True):
     id: EmployeeId
     name: Text
     nickname: Text | None
+    role: Role
     department_id: DepartmentId
     mentor_id: EmployeeId | None
 
@@ -122,7 +137,7 @@ class Modules:
         return DjangoModels(
             module=Modules.django,
             app_label=AppLabel("frp_generated"),
-            field_types={},
+            field_types={Role: DjangoField.builtin(Identifier("TextField"), {})},
             on_delete={},
             queries=Modules.queries,
         )
@@ -192,6 +207,7 @@ import collections.abc
 import typing
 
 import django.db.models
+import django.db.models.expressions
 import frp_generated_models
 
 if typing.TYPE_CHECKING:
@@ -199,40 +215,42 @@ if typing.TYPE_CHECKING:
 
 
 def company_full_queryset(
-    queryset: django.db.models.QuerySet[frp_generated_django.Company],
-) -> django.db.models.QuerySet[frp_generated_django.Company]:
-    return queryset
+    queryset: "django.db.models.QuerySet[frp_generated_django.Company]",
+) -> "django.db.models.QuerySet[frp_generated_django.Company]":
+    return queryset.defer(None)
 
 
 def company_full_from_row(
-    row: frp_generated_django.Company,
+    row: "frp_generated_django.Company",
 ) -> frp_generated_models.CompanyFull:
     return frp_generated_models.CompanyFull.model_validate(
         {
             "id": row.id,
             "name": row.name,
             "parent": row.parent_id,
-        }
+        },
+        strict=False,
     )
 
 
 def employee_hydrated_queryset(
-    queryset: django.db.models.QuerySet[frp_generated_django.Employee],
-) -> django.db.models.QuerySet[frp_generated_django.Employee]:
-    return queryset.select_related(
+    queryset: "django.db.models.QuerySet[frp_generated_django.Employee]",
+) -> "django.db.models.QuerySet[frp_generated_django.Employee]":
+    return queryset.defer(None).select_related(
         "department",
         "mentor",
     )
 
 
 def employee_hydrated_from_row(
-    row: frp_generated_django.Employee,
+    row: "frp_generated_django.Employee",
 ) -> frp_generated_models.EmployeeHydrated:
     return frp_generated_models.EmployeeHydrated.model_validate(
         {
             "id": row.id,
             "name": row.name,
             "nickname": row.nickname,
+            "role": row.role,
             "department": {
                 "id": row.department.id,
                 "name": row.department.name,
@@ -245,18 +263,20 @@ def employee_hydrated_from_row(
                     "id": row.mentor.id,
                     "name": row.mentor.name,
                     "nickname": row.mentor.nickname,
+                    "role": row.mentor.role,
                     "department_id": row.mentor.department_id,
                     "mentor_id": row.mentor.mentor_id,
                 }
             ),
-        }
+        },
+        strict=False,
     )
 
 
 def employee_overview_queryset(
-    queryset: django.db.models.QuerySet[frp_generated_django.Employee],
-) -> django.db.models.QuerySet[frp_generated_django.Employee]:
-    return queryset.select_related(
+    queryset: "django.db.models.QuerySet[frp_generated_django.Employee]",
+) -> "django.db.models.QuerySet[frp_generated_django.Employee]":
+    return queryset.defer(None).select_related(
         "department",
         "department__company",
         "mentor",
@@ -264,13 +284,14 @@ def employee_overview_queryset(
 
 
 def employee_overview_from_row(
-    row: frp_generated_django.Employee,
+    row: "frp_generated_django.Employee",
 ) -> frp_generated_models.EmployeeOverview:
     return frp_generated_models.EmployeeOverview.model_validate(
         {
             "id": row.id,
             "name": row.name,
             "nickname": row.nickname,
+            "role": row.role,
             "department": {
                 "id": row.department.id,
                 "name": row.department.name,
@@ -287,23 +308,25 @@ def employee_overview_from_row(
                     "department_id": row.mentor.department_id,
                 }
             ),
-        }
+        },
+        strict=False,
     )
 
 
 def employee_tagged_queryset(
-    queryset: django.db.models.QuerySet[frp_generated_django.Employee],
-) -> django.db.models.QuerySet[frp_generated_django.Employee]:
-    return queryset
+    queryset: "django.db.models.QuerySet[frp_generated_django.Employee]",
+) -> "django.db.models.QuerySet[frp_generated_django.Employee]":
+    return queryset.defer(None)
 
 
 def employee_tagged_from_row(
-    row: frp_generated_django.Employee,
+    row: "frp_generated_django.Employee",
 ) -> frp_generated_models.EmployeeTagged:
     return frp_generated_models.EmployeeTagged.model_validate(
         {
             "id": row.id,
-        }
+        },
+        strict=False,
     )
 
 
@@ -317,8 +340,93 @@ class CompanyQuerySet(django.db.models.QuerySet["frp_generated_django.Company"])
         )
 
 
+class CompanyManager(django.db.models.Manager["frp_generated_django.Company"]):
+    @typing.override
+    def get_queryset(
+        self,
+    ) -> CompanyQuerySet:
+        return CompanyQuerySet(
+            self.model,
+            using=self._db,
+        )
+
+    @typing.override
+    def all(
+        self,
+    ) -> CompanyQuerySet:
+        return self.get_queryset()
+
+    @typing.override
+    def filter(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> CompanyQuerySet:
+        return self.get_queryset().filter(*args, **kwargs)
+
+    @typing.override
+    def exclude(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> CompanyQuerySet:
+        return self.get_queryset().exclude(*args, **kwargs)
+
+    @typing.override
+    def order_by(
+        self,
+        *field_names: str | django.db.models.expressions.Combinable,
+    ) -> CompanyQuerySet:
+        return self.get_queryset().order_by(*field_names)
+
+    def as_company_full(
+        self,
+    ) -> collections.abc.Iterator[frp_generated_models.CompanyFull]:
+        return self.get_queryset().as_company_full()
+
+
 class DepartmentQuerySet(django.db.models.QuerySet["frp_generated_django.Department"]):
     pass
+
+
+class DepartmentManager(django.db.models.Manager["frp_generated_django.Department"]):
+    @typing.override
+    def get_queryset(
+        self,
+    ) -> DepartmentQuerySet:
+        return DepartmentQuerySet(
+            self.model,
+            using=self._db,
+        )
+
+    @typing.override
+    def all(
+        self,
+    ) -> DepartmentQuerySet:
+        return self.get_queryset()
+
+    @typing.override
+    def filter(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> DepartmentQuerySet:
+        return self.get_queryset().filter(*args, **kwargs)
+
+    @typing.override
+    def exclude(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> DepartmentQuerySet:
+        return self.get_queryset().exclude(*args, **kwargs)
+
+    @typing.override
+    def order_by(
+        self,
+        *field_names: str | django.db.models.expressions.Combinable,
+    ) -> DepartmentQuerySet:
+        return self.get_queryset().order_by(*field_names)
 
 
 class EmployeeQuerySet(django.db.models.QuerySet["frp_generated_django.Employee"]):
@@ -345,6 +453,61 @@ class EmployeeQuerySet(django.db.models.QuerySet["frp_generated_django.Employee"
             employee_tagged_from_row,
             employee_tagged_queryset(self),
         )
+
+
+class EmployeeManager(django.db.models.Manager["frp_generated_django.Employee"]):
+    @typing.override
+    def get_queryset(
+        self,
+    ) -> EmployeeQuerySet:
+        return EmployeeQuerySet(
+            self.model,
+            using=self._db,
+        )
+
+    @typing.override
+    def all(
+        self,
+    ) -> EmployeeQuerySet:
+        return self.get_queryset()
+
+    @typing.override
+    def filter(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> EmployeeQuerySet:
+        return self.get_queryset().filter(*args, **kwargs)
+
+    @typing.override
+    def exclude(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> EmployeeQuerySet:
+        return self.get_queryset().exclude(*args, **kwargs)
+
+    @typing.override
+    def order_by(
+        self,
+        *field_names: str | django.db.models.expressions.Combinable,
+    ) -> EmployeeQuerySet:
+        return self.get_queryset().order_by(*field_names)
+
+    def as_employee_hydrated(
+        self,
+    ) -> collections.abc.Iterator[frp_generated_models.EmployeeHydrated]:
+        return self.get_queryset().as_employee_hydrated()
+
+    def as_employee_overview(
+        self,
+    ) -> collections.abc.Iterator[frp_generated_models.EmployeeOverview]:
+        return self.get_queryset().as_employee_overview()
+
+    def as_employee_tagged(
+        self,
+    ) -> collections.abc.Iterator[frp_generated_models.EmployeeTagged]:
+        return self.get_queryset().as_employee_tagged()
 """
     )
 
@@ -542,6 +705,7 @@ def organisation() -> tuple[pydantic.BaseModel, ...]:
             id=EmployeeId(index),
             name=Text(f"employee {index}"),
             nickname=None if index % 2 else Text(f"nick {index}"),
+            role=Role.LEAD if index % 2 else Role.STAFF,
             department_id=departments[index % len(departments)].id,
             mentor_id=None if index % 3 == 0 else EmployeeId(index % 3 + 4),
         )
@@ -627,6 +791,196 @@ def test_a_view_reads_the_filtered_ordered_and_sliced_query_set() -> None:
     assert rows == tuple(reversed(with_mentor))[1:3]
 
 
+def hydrated() -> View:
+    return View(name=ViewName("Hydrated"), source=Employee, step=steps.hydrate())
+
+
+def only_the_name(queryset: QuerySet[Model]) -> QuerySet[Model]:
+    """Defers the fields the View needs, including the foreign keys it follows."""
+    return queryset.only("name").order_by("pk")
+
+
+def deferring_the_mentor(queryset: QuerySet[Model]) -> QuerySet[Model]:
+    return queryset.defer("mentor", "nickname").order_by("pk")
+
+
+@pytest.mark.parametrize("query", [only_the_name, deferring_the_mentor])
+def test_a_view_loads_the_fields_only_or_defer_left_out(query: Query) -> None:
+    entities = organisation()
+    (compiled,) = compile_all([hydrated()]).views
+
+    with Database.of([hydrated()]) as django_models:
+        Database.put(django_models, entities)
+        rows = Database.read(django_models, compiled, query)
+
+    assert rows == engine_rows([compiled], entities)[compiled.name]
+
+
+def test_a_view_cannot_follow_values() -> None:
+    (compiled,) = compile_all([hydrated()]).views
+
+    with Database.of([hydrated()]) as django_models:
+        queryset = django_models.Employee.objects.values("pk")
+        method = getattr(queryset, f"as_{compiled.names.function.root}")
+
+        with pytest.raises(TypeError):
+            _ = list(method())
+
+
+def test_a_view_cannot_follow_a_combinator() -> None:
+    (compiled,) = compile_all([hydrated()]).views
+
+    with Database.of([hydrated()]) as django_models:
+        employees = django_models.Employee.objects.all()
+        method = getattr(
+            employees.union(employees), f"as_{compiled.names.function.root}"
+        )
+
+        with pytest.raises(NotSupportedError):
+            _ = list(method())
+
+
+class StrictBase(pydantic.BaseModel, strict=True, frozen=True):
+    """A base like a strict project's: an enum field rejects the `str` Django
+    returns, unless validated non-strictly."""
+
+
+def test_a_view_with_a_strict_base_reads_an_enum_field() -> None:
+    view = View(
+        name=ViewName("StrictEmployee"),
+        source=Employee,
+        step=steps.hydrate(),
+        base=StrictBase,
+    )
+    entities = organisation()
+    (compiled,) = compile_all([view]).views
+
+    with Database.of([view]) as django_models:
+        Database.put(django_models, entities)
+        rows = Database.read(django_models, compiled, every_row)
+
+    assert rows == engine_rows([compiled], entities)[view.name]
+    assert all(isinstance(row.root[FieldName("role")], Role) for row in rows)
+
+
+def test_generated_signatures_read_without_the_django_models() -> None:
+    """Annotations naming the Django models, which the module imports only for
+    type checking, are quoted, so evaluating its annotations does not fail."""
+    with Database.of(golden_views()):
+        queries = sys.modules[Modules.queries.root]
+        functions = [
+            value
+            for value in vars(queries).values()
+            if inspect.isfunction(value) and value.__module__ == queries.__name__
+        ]
+        for function in functions:
+            _ = inspect.signature(function)
+
+    assert functions
+
+
+class LongModules:
+    """Module paths long enough that ruff format splits what refers to them."""
+
+    django: ClassVar[ModulePath] = ModulePath(
+        "a_project_with_a_long_name.and_a_deeply.nested_package.of_django_models"
+    )
+    views: ClassVar[ModulePath] = ModulePath(
+        "a_project_with_a_long_name.and_a_deeply.nested_package.of_view_models"
+    )
+
+
+@pytest.mark.parametrize(
+    ("config", "views"),
+    [
+        (Modules.config(), Generated.models),
+        (
+            Modules.config().model_copy(update={"module": LongModules.django}),
+            LongModules.views,
+        ),
+    ],
+    ids=["short", "long"],
+)
+def test_generated_queries_are_ruff_formatted(
+    config: DjangoModels, views: ModulePath
+) -> None:
+    compiled = compile_all(golden_views()).views
+    (file,) = (
+        DjangoQueriesRenderer.render(entity_graph(), config, compiled, into(views))
+        .unwrap()
+        .files
+    )
+
+    formatted = subprocess.run(
+        [sys.executable, "-m", "ruff", "format", "--isolated", "-"],
+        input=file.text.root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    assert formatted == file.text.root
+
+
+def render_diagnostics(
+    config: DjangoModels, views: ModulePath
+) -> tuple[DjangoQueriesDiagnostic, ...]:
+    view = View(name=ViewName("CompanyFull"), source=Company, step=steps.pipeline())
+    match DjangoQueriesRenderer.render(
+        entity_graph(), config, compile_all([view]).views, into(views)
+    ):
+        case Ok(files):
+            pytest.fail(f"expected diagnostics, got {files}")
+        case Err(error):
+            return error.diagnostics
+
+
+def test_queries_into_the_django_models_module_is_a_diagnostic() -> None:
+    config = Modules.config().model_copy(update={"queries": Modules.django})
+
+    assert render_diagnostics(config, Generated.models) == (
+        QueriesIntoDjangoModelsModule(module=Modules.django),
+    )
+
+
+def test_a_view_model_into_the_queries_module_is_a_diagnostic() -> None:
+    assert render_diagnostics(Modules.config(), Modules.queries) == (
+        ViewModelIntoQueriesModule(
+            view=ViewName("CompanyFull"), module=Modules.queries
+        ),
+    )
+
+
+def test_a_view_model_into_the_django_models_module_is_a_diagnostic() -> None:
+    assert render_diagnostics(Modules.config(), Modules.django) == (
+        ViewModelIntoDjangoModelsModule(
+            view=ViewName("CompanyFull"), module=Modules.django
+        ),
+    )
+
+
+def another_company() -> type[pydantic.BaseModel]:
+    """An Entity named like `Company`, defined elsewhere."""
+
+    class AnotherCompanyId(Id[int]):
+        pass
+
+    class Company(pydantic.BaseModel):
+        id: AnotherCompanyId
+
+    return Company
+
+
+def test_entities_with_one_name_are_left_to_the_django_models_to_report() -> None:
+    graph = EntityGraph.build([Company, another_company()]).unwrap()
+
+    rendered = DjangoQueriesRenderer.render(
+        graph, Modules.config(), (), into(Generated.models)
+    )
+
+    assert isinstance(rendered, Ok)
+
+
 # Differential test: for generated Entities and pipelines, the generated queries
 # and the InMemoryViewEngine give the same View results.
 
@@ -676,6 +1030,7 @@ def entities(draw: st.DrawFn) -> tuple[pydantic.BaseModel, ...]:
             id=employee_id,
             name=draw(texts),
             nickname=draw(st.none() | texts),
+            role=draw(st.sampled_from(Role)),
             department_id=draw(st.sampled_from([d.id for d in departments])),
             mentor_id=draw(st.none() | st.sampled_from(employee_ids)),
         )
@@ -728,9 +1083,27 @@ def test_queries_give_the_same_view_results_as_the_engine(
 
 
 def test_generated_queries_pass_the_type_checker(tmp_path: Path) -> None:
+    """Including a project's use of them: the manager's QuerySet methods return
+    the Entity's QuerySet, so `as_<view>()` type checks after them."""
     Database.files(golden_views()).write(
         LocalFileSystem(), Directory(tmp_path)
     ).unwrap()
+    _ = (tmp_path / "frp_generated_use.py").write_text(
+        "import frp_generated_django\n"
+        "import frp_generated_models\n"
+        "\n"
+        "\n"
+        "def overviews() -> list[frp_generated_models.EmployeeOverview]:\n"
+        "    employees = frp_generated_django.Employee.objects\n"
+        "    return [\n"
+        "        *employees.filter(name='a').order_by('pk')[:2].as_employee_overview(),\n"
+        "        *employees.exclude(name='a').as_employee_overview(),\n"
+        "        *employees.order_by('-pk').as_employee_overview(),\n"
+        "        *employees.all().as_employee_overview(),\n"
+        "        *employees.as_employee_overview(),\n"
+        "    ]\n",
+        encoding="utf-8",
+    )
     source_root = Path(__file__).parents[3]
     _ = (tmp_path / "pyrefly.toml").write_text(
         'project-includes = ["frp_generated_*.py"]\n'

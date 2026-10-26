@@ -1,6 +1,6 @@
 """Renders a Django model per Entity, so a Django project can store Entities.
 
-Each model's manager `objects` uses its Entity's QuerySet, which `queries`
+Each model's manager `objects` is its Entity's Manager, which `queries`
 generates with a method per View over the Entity.
 
 Everything here is pure: it builds file contents and touches no filesystem, and
@@ -140,8 +140,8 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
 
     `field_types` overrides the built-in rule for a type, see `FieldTypes`.
     `on_delete` sets what deleting the referenced Entity does, per Reference; a
-    Reference not in it is `PROTECT`. `queries` holds a QuerySet per Entity, which
-    its model's manager uses, see `DjangoQueriesRenderer`.
+    Reference not in it is `PROTECT`. `queries` holds a QuerySet and a Manager per
+    Entity, which its model's manager is, see `DjangoQueriesRenderer`.
     """
 
     module: ModulePath
@@ -169,6 +169,13 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
         return Symbol(
             module=self.queries,
             qualname=(Identifier(f"{entity.__name__}QuerySet"),),
+        )
+
+    def manager_of(self, entity: type[pydantic.BaseModel]) -> Symbol:
+        """The Manager of `entity`'s Django model, e.g. `CompanyManager`."""
+        return Symbol(
+            module=self.queries,
+            qualname=(Identifier(f"{entity.__name__}Manager"),),
         )
 
 
@@ -250,7 +257,7 @@ class InvalidDjangoFieldName(pydantic.BaseModel, Diagnostic, frozen=True):
     """An Entity field would be a Django model field with a name Django or the
     generated module cannot use: not an identifier, `pk`, `Meta`, ending in `_`,
     containing `__`, `objects`, which is the manager, or `models` or an imported
-    field class or QuerySet, which the class body would shadow.
+    field class or Manager, which the class body would shadow.
 
     A Reference `x_id` is the foreign key `x`, so `name` may differ from `field`.
     """
@@ -420,18 +427,12 @@ class _Declaration(pydantic.BaseModel, frozen=True):
 
 
 class _PlannedModel(pydantic.BaseModel, frozen=True):
-    """`query_set` is the QuerySet its manager `objects` uses."""
+    """`manager` is the class of its manager `objects`."""
 
     entity: type[pydantic.BaseModel]
     name: Identifier
     declarations: tuple[_Declaration, ...]
-    query_set: Symbol
-
-    def manager_line(self) -> FileText:
-        return FileText(
-            f"    {DjangoModelsRenderer.manager.root} = "
-            f"{self.query_set.bound_name().root}.as_manager()\n"
-        )
+    manager: Symbol
 
 
 class DjangoModelsRenderer:
@@ -499,7 +500,7 @@ class DjangoModelsRenderer:
                     entity=model,
                     name=Identifier(model.__name__),
                     declarations=tuple(declarations),
-                    query_set=config.query_set_of(model),
+                    manager=config.manager_of(model),
                 )
             )
         imports = frozenset(
@@ -510,7 +511,7 @@ class DjangoModelsRenderer:
                     for declaration in model.declarations
                     if not declaration.field.is_builtin()
                 ),
-                *(model.query_set for model in planned),
+                *(model.manager for model in planned),
             }
         )
         imported_names = frozenset(symbol.bound_name() for symbol in imports)
@@ -654,7 +655,7 @@ class DjangoModelsRenderer:
     def _name_clashes(
         planned: list[_PlannedModel], imports: frozenset[Symbol]
     ) -> Iterator[DjangoModelNameClash]:
-        """`imports` are the field classes and QuerySets the module imports by
+        """`imports` are the field classes and Managers the module imports by
         name."""
         bound: dict[Identifier, list[Symbol | Identifier]] = {
             DjangoModelsRenderer.models_import: [DjangoModelsRenderer.models_import]
@@ -685,7 +686,8 @@ class DjangoModelsRenderer:
         imported = "\n".join(sorted(lines))
         classes = "\n\n".join(
             f"class {model.name.root}(models.Model):\n"
-            + model.manager_line().root
+            f"    {DjangoModelsRenderer.manager.root} = "
+            f"{model.manager.bound_name().root}()\n"
             + "".join(declaration.line().root for declaration in model.declarations)
             + "\n    class Meta:\n"
             + f"        app_label = {app_label.root!r}\n"

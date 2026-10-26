@@ -254,7 +254,11 @@ def test_an_overridden_field_class_outside_django_is_imported() -> None:
 
     text = render([Thing], config({tuple[Text, ...]: money}, {})).root
 
-    assert "\nfrom app.fields import MoneyField\n" in text
+    assert (
+        "\n\nfrom app.fields import MoneyField\n"
+        "from app.queries import ThingManager\n"
+        "from django.db import models\n\n\n"
+    ) in text
     assert "    tags = MoneyField()\n" in text
 
 
@@ -351,12 +355,12 @@ def test_golden_django_models() -> None:
         # Regenerate with `frp generate`; `frp check` fails when this is stale.
         # Migrations are yours to make, e.g. with `makemigrations`.
 
-        from app.queries import CompanyQuerySet, DepartmentQuerySet
+        from app.queries import CompanyManager, DepartmentManager
         from django.db import models
 
 
         class Company(models.Model):
-            objects = CompanyQuerySet.as_manager()
+            objects = CompanyManager()
             id = models.BigAutoField(primary_key=True)
             name = models.TextField()
             parent = models.ForeignKey('Company', on_delete=models.SET_NULL, related_name='+', null=True)
@@ -366,7 +370,7 @@ def test_golden_django_models() -> None:
 
 
         class Department(models.Model):
-            objects = DepartmentQuerySet.as_manager()
+            objects = DepartmentManager()
             id = models.UUIDField(primary_key=True)
             company = models.ForeignKey('Company', on_delete=models.PROTECT, related_name='+')
             founded = models.DateField()
