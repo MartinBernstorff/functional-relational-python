@@ -102,6 +102,9 @@ class Indent(pydantic.RootModel[int], frozen=True):
         match _Bracketed.of(entry):
             case _Unbracketed():
                 return entry
+            case _Bracketed(body=Expression(root="")):
+                # Empty brackets cannot be split, so ruff leaves the line long.
+                return entry
             case _Bracketed(head=head, body=body, tail=tail):
                 pass
         inner = self.deeper()
@@ -155,6 +158,26 @@ class Indent(pydantic.RootModel[int], frozen=True):
         )
         otherwise = inner.fitted(Expression(f"else {written}"), Expression(""))
         return Expression(f"(\n{branches}{pad}{otherwise.root}\n{self.pad().root})")
+
+    def looked_up_statement(
+        self, absent: Sequence[Expression], entity: Expression
+    ) -> Expression:
+        """Statements at this indentation that evaluate `entity`, when none of
+        `absent` holds, for its side effect: raising for an Entity the View
+        requires that is missing."""
+        if not absent:
+            statement = self.fitted(Expression(f"_ = {entity.root}"), Expression(""))
+            return Expression(f"{self.pad().root}{statement.root}\n")
+        inner = self.deeper()
+        line = f"{self.pad().root}if not ({' or '.join(c.root for c in absent)}):"
+        if len(line) > LineLength.default().root:
+            terms = "".join(
+                f"{inner.pad().root}{'' if index == 0 else 'or '}{condition.root}\n"
+                for index, condition in enumerate(absent)
+            )
+            line = f"{self.pad().root}if not (\n{terms}{self.pad().root}):"
+        statement = inner.fitted(Expression(f"_ = {entity.root}"), Expression(""))
+        return Expression(f"{line}\n{inner.pad().root}{statement.root}\n")
 
     def condition(self, absent: Expression) -> Expression:
         """`if <absent>` on a line at this indentation, split as ruff format
@@ -299,22 +322,24 @@ class MappingsRenderer:
         return tuple(
             GeneratedFile(
                 path=module.file_path(),
-                text=MappingsRenderer._module(plan.functions[module]),
+                text=MappingsRenderer._module(plan, module),
             )
             for module in sorted(plan.functions, key=lambda module: module.root)
         )
 
     @staticmethod
-    def _module(functions: Sequence[FunctionPlan]) -> FileText:
+    def _module(plan: PythonPlan, module: ModulePath) -> FileText:
+        """The mapping functions of `module`, and `_required` if they need it."""
+        functions = plan.functions[module]
         imports = "\n".join(
-            "".join(f"import {module.root}\n" for module in section)
+            "".join(f"import {imported.root}\n" for imported in section)
             for section in ModulePath.import_sections(
-                module for function in functions for module in function.imports()
+                imported for function in functions for imported in function.imports()
             )
         )
         helper = (
             f"\n\n{MappingsRenderer._required_helper().root}"
-            if any(function.model.requires() for function in functions)
+            if module in plan.requiring
             else ""
         )
         rendered = "".join(
@@ -364,6 +389,14 @@ class MappingsRenderer:
         )
         writer = _FilterWriter(function=function)
         guards = "".join(writer.guard(kept).root for kept in function.filters)
+        unread = "".join(
+            statement.root
+            for statement in _Construction(
+                function=function, indent=Indent(4)
+            ).unread_requirements(
+                function.model, Expression(FunctionPlan.source_parameter.root), ()
+            )
+        )
         return FunctionText(
             f"def {function.symbol.bound_name().root}(\n"
             f"    {FunctionPlan.source_parameter.root}: "
@@ -371,6 +404,7 @@ class MappingsRenderer:
             f"{keyword_only}"
             f") -> {returned}:\n"
             f"{guards}"
+            f"{unread}"
             f"    return {call.root}\n"
         )
 
@@ -413,7 +447,9 @@ class _Construction(pydantic.BaseModel, frozen=True):
                 return self.indent.looked_up(
                     prefix,
                     followed.absent,
-                    lambda indent: self._nested(indent, nested, found, followed),
+                    lambda indent: self.model_copy(update={"indent": indent}).call(
+                        nested, followed.entity
+                    ),
                 )
             case ir.Field(value=value):
                 pass
@@ -495,34 +531,39 @@ class _Construction(pydantic.BaseModel, frozen=True):
             case Optionality.REQUIRED:
                 return self.required(found, subject, _Construction._what(lookup))
 
-    def _nested(
-        self,
-        indent: Indent,
-        nested: ModelPlan,
-        found: ir.EntityValue,
-        followed: Followed,
-    ) -> Expression:
-        """The call building `nested` from the Entity `found`, at `indent`.
-
-        A model reading nothing from an Entity the View requires still looks it
-        up, so that a missing one raises: the call is the second of a pair with it.
-        """
-        reads = any(
-            not isinstance(field.field, ir.Field)
-            or not isinstance(field.field.value, ir.Added)
-            for field in nested.fields
-        )
-        required = any(ModelPlan.required_lookup(lookup) for lookup in found.lookups())
-        if reads or not required:
-            return self.model_copy(update={"indent": indent}).call(
-                nested, followed.entity
+    def unread_requirements(
+        self, model: ModelPlan, subject: Expression, absent: tuple[Expression, ...]
+    ) -> tuple[Expression, ...]:
+        """A statement in the function body per Entity the View requires that the
+        model built from `subject`, or one nested in it, reads nothing from: it
+        looks the Entity up, so that a missing one raises. `absent` are the
+        conditions under which a lookup on the way to `subject` finds nothing,
+        when there is nothing to look up."""
+        statements: list[Expression] = []
+        body = Indent(4)
+        for planned in model.fields:
+            match planned.field:
+                case ir.NestedField(value=found) as field:
+                    pass
+                case ir.Field():
+                    continue
+            nested = model.nested_in(field)
+            followed = self._followed(found.lookups(), subject)
+            conditions = (*absent, *followed.absent)
+            reads = any(
+                not isinstance(read.field, ir.Field)
+                or not isinstance(read.field.value, ir.Added)
+                for read in nested.fields
             )
-        inner = self.model_copy(update={"indent": indent.deeper()})
-        return indent.exploded(
-            Expression("("),
-            (followed.entity, inner.call(nested, followed.entity)),
-            Expression(")[1]"),
-        )
+            required = any(
+                ModelPlan.required_lookup(lookup) for lookup in found.lookups()
+            )
+            if required and not reads:
+                statements.append(body.looked_up_statement(conditions, followed.entity))
+            statements.extend(
+                self.unread_requirements(nested, followed.entity, conditions)
+            )
+        return tuple(statements)
 
     def required(
         self, value: Expression, subject: Expression, what: Expression

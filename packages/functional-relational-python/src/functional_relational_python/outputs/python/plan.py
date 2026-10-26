@@ -13,7 +13,6 @@ The compiler has already checked the names themselves (`model_names`).
 """
 
 import enum
-import keyword
 import types
 import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -21,7 +20,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 import pydantic
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.compiler import compiler
+from functional_relational_python.compiler import compiler, narrowing
 from functional_relational_python.compiler.model_names import ModelNames, PascalCase
 from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
@@ -583,8 +582,8 @@ class _AnnotationRenderer:
         boolean, `None`, or an enum member named by an identifier, as a narrowing
         Filter gives."""
         match arg:
-            case enum.Enum(name=name):
-                return name.isidentifier() and not keyword.iskeyword(name)
+            case enum.Enum():
+                return narrowing.nameable(arg)
             case None:
                 return True
             case _:
@@ -733,11 +732,13 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
     View order, then Payload models in Payload order.
 
     `models` holds each View's and Payload's own model; its nested models are in
-    it.
+    it. `requiring` are the modules of mapping functions that read a value a View
+    requires, so they define `FunctionPlan.required_helper`.
     """
 
     models: Mapping[ModulePath, tuple[ModelPlan, ...]]
     functions: Mapping[ModulePath, tuple[FunctionPlan, ...]]
+    requiring: frozenset[ModulePath]
 
     @staticmethod
     def of(
@@ -787,6 +788,11 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         plan = PythonPlan(
             models={module: tuple(planned) for module, planned in models.items()},
             functions={module: tuple(planned) for module, planned in functions.items()},
+            requiring=frozenset(
+                module
+                for module, planned in functions.items()
+                if any(function.model.requires() for function in planned)
+            ),
         )
         diagnostics.update(dict.fromkeys(plan._layout_diagnostics()))
         return DiagnosticsError.or_ok(diagnostics, lambda: plan)
@@ -824,7 +830,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                 )
                 for imported in function.imports():
                     namespace.refer_to_module(imported)
-            if any(function.model.requires() for function in functions):
+            if module in self.requiring:
                 namespace.define(
                     FunctionPlan.required_helper,
                     AnnotationText(

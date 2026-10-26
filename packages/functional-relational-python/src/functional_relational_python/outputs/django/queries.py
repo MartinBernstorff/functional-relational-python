@@ -143,6 +143,20 @@ class ReverseInDjangoQueries(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class FilterInDjangoQueries(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A View over an Entity filters its rows, which Django queries do not support
+    yet: they would read every row, and a field the Filters narrow would fail the
+    View model's validation on a row they exclude."""
+
+    view: ViewName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot generate Django queries for it, because it "
+            "filters with `where`, and Django queries cannot filter yet."
+        )
+
+
 class ReverseInQueryError(Exception):
     """Query code was written for a View that reverses a Reference. The renderer
     reports such a View instead, so this means it wrote it anyway."""
@@ -160,6 +174,7 @@ type DjangoQueriesDiagnostic = (
     | ViewModelIntoQueriesModule
     | ViewModelIntoDjangoModelsModule
     | ReverseInDjangoQueries
+    | FilterInDjangoQueries
     | NameClash
 )
 
@@ -267,7 +282,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
 
         `layout` gives the module of each View's model. Views over a Source that
         is not an Entity get no query code. A View over an Entity that reverses a
-        Reference is a diagnostic. QuerySets are in Entity name order.
+        Reference, or that filters, is a diagnostic. QuerySets are in Entity name order.
         """
         views = tuple(views)
         renderer = DjangoQueriesRenderer(
@@ -297,6 +312,11 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                     for query in renderer.queries
                     for lookup in query.view.relation.lookups()
                     if isinstance(lookup, ir.ReverseLookup)
+                ),
+                *(
+                    FilterInDjangoQueries(view=query.view.name)
+                    for query in renderer.queries
+                    if query.view.relation.filters
                 ),
                 *renderer._clashes(entities),
             ),

@@ -616,15 +616,23 @@ def _check_where(
     allowed, in a nested pipeline or a Payload, is reported once the pipeline is
     checked.
     """
-    match condition_checker.ConditionChecker(view=view, relation=relation).check(
-        node.condition
-    ):
+    match condition_checker.ConditionChecker(
+        view=view, relation=relation, subject=_subject(node).source
+    ).check(node.condition):
         case condition_checker.Defects(diagnostics=reported):
             return Poisoned(recovered=relation, diagnostics=reported)
         case checked:
             return narrowing.by_filter(
                 relation.filtered(checked), checked, entity_graph
             )
+
+
+def _subject(node: ir.Node) -> ir.FromSource:
+    """What the pipeline that `node` ends started from, however the relation has
+    changed since: the View's Source, or the Entity a nested pipeline runs on."""
+    while not isinstance(node, ir.FromSource):
+        node = node.input
+    return node
 
 
 def _check_require(
@@ -806,13 +814,11 @@ def _lookup(
             )
             match field.value:
                 case ir.RequiredField() | ir.Lifted(field=ir.RequiredField()):
-                    # A required Reference stays required: `None` there is unmet.
+                    # The field's type is narrowed, but the Reference it reads is
+                    # optional, and the View requires it: `None` there is unmet.
                     lookup = lookup.model_copy(
-                        update={
-                            "reference": ir.RequiredField(field=reference.field),
-                            "optionality": Optionality.REQUIRED,
-                        }
-                    )
+                        update={"optionality": Optionality.OPTIONAL}
+                    ).required()
                 case _:
                     pass
             # A lifted Reference is followed from the Entity it is read off.
@@ -864,11 +870,7 @@ def _check_reverse(
             )
         )
     reported.extend(ViewModelNames.check_field(view, source, name))
-    # The subject is what the pipeline started from, however the relation has
-    # changed since.
-    subject = node.input
-    while not isinstance(subject, ir.FromSource):
-        subject = subject.input
+    subject = _subject(node)
     non_entities: list[diagnostics.CompileDiagnostic] = []
     if subject.source not in entity_graph.entities:
         non_entities.append(

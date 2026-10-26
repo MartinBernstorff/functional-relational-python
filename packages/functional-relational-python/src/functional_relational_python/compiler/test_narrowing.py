@@ -401,16 +401,8 @@ def test_a_required_field_can_still_be_filtered_on() -> None:
             FieldName("submitted_at"),
             SubmittedAt,
         ),
-        (
-            steps.pipeline(
-                steps.where(conditions.is_null(submitted_at)),
-                steps.require(FieldName("submitted_at")),
-            ),
-            FieldName("submitted_at"),
-            Literal[None],
-        ),
     ],
-    ids=["required", "twice", "filtered", "always-none"],
+    ids=["required", "twice", "filtered"],
 )
 def test_requiring_a_field_that_is_not_optional_is_a_diagnostic(
     step: steps.Step, field: FieldName, annotation: RuntimeAnnotation
@@ -572,3 +564,148 @@ def test_requiring_a_field_lifted_through_an_optional_entity_requires_the_entity
             field=ir.SourceField(field=FieldName("id")),
         ),
     )
+
+
+def test_requiring_a_field_a_where_keeps_only_none_in_is_a_diagnostic() -> None:
+    assert campaign_diagnostics(
+        steps.pipeline(
+            steps.where(conditions.eq(submitted_at, None)),
+            steps.require(FieldName("submitted_at")),
+        )
+    ) == (
+        diagnostics.RequireOnAlwaysNoneField(
+            view=ViewName.fake(),
+            source=ir.SourceName("Campaign"),
+            field=FieldName("submitted_at"),
+        ),
+    )
+
+
+def test_the_always_none_requirement_message_names_the_field() -> None:
+    diagnostic = diagnostics.RequireOnAlwaysNoneField(
+        view=ViewName("Template"),
+        source=ir.SourceName("Campaign"),
+        field=FieldName("submitted_at"),
+    )
+
+    assert diagnostic.describe().root == (
+        "Template: cannot require Campaign.submitted_at, because a `where` keeps "
+        "only the rows where it is None, so the requirement is never met."
+    )
+
+
+@pytest.mark.parametrize(
+    "later",
+    [
+        conditions.eq(kind, Kind.INSTANCE),
+        conditions.eq(submitted_at, None),
+        conditions.eq(kind, conditions.field(FieldName("kind"))),
+    ],
+    ids=["other-member", "none-after-not-none", "same-field"],
+)
+def test_a_condition_is_checked_against_the_type_the_source_declares(
+    later: ir.Condition,
+) -> None:
+    view = compile_campaign(
+        steps.pipeline(
+            steps.where(
+                conditions.and_(
+                    conditions.eq(kind, Kind.TEMPLATE),
+                    conditions.ne(submitted_at, None),
+                )
+            ),
+            steps.where(later),
+        )
+    )
+
+    assert len(view.relation.filters) == len((kind, later))
+
+
+def test_a_condition_on_a_required_field_may_test_for_none() -> None:
+    view = compile_campaign(
+        steps.pipeline(
+            steps.require(FieldName("name")),
+            steps.where(conditions.is_null(conditions.field(FieldName("name")))),
+        )
+    )
+
+    assert view.relation.filters == (
+        ir.FilterIsNull(field=ir.SourceField(field=FieldName("name"))),
+    )
+
+
+def unchanged(label: Text | None) -> Text | None:
+    return label
+
+
+class Constrained(pydantic.BaseModel):
+    id: CampaignId
+    label: Annotated[Text | None, pydantic.AfterValidator(unchanged)]
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        steps.require(FieldName("label")),
+        steps.where(conditions.ne(conditions.field(FieldName("label")), None)),
+    ],
+    ids=["require", "where"],
+)
+def test_narrowing_keeps_the_fields_constraints(step: steps.Step) -> None:
+    (compiled,) = (
+        compiler.compile_views(
+            graph(), [View(name=ViewName.fake(), source=Constrained, step=step)]
+        )
+        .unwrap()
+        .views
+    )
+    (_, label) = compiled.relation.fields
+
+    assert isinstance(label, ir.Field)
+    assert label.info.metadata == Constrained.model_fields["label"].metadata != []
+
+
+type MaybeObjective = Text | None
+
+
+class AliasedDetail(pydantic.BaseModel):
+    """At most one per Campaign, with an optional field typed by an alias."""
+
+    id: DetailId
+    campaign_id: Annotated[CampaignId, OneToOne()]
+    objective: MaybeObjective
+
+
+def test_requiring_a_lifted_field_typed_by_an_optional_alias_requires_it() -> None:
+    aliased = EntityGraph.build(
+        [Owner, Campaign, AliasedDetail], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+    (compiled,) = (
+        compiler.compile_views(
+            aliased,
+            [
+                View(
+                    name=ViewName.fake(),
+                    source=Campaign,
+                    step=steps.pipeline(
+                        steps.reverse(
+                            AliasedDetail, steps.project([FieldName("objective")])
+                        ),
+                        steps.flatten(FieldName("aliased_detail")),
+                        steps.require(FieldName("objective")),
+                    ),
+                )
+            ],
+        )
+        .unwrap()
+        .views
+    )
+    (objective,) = (
+        field
+        for field in compiled.relation.fields
+        if field.name == FieldName("objective")
+    )
+
+    assert isinstance(objective, ir.Field)
+    assert isinstance(objective.value, ir.Lifted)
+    assert objective.value.field == ir.RequiredField(field=FieldName("objective"))

@@ -1371,6 +1371,19 @@ def required_views() -> list[View]:
             ),
         ),
         View(
+            name=ViewName("EmployeeUnreadMentorsMentor"),
+            source=Employee,
+            step=steps.pipeline(
+                steps.project([FieldName("id"), mentor]),
+                steps.resolve(
+                    named(mentor),
+                    steps.resolve(named(mentor), steps.project([])),
+                    steps.require(FieldName("mentor")),
+                    steps.project([FieldName("mentor")]),
+                ),
+            ),
+        ),
+        View(
             name=ViewName("EmployeeRequiredBio"),
             source=Employee,
             step=steps.pipeline(
@@ -1517,11 +1530,9 @@ def employee_unread_mentor(
         functional_relational_python.outputs.python.test_mappings.Employee,
     ],
 ) -> frp_generated_models.EmployeeUnreadMentor:
+    _ = employee_by_id[_required(source.mentor_id, source, "mentor_id")]
     return frp_generated_models.EmployeeUnreadMentor(
-        mentor=(
-            employee_by_id[_required(source.mentor_id, source, "mentor_id")],
-            frp_generated_models.EmployeeUnreadMentorMentor(),
-        )[1],
+        mentor=frp_generated_models.EmployeeUnreadMentorMentor(),
     )
 
 
@@ -1562,6 +1573,34 @@ def employee_mentors_mentor(
                     employee_by_id[source.mentor_id],
                     "mentor_id",
                 ),
+            )
+        ),
+    )
+
+
+def employee_unread_mentors_mentor(
+    source: functional_relational_python.outputs.python.test_mappings.Employee,
+    *,
+    employee_by_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.EmployeeId,
+        functional_relational_python.outputs.python.test_mappings.Employee,
+    ],
+) -> frp_generated_models.EmployeeUnreadMentorsMentor:
+    if not (source.mentor_id is None):
+        _ = employee_by_id[
+            _required(
+                employee_by_id[source.mentor_id].mentor_id,
+                employee_by_id[source.mentor_id],
+                "mentor_id",
+            )
+        ]
+    return frp_generated_models.EmployeeUnreadMentorsMentor(
+        id=source.id,
+        mentor=(
+            None
+            if source.mentor_id is None
+            else frp_generated_models.EmployeeUnreadMentorsMentorMentor(
+                mentor=frp_generated_models.EmployeeUnreadMentorsMentorMentorMentor(),
             )
         ),
     )
@@ -1669,7 +1708,10 @@ def test_a_mapping_function_raises_for_a_value_the_view_requires(
             mapping(unmentored, **lookups)
 
 
-def test_a_requirement_of_a_looked_up_entity_names_it() -> None:
+@pytest.mark.parametrize(
+    "view", [ViewName("EmployeeMentorsMentor"), ViewName("EmployeeUnreadMentorsMentor")]
+)
+def test_a_requirement_of_a_looked_up_entity_names_it(view: ViewName) -> None:
     mentor = Employee(
         id=EmployeeId(1),
         name=Text("Ann"),
@@ -1681,11 +1723,19 @@ def test_a_requirement_of_a_looked_up_entity_names_it() -> None:
 
     message = "mentor_id is required, but there is none for Employee EmployeeId(root=1)"
 
+    (function,) = (
+        function
+        for function in plan.functions[Generated.mappings]
+        if function.view == view
+    )
+
     with (
         mapping_functions(plan) as module,
         pytest.raises(ValueError, match=f"^{re.escape(message)}$"),
     ):
-        module.employee_mentors_mentor(mentee, employee_by_id={mentor.id: mentor})
+        getattr(module, function.symbol.bound_name().root)(
+            mentee, employee_by_id={mentor.id: mentor}
+        )
 
 
 @st.composite

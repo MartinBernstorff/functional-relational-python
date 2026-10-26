@@ -22,12 +22,14 @@ from functional_relational_python.pipeline.payloads import DefinitionName
 
 
 def split(annotation: RuntimeAnnotation) -> SplitAnnotation:
-    """`annotation`, apart from `None`, with `type` aliases looked through."""
-    whole = Optionality.of_annotation(_through_aliases(annotation))
+    """`annotation`, apart from `None`, with `type` aliases looked through, of
+    the whole annotation and of the rest."""
+    whole = Optionality.of_aliased_annotation(annotation)
+    required = whole.required
+    while isinstance(required, typing.TypeAliasType):
+        required = required.__value__
     return SplitAnnotation(
-        optionality=whole.optionality,
-        required=_through_aliases(whole.required),
-        metadata=whole.metadata,
+        optionality=whole.optionality, required=required, metadata=whole.metadata
     )
 
 
@@ -37,7 +39,7 @@ def without_none(annotation: RuntimeAnnotation) -> RuntimeAnnotation:
     The metadata of an `Annotated` inside the union is left out, as the generated
     model leaves it out.
     """
-    return Optionality.of_annotation(_through_aliases(annotation)).required
+    return Optionality.of_aliased_annotation(annotation).required
 
 
 class _SpecialForm(typing.Protocol):
@@ -52,15 +54,9 @@ def _literal(member: enum.Enum) -> RuntimeAnnotation:
     return typing.cast("_SpecialForm", typing.Literal)[member]
 
 
-def _nameable(member: enum.Enum) -> bool:
+def nameable(member: enum.Enum) -> bool:
     """Whether `member` can be written in a `Literal`: as `<Enum>.<name>`."""
     return member.name.isidentifier() and not keyword.iskeyword(member.name)
-
-
-def _through_aliases(annotation: RuntimeAnnotation) -> RuntimeAnnotation:
-    while isinstance(annotation, typing.TypeAliasType):
-        annotation = annotation.__value__
-    return annotation
 
 
 def by_filter(
@@ -113,7 +109,7 @@ def _narrowed(
         annotation = _narrowed_by(term, column, annotation)
     if annotation == field.annotation():
         return field
-    return field.retyped(annotation)
+    return field.narrowed(annotation)
 
 
 def _narrowed_by(
@@ -126,7 +122,7 @@ def _narrowed_by(
             operator=ir.ComparisonOperator.EQ,
             field=ir.SourceField(field=tested),
             operand=ir.EnumLiteral(member=member),
-        ) if tested == column and _nameable(member):
+        ) if tested == column and nameable(member):
             return _literal(member)
         case ir.FilterIsNull(field=ir.SourceField(field=tested)) if (
             tested == column and split(annotation).optionality is Optionality.OPTIONAL
@@ -151,6 +147,10 @@ def required(
         case ir.NestedField(value=lookup):
             annotation = lookup.annotation()
     narrowed = split(annotation)
+    if narrowed.required == typing.Literal[None]:
+        return diagnostics.RequireOnAlwaysNoneField(
+            view=view, source=source, field=field.name
+        )
     match narrowed.optionality:
         case Optionality.REQUIRED:
             return diagnostics.RequireOnRequiredField(
@@ -159,21 +159,21 @@ def required(
         case Optionality.OPTIONAL:
             pass
     match field:
-        case ir.Field(
-            value=ir.SourceField(field=column) | ir.RequiredField(field=column)
-        ):
-            return field.retyped(without_none(annotation)).model_copy(
-                update={"value": ir.RequiredField(field=column)}
-            )
-        case ir.Field(value=ir.Lifted() as lifted):
-            return field.retyped(without_none(annotation)).model_copy(
-                update={"value": lifted.required()}
-            )
-        case ir.Field(
-            value=ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() as lookup
-        ):
-            return ir.Field.looked_up(field.name, lookup.required(), field.default)
-        case ir.Field(value=ir.Added()):
-            return diagnostics.RequireAddedField(view=view, field=field.name)
         case ir.NestedField(value=lookup):
             return field.model_copy(update={"value": lookup.required()})
+        case ir.Field(value=value):
+            pass
+    value_required: ir.Value
+    match value:
+        case ir.SourceField(field=column) | ir.RequiredField(field=column):
+            value_required = ir.RequiredField(field=column)
+            narrowed_type = without_none(annotation)
+        case ir.Lifted():
+            value_required = value.required()
+            narrowed_type = without_none(annotation)
+        case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
+            value_required = value.required()
+            narrowed_type = value_required.annotation()
+        case ir.Added():
+            return diagnostics.RequireAddedField(view=view, field=field.name)
+    return field.narrowed(narrowed_type).model_copy(update={"value": value_required})

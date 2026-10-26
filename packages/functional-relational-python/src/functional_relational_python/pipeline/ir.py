@@ -517,8 +517,15 @@ class Lifted(pydantic.BaseModel, frozen=True):
         """This value, required by the View: every Lookup on the way must find an
         Entity, and its field must hold a value."""
         read = self.field.field
-        declared = self.through[-1].target.model_fields[read.root].annotation
-        match Optionality.of_annotation(declared).optionality:
+        declared = self.through[-1].target.model_fields.get(read.root)
+        # A field recovered from a defective step may name no field of the
+        # Entity; it is left as it is.
+        optionality = (
+            Optionality.REQUIRED
+            if declared is None
+            else Optionality.of_aliased_annotation(declared.annotation).optionality
+        )
+        match optionality:
             case Optionality.OPTIONAL:
                 field: SubjectColumn = RequiredField(field=read)
             case Optionality.REQUIRED:
@@ -654,9 +661,17 @@ class Field(pydantic.BaseModel, frozen=True):
             case SourceField(field=source) | RequiredField(field=source):
                 return (source, self.info)
             case Lifted(through=through, field=read):
-                return (read.field, through[-1].target.model_fields[read.field.root])
+                declared = through[-1].target.model_fields.get(read.field.root)
+                # A field recovered from a defective step may name no field of
+                # the Entity; it is no Reference then.
+                return self if declared is None else (read.field, declared)
             case Lookup() | ReverseLookup() | ChainedLookup() | Added():
                 return self
+
+    def narrowed(self, annotation: RuntimeAnnotation) -> Field:
+        """This field typed by `annotation`, a narrower type than its own, keeping
+        its default and its type's constraints, which still hold."""
+        return self._annotated(annotation)
 
     def admitting_none(self) -> Field:
         """This field typed to admit `None` too, keeping its default and its

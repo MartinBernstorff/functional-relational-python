@@ -42,6 +42,7 @@ from functional_relational_python.outputs.django.models import (
 from functional_relational_python.outputs.django.queries import (
     DjangoQueriesDiagnostic,
     DjangoQueriesRenderer,
+    FilterInDjangoQueries,
     QueriesIntoDjangoModelsModule,
     ReverseInDjangoQueries,
     ReverseInQueryError,
@@ -65,7 +66,7 @@ from functional_relational_python.outputs.python.test_mappings import (
     Generated,
     into,
 )
-from functional_relational_python.pipeline import ir, steps
+from functional_relational_python.pipeline import conditions, ir, steps
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.filesystem import (
     Directory,
@@ -1321,3 +1322,29 @@ def test_a_met_requirement_reads_like_the_engine() -> None:
         rows = Database.read(django_models, compiled, every_row)
 
     assert rows == engine_rows([compiled], entities)[view.name]
+
+
+def test_a_view_that_filters_is_a_diagnostic() -> None:
+    view = View(
+        name=ViewName("LeadEmployee"),
+        source=Employee,
+        step=steps.where(conditions.eq(conditions.field(FieldName("role")), Role.LEAD)),
+    )
+
+    match DjangoQueriesRenderer.render(
+        entity_graph(),
+        Modules.config(),
+        compile_all([view]).views,
+        into(Generated.models),
+    ):
+        case Ok(files):
+            pytest.fail(f"expected diagnostics, got {files}")
+        case Err(error):
+            assert error.diagnostics == (FilterInDjangoQueries(view=view.name),)
+
+
+def test_the_filter_in_django_queries_message_names_the_view() -> None:
+    assert FilterInDjangoQueries(view=ViewName("LeadEmployee")).describe().root == (
+        "LeadEmployee: cannot generate Django queries for it, because it filters "
+        "with `where`, and Django queries cannot filter yet."
+    )

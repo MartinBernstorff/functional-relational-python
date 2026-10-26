@@ -525,6 +525,22 @@ class RequireOnRequiredField(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class RequireOnAlwaysNoneField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`require` named or selected a field a `where` keeps only `None` in, so the
+    requirement is never met."""
+
+    view: DefinitionName
+    source: ir.SourceName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot require {self.source.root}.{self.field.root}, "
+            "because a `where` keeps only the rows where it is None, so the "
+            "requirement is never met."
+        )
+
+
 class RequireAddedField(pydantic.BaseModel, Diagnostic, frozen=True):
     """`require` named or selected a field `add` declared, which has no value from
     the subject to require."""
@@ -574,5 +590,6 @@ type CompileDiagnostic = (
     | UnorderedFieldType
     | RequireInPayload
     | RequireOnRequiredField
+    | RequireOnAlwaysNoneField
     | RequireAddedField
 )
