@@ -15,6 +15,7 @@ from functional_relational_python.outputs.django.models import (
     DjangoModelsRenderer,
     WithoutDjangoModels,
 )
+from functional_relational_python.outputs.django.queries import DjangoQueriesRenderer
 from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
     PythonLayout,
@@ -42,12 +43,13 @@ class Catalog(pydantic.BaseModel, frozen=True):
     Views are read models, Payloads are write models. A View and a Payload cannot
     share a name. `layout` receives each compiled View and Payload. `mappings` is
     the one module every View's mapping function goes to, see `MappingsRenderer`.
-    It cannot be a module `layout` returns, the Django module, a module defining a
+    It cannot be a module `layout` returns, a Django module, a module defining a
     Source or an Entity a View looks up, or a module named like a package other
     files are generated into (`app` when generating `app.views`). `django`
-    generates a Django model per Entity, see `DjangoModels`. `id_base` is frp's
-    `Id`, or an application's own base, so that the ID types, and with them the
-    generated code, do not need frp installed.
+    generates a Django model per Entity, and Django queries for each View over
+    an Entity, see `DjangoModels`. `id_base` is frp's `Id`, or an application's
+    own base, so that the ID types, and with them the generated code, do not need
+    frp installed.
 
     >>> catalog = Catalog(
     ...     entities=[Company],
@@ -81,7 +83,19 @@ class Catalog(pydantic.BaseModel, frozen=True):
                 pass
         parts: list[GeneratedFiles] = []
         reported: list[Diagnostic] = []
-        for generated in (self._python(graph), self._django(graph)):
+        # Django models need no compiled Views, so their diagnostics are reported
+        # even when compiling fails.
+        match compiler.compile_catalog(graph, self.views, self.payloads):
+            case Err(compile_error):
+                reported.extend(compile_error.diagnostics)
+                outputs = [self._django_models(graph)]
+            case Ok(compiled):
+                outputs = [
+                    self._python(compiled),
+                    self._django_models(graph),
+                    self._django_queries(graph, compiled),
+                ]
+        for generated in outputs:
             match generated:
                 case Ok(files):
                     parts.append(files)
@@ -99,13 +113,8 @@ class Catalog(pydantic.BaseModel, frozen=True):
                 return Err(merge_error)
 
     def _python(
-        self, graph: EntityGraph
+        self, compiled: compiler.CompiledCatalog
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
-        match compiler.compile_catalog(graph, self.views, self.payloads):
-            case Err(compile_error):
-                return Err(compile_error)
-            case Ok(compiled):
-                pass
         match PythonPlan.of(compiled, self._python_layout()):
             case Err(plan_error):
                 return Err(plan_error)
@@ -119,7 +128,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
             case ModulePath() as module:
                 return PythonLayout.mappings_into(self.layout, module)
 
-    def _django(
+    def _django_models(
         self, graph: EntityGraph
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
         match self.django:
@@ -128,6 +137,20 @@ class Catalog(pydantic.BaseModel, frozen=True):
             case DjangoModels() as django:
                 pass
         match DjangoModelsRenderer.render(graph, django):
+            case Ok(files):
+                return Ok(files)
+            case Err(error):
+                return Err(error)
+
+    def _django_queries(
+        self, graph: EntityGraph, compiled: compiler.CompiledCatalog
+    ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
+        match self.django:
+            case WithoutDjangoModels():
+                return Ok(GeneratedFiles(files=()))
+            case DjangoModels() as django:
+                pass
+        match DjangoQueriesRenderer.render(graph, django, compiled.views, self.layout):
             case Ok(files):
                 return Ok(files)
             case Err(error):

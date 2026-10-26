@@ -19,7 +19,7 @@ layers = ["shell", "outputs", "compiler", "pipeline", "entity_graph", "support"]
 
 # Workspace-level dev dependencies, not dependencies of either package.
 [external]
-exclude = ["pytest", "hypothesis"]
+exclude = ["pytest", "hypothesis", "django"]
 
 # `tach check` enforces boundaries between modules within a package. Imports across
 # packages (e.g. the published library importing the unpublished frp_dev) are caught

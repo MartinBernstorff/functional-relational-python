@@ -151,6 +151,7 @@ def test_generate_writes_files_that_check_accepts() -> None:
         root.file(ModulePath("app.payloads").file_path()),
         root.file(ModulePath("app.mappings").file_path()),
         root.file(DjangoModels.fake().module.file_path()),
+        root.file(DjangoModels.fake().queries.file_path()),
     )
     assert commands.check(filesystem, root) == Ok(None)
 
