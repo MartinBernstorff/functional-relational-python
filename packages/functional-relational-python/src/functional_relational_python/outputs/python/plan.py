@@ -65,6 +65,15 @@ class PythonLayout(pydantic.BaseModel, frozen=True):
     def models_only(models: ModuleLayout) -> PythonLayout:
         return PythonLayout(models=models, mappings=WithoutMappings())
 
+    @staticmethod
+    def mappings_into(models: ModuleLayout, mappings: ModulePath) -> PythonLayout:
+        """Every View's mapping function into the one module `mappings`."""
+
+        def into(_: compiler.CompiledView | compiler.CompiledPayload) -> ModulePath:
+            return mappings
+
+        return PythonLayout(models=models, mappings=into)
+
 
 class Scope(pydantic.RootModel[str], frozen=True):
     """Where generated source binds names: a module such as `app.views`, or a
@@ -183,14 +192,14 @@ class NameClash(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class ModelsAndMappingsInOneModule(pydantic.BaseModel, Diagnostic, frozen=True):
-    """The layout generates View models and mapping functions into one module, so
-    one file would overwrite the other."""
+    """The layout generates View or Payload models and mapping functions into one
+    module, so one file would overwrite the other."""
 
     module: ModulePath
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.module.root}: View models and mapping functions cannot be "
+            f"{self.module.root}: models and mapping functions cannot be "
             "generated into the same module."
         )
 

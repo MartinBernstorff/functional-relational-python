@@ -62,10 +62,10 @@ class Indent(pydantic.RootModel[int], frozen=True):
 class MappingsRenderer:
     """Writes the source of every planned mapping function."""
 
-    # `frp generate` does not write mapping functions, so the header does not
-    # point to it.
     header: typing.ClassVar[FileText] = FileText(
-        f"{GeneratedFiles.header.root}# Maps each View's Source to its View model.\n"
+        f"{GeneratedFiles.header.root}"
+        "# Regenerate with `frp generate`; `frp check` fails when this is stale.\n"
+        "# Maps each View's Source to its View model.\n"
     )
 
     @staticmethod
