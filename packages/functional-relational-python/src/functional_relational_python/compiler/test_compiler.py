@@ -1489,7 +1489,11 @@ def test_a_kept_field_the_base_declares_with_the_same_type_compiles(
 
     (compiled,) = compile_catalog([], [payload]).unwrap().payloads
 
+    # The model inherits `name`; the relation still holds it for the mapping.
     assert compiled.base is base
+    assert [field.name for field in compiled.relation.fields] == names(
+        Text("name"), Text("secret"), Text("revenue")
+    )
 
 
 @pytest.mark.parametrize("base", [DepartmentNamedBase, Keyed[DepartmentId]])
@@ -1521,14 +1525,13 @@ def test_a_field_the_base_declares_is_not_checked_once_omitted() -> None:
         base=DepartmentNamedBase,
     )
 
-    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
-
-    assert compiled.base is DepartmentNamedBase
+    assert isinstance(compile_catalog([], [payload]), Ok)
 
 
 def test_the_base_field_type_mismatch_message_contains_the_offending_values() -> None:
+    view = ViewName.fake()
     message = diagnostics.BaseFieldTypeMismatch(
-        view=ViewName.fake(),
+        view=view,
         base=Keyed[DepartmentId],
         field=FieldName("name"),
         declared=DepartmentId,
@@ -1537,7 +1540,7 @@ def test_the_base_field_type_mismatch_message_contains_the_offending_values() ->
 
     assert all(
         part in message.root
-        for part in (ViewName.fake().root, "Keyed[", "'name'", "DepartmentId", "Text")
+        for part in (view.root, "Keyed[", "'name'", "DepartmentId", "Text")
     )
 
 

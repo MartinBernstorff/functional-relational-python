@@ -488,12 +488,10 @@ class _ModelPlanner:
         base.
         """
         fields: list[ModelField] = []
+        uses: set[Symbol] = set()
         base_renderer = _AnnotationRenderer(self.view, None)
         rendered_base = base_renderer.render_base(base)
-        uses: set[Symbol] = set(base_renderer.symbols)
-        for symbol in base_renderer.symbols:
-            self.used.use_symbol(symbol)
-        self.diagnostics.extend(base_renderer.diagnostics)
+        self._record(base_renderer, uses)
         nested: dict[FieldName, ModelPlan] = {}
         for field in relation.fields:
             renderer = _AnnotationRenderer(self.view, field.name)
@@ -513,10 +511,7 @@ class _ModelPlanner:
                         model.symbol.reference()
                     )
             fields.append(ModelField(field=field, type=rendered))
-            uses |= renderer.symbols
-            for symbol in renderer.symbols:
-                self.used.use_symbol(symbol)
-            self.diagnostics.extend(renderer.diagnostics)
+            self._record(renderer, uses)
         return ModelPlan(
             view=self.view,
             symbol=Symbol(module=self.module, qualname=(names.name.identifier(),)),
@@ -525,6 +520,13 @@ class _ModelPlanner:
             uses=frozenset(uses),
             nested=nested,
         )
+
+    def _record(self, renderer: _AnnotationRenderer, uses: set[Symbol]) -> None:
+        """Adds what `renderer` referred to to `uses`, and keeps its diagnostics."""
+        uses |= renderer.symbols
+        for symbol in renderer.symbols:
+            self.used.use_symbol(symbol)
+        self.diagnostics.extend(renderer.diagnostics)
 
 
 class PythonPlan(pydantic.BaseModel, frozen=True):
