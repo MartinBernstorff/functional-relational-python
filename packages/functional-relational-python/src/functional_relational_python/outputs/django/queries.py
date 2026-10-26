@@ -65,6 +65,7 @@ import pydantic
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler, narrowing
+from functional_relational_python.compiler.model_names import FunctionName
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
@@ -177,6 +178,23 @@ class RelatedPath(pydantic.RootModel[str], frozen=True):
         return RelatedPath("__".join(relation.root for relation in relations))
 
 
+class QueryNames(pydantic.BaseModel, frozen=True):
+    """The names of the query code of a View or Union, from the name of its
+    mapping function."""
+
+    function: FunctionName
+
+    def queryset_function(self) -> Identifier:
+        return Identifier(f"{self.function.root}_queryset")
+
+    def from_row_function(self) -> Identifier:
+        return Identifier(f"{self.function.root}_from_row")
+
+    def method(self) -> Identifier:
+        """The method of the Source's QuerySet and Manager yielding its models."""
+        return Identifier(f"as_{self.function.root}")
+
+
 class ViewQueries(pydantic.BaseModel, frozen=True):
     """The query code of one View whose Source is an Entity: `model` is its View
     model, `source` the Django model of its Source."""
@@ -202,15 +220,8 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
     def describe(self) -> AnnotationText:
         return AnnotationText(f"View {self.view.name.root}")
 
-    def queryset_function(self) -> Identifier:
-        return Identifier(f"{self.view.names.function.root}_queryset")
-
-    def from_row_function(self) -> Identifier:
-        return Identifier(f"{self.view.names.function.root}_from_row")
-
-    def method(self) -> Identifier:
-        """The method of the Source's QuerySet and Manager yielding View models."""
-        return Identifier(f"as_{self.view.names.function.root}")
+    def names(self) -> QueryNames:
+        return QueryNames(function=self.view.names.function)
 
     def related_paths(self) -> tuple[RelatedPath, ...]:
         """Every chain of relations to the Entities the View looks up, in the
@@ -288,16 +299,8 @@ class UnionQueries(pydantic.BaseModel, frozen=True):
     def describe(self) -> AnnotationText:
         return AnnotationText(f"Union {self.union.name.root}")
 
-    def queryset_function(self) -> Identifier:
-        return Identifier(f"{self.union.names.function.root}_queryset")
-
-    def from_row_function(self) -> Identifier:
-        return Identifier(f"{self.union.names.function.root}_from_row")
-
-    def method(self) -> Identifier:
-        """The method of the Source's QuerySet and Manager yielding Union
-        models."""
-        return Identifier(f"as_{self.union.names.function.root}")
+    def names(self) -> QueryNames:
+        return QueryNames(function=self.union.names.function)
 
     def related_paths(self) -> tuple[RelatedPath, ...]:
         """Every Variant's chains of relations, each once, in Variant order."""
@@ -535,8 +538,8 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         module = Namespace(Scope(self.config.queries.root))
         for query in self._read():
             for function, role in (
-                (query.queryset_function(), "QuerySet function"),
-                (query.from_row_function(), "row function"),
+                (query.names().queryset_function(), "QuerySet function"),
+                (query.names().from_row_function(), "row function"),
             ):
                 module.define(
                     function,
@@ -591,9 +594,9 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             )
             for query in self._over(entity):
                 methods.define(
-                    query.method(),
+                    query.names().method(),
                     AnnotationText(
-                        f"{query_set.describe().root}.{query.method().root} (the "
+                        f"{query_set.describe().root}.{query.names().method().root} (the "
                         f"method of {query.describe().root})"
                     ),
                 )
@@ -604,7 +607,9 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         to."""
         enum_modules = tuple(symbol.module for symbol in self.enums.values())
         row = Namespace(
-            Scope(f"{self.config.queries.root}.{query.from_row_function().root}")
+            Scope(
+                f"{self.config.queries.root}.{query.names().from_row_function().root}"
+            )
         )
         row.define(
             DjangoQueriesRenderer.row_parameter,
@@ -614,7 +619,9 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             row.refer_to_module(module)
         yield from row.clashes()
         queryset = Namespace(
-            Scope(f"{self.config.queries.root}.{query.queryset_function().root}")
+            Scope(
+                f"{self.config.queries.root}.{query.names().queryset_function().root}"
+            )
         )
         queryset.define(
             DjangoQueriesRenderer.queryset_parameter,
@@ -694,7 +701,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     def _queryset_signature(query: ReadQueries) -> FileText:
         annotation = DjangoQueriesRenderer._queryset_annotation(query).root
         return FileText(
-            f"def {query.queryset_function().root}(\n"
+            f"def {query.names().queryset_function().root}(\n"
             f"    {DjangoQueriesRenderer.queryset_parameter.root}: {annotation},\n"
             f") -> {annotation}:\n"
         )
@@ -702,16 +709,13 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     def _queryset_function(self, query: ViewQueries) -> FileText:
         prepared = DjangoQueriesRenderer._prepared(query)
         signature = DjangoQueriesRenderer._queryset_signature(query).root
-        if not query.view.relation.filters:
-            return FileText(f"{signature}    return {prepared.root}\n")
-        kept = DjangoQueriesRenderer.kept_variable.root
         conditions = self._conditions()
-        condition = conditions.kept(
-            ir.FilterAnd(terms=query.view.relation.filters)
-            if len(query.view.relation.filters) > 1
-            else query.view.relation.filters[0],
-            query.view.source,
-        )
+        match conditions.of_view(query.view):
+            case _KeepsEvery():
+                return FileText(f"{signature}    return {prepared.root}\n")
+            case condition:
+                pass
+        kept = DjangoQueriesRenderer.kept_variable.root
         added = DjangoQueriesRenderer._added(conditions.written(condition, Indent(8)))
         return FileText(
             f"{signature}    {kept} = {prepared.root}\n{added.root}    return {kept}\n"
@@ -739,27 +743,23 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
 
     def _union_queryset_function(self, union: UnionQueries) -> FileText:
         """Annotates each row with the name of the first Variant whose Filters keep
-        it, and keeps only the rows one keeps. Only the last Variant may keep
-        every row, the compiler checks, so it is the default."""
+        it, and keeps only the rows one keeps: those with a name. Only the last
+        Variant may keep every row, the compiler checks, so it is the default."""
         kept = DjangoQueriesRenderer.kept_variable.root
         models = DjangoQueriesRenderer.django_models.root
         conditions = self._conditions()
         cases: list[Expression] = []
         default: list[Expression] = []
-        keeps: list[_Q] = []
         for leaf in union.leaves:
             name = Expression(
                 f"{models}.Value({PythonString(leaf.view.name.root).literal().root})"
             )
-            filters = leaf.view.relation.filters
-            if not filters:
-                default.append(Expression(f"default={name.root}"))
-                break
-            condition = conditions.kept(
-                ir.FilterAnd(terms=filters) if len(filters) > 1 else filters[0],
-                leaf.view.source,
-            )
-            keeps.append(condition)
+            match conditions.of_view(leaf.view):
+                case _KeepsEvery():
+                    default.append(Expression(f"default={name.root}"))
+                    break
+                case condition:
+                    pass
             cases.append(
                 Indent(12).exploded(
                     Expression(f"{models}.When("),
@@ -784,12 +784,20 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             ),
             Expression(")"),
         )
+        named = _Lookup(
+            entries=(
+                _Entry(
+                    lookup=Expression(
+                        f"{DjangoQueriesRenderer.variant_annotation.root}__isnull"
+                    ),
+                    value=_Null.NOT_NULL.written(),
+                ),
+            )
+        )
         added = (
             ""
             if default
-            else DjangoQueriesRenderer._added(
-                conditions.written(_AnyOf.of(keeps), Indent(8))
-            ).root
+            else DjangoQueriesRenderer._added(conditions.written(named, Indent(8))).root
         )
         return FileText(
             f"{DjangoQueriesRenderer._queryset_signature(union).root}"
@@ -827,7 +835,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             Expression(")"),
         )
         return FileText(
-            f"def {query.from_row_function().root}(\n"
+            f"def {query.names().from_row_function().root}(\n"
             f'    {row.root}: "{query.source.qualified().root}",\n'
             f"{DjangoQueriesRenderer._returns(query.model).root}\n"
             f"{unread}"
@@ -856,17 +864,17 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         *earlier, last = union.leaves
         cases = "".join(
             f"        case {PythonString(leaf.view.name.root).literal().root}:\n"
-            f"            return {leaf.from_row_function().root}({row})\n"
+            f"            return {leaf.names().from_row_function().root}({row})\n"
             for leaf in earlier
         )
         return FileText(
-            f"def {union.from_row_function().root}(\n"
+            f"def {union.names().from_row_function().root}(\n"
             f'    {row}: "{union.source.qualified().root}",\n'
             f"{DjangoQueriesRenderer._returns(union.model).root}\n"
             f"    match {variant}:\n"
             f"{cases}"
             "        case _:\n"
-            f"            return {last.from_row_function().root}({row})\n"
+            f"            return {last.names().from_row_function().root}({row})\n"
         )
 
     def _class_statement(self, name: Identifier, base: Expression) -> FileText:
@@ -904,6 +912,25 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             Expression(":"),
         )
 
+    @staticmethod
+    def _method_docstring(query: ReadQueries) -> FileText:
+        """For a View with Filters, or a Union, what its Filters do to a slice the
+        QuerySet has taken: they apply first, so it is a slice of the kept rows.
+        A View without Filters keeps every row, so it needs none."""
+        match query:
+            case ViewQueries(view=view) if not view.relation.filters:
+                return FileText("")
+            case ViewQueries() | UnionQueries():
+                return FileText(
+                    '        """The models of the rows of this QuerySet that the '
+                    "Filters keep.\n"
+                    "\n"
+                    "        The Filters apply before a slice the QuerySet has "
+                    "taken: `[:10]` gives\n"
+                    "        the first ten rows they keep.\n"
+                    '        """\n'
+                )
+
     def _query_set(self, entity: type[pydantic.BaseModel]) -> FileText:
         model = self.config.model_of(entity).qualified().root
         statement = self._class_statement(
@@ -913,12 +940,13 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             ),
         )
         methods = "\n".join(
-            f"    def {query.method().root}(\n"
+            f"    def {query.names().method().root}(\n"
             "        self,\n"
             f"{self._iterator_of(query).root}\n"
+            f"{DjangoQueriesRenderer._method_docstring(query).root}"
             f"        return {DjangoQueriesRenderer.map_builtin.root}(\n"
-            f"            {query.from_row_function().root},\n"
-            f"            {query.queryset_function().root}(self),\n"
+            f"            {query.names().from_row_function().root},\n"
+            f"            {query.names().queryset_function().root}(self),\n"
             "        )\n"
             for query in self._over(entity)
         )
@@ -975,10 +1003,10 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                 "        return self.get_queryset().order_by(*field_names)\n"
             ),
             *(
-                f"    def {query.method().root}(\n"
+                f"    def {query.names().method().root}(\n"
                 "        self,\n"
                 f"{self._iterator_of(query).root}\n"
-                f"        return self.get_queryset().{query.method().root}()\n"
+                f"        return self.get_queryset().{query.names().method().root}()\n"
                 for query in self._over(entity)
             ),
         ]
@@ -1158,6 +1186,10 @@ exactly where it is in Python: each NULL a comparison may give is either covered
 by an explicit `IS NULL` term or ends up false."""
 
 
+class _KeepsEvery(pydantic.BaseModel, frozen=True):
+    """A View without Filters: it keeps every row."""
+
+
 class _ConditionWriter(pydantic.BaseModel, frozen=True):
     """Writes Filters as `Q` conditions with Python's two-valued null semantics.
 
@@ -1170,6 +1202,17 @@ class _ConditionWriter(pydantic.BaseModel, frozen=True):
     graph: EntityGraph
     field_types: FieldTypes
     enums: Mapping[type[enum.Enum], Symbol]
+
+    def of_view(self, view: compiler.CompiledView) -> _Q | _KeepsEvery:
+        """True for the rows `view`'s Filters all keep, or `_KeepsEvery` when it
+        has none."""
+        match view.relation.filters:
+            case ():
+                return _KeepsEvery()
+            case (single,):
+                return self.kept(single, view.source)
+            case filters:
+                return self.kept(ir.FilterAnd(terms=filters), view.source)
 
     def kept(self, kept: ir.Filter, subject: type[pydantic.BaseModel]) -> _Q:
         """True for the rows of `subject`'s Django model `kept` keeps."""
@@ -1516,19 +1559,19 @@ class _RowReader(pydantic.BaseModel, frozen=True):
     def _found(self, lookup: ir.EntityLookup, row: Expression) -> Expression:
         """The row `lookup` finds from `row`: through `_required` if the View
         requires it."""
-        name = PythonString(DjangoQueriesRenderer.related(lookup).root).literal()
+        related = DjangoQueriesRenderer.related(lookup).root
+        name = PythonString(related).literal()
         cast = DjangoQueriesRenderer.typing_module.root
         model = self.config.model_of(lookup.target).qualified().root
         required = DjangoQueriesRenderer.required_helper.root
-        foreign_key = DjangoQueriesRenderer.related(lookup).root
         match lookup:
             case ir.Lookup(reference=ir.RequiredField(field=field)):
                 what = PythonString(field.root).literal().root
                 return Expression(
-                    f"{required}({row.root}.{foreign_key}, {row.root}, {what})"
+                    f"{required}({row.root}.{related}, {row.root}, {what})"
                 )
             case ir.Lookup():
-                return Expression(f"{row.root}.{foreign_key}")
+                return Expression(f"{row.root}.{related}")
             case ir.ReverseLookup(optionality=Optionality.REQUIRED):
                 what = PythonString(
                     f"a {lookup.target.__name__} by {lookup.via.root}"

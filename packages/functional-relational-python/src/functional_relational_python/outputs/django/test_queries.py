@@ -15,7 +15,7 @@ import pytest
 from django.apps import AppConfig, apps
 from django.conf import settings as django_settings
 from django.db import NotSupportedError, connection, transaction
-from django.db.models import Model, QuerySet
+from django.db.models import Model, Q, QuerySet
 from django.test.utils import CaptureQueriesContext
 from hypothesis import event, given, settings
 from hypothesis import strategies as st
@@ -665,8 +665,8 @@ def queries_text(views: Iterable[View], unions: Iterable[Union]) -> FileText:
 
 
 def test_golden_union_queryset() -> None:
-    """Annotated with the first Variant keeping each row, and keeping only rows a
-    Variant keeps."""
+    """Annotated with the first Variant keeping each row, and keeping only rows
+    annotated with one."""
     text = queries_text([], [any_employee()])
 
     assert (
@@ -700,16 +700,8 @@ def any_employee_queryset(
         ),
     )
     kept.query.add_q(
-        (
-            django.db.models.Q(
-                role=functional_relational_python.outputs.django.test_queries.Role.LEAD.value,
-            )
-            | django.db.models.Q(
-                nickname__isnull=False,
-            )
-            | django.db.models.Q(
-                id=1,
-            )
+        django.db.models.Q(
+            _variant__isnull=False,
         ),
     )
     return kept
@@ -1307,6 +1299,38 @@ def test_a_slice_is_of_the_rows_a_filtered_view_keeps() -> None:
         EmployeeId(5),
         EmployeeId(3),
     ]
+
+
+def test_django_adds_a_condition_to_a_sliced_query_before_its_slice() -> None:
+    """The query code relies on this: `query.add_q()` on a sliced QuerySet
+    filters before the LIMIT, where `filter()` refuses. If a Django upgrade
+    changes it, a filtered View's slice is no longer of the rows it keeps."""
+    with Database.of([lead()]) as django_models:
+        Database.put(django_models, organisation())
+        sliced = django_models.Employee.objects.order_by("-pk")[:2]
+        kept = sliced.all()
+        kept.query.add_q(Q(role=Role.LEAD.value))
+
+        with pytest.raises(TypeError, match="slice"):
+            _ = sliced.filter(role=Role.LEAD.value)
+        assert [employee.pk for employee in kept] == [5, 3], (
+            "Django's `query.add_q()` on a sliced QuerySet no longer filters "
+            "before the slice; the generated queries rely on it."
+        )
+
+
+def test_the_method_of_a_filtered_view_says_its_filters_apply_before_a_slice() -> None:
+    assert (
+        "    def as_lead(\n"
+        "        self,\n"
+        "    ) -> collections.abc.Iterator[frp_generated_models.Lead]:\n"
+        '        """The models of the rows of this QuerySet that the Filters keep.\n'
+        "\n"
+        "        The Filters apply before a slice the QuerySet has taken: `[:10]` "
+        "gives\n"
+        "        the first ten rows they keep.\n"
+        '        """\n'
+    ) in queries_of([lead()]).root
 
 
 def tagged(name: ViewName, tag: test_compiler.Tag, *pipeline: steps.Step) -> View:
