@@ -18,6 +18,7 @@ from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
     PythonLayout,
     PythonPlan,
+    WithoutMappings,
 )
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import ModulePath
@@ -34,11 +35,14 @@ from functional_relational_python.support.identifier import Identifier
 
 class Catalog(pydantic.BaseModel, frozen=True):
     """The Entities, the Views over them, the Payloads, the module each View's
-    or Payload's model goes to, and whether and where Django models go.
+    or Payload's model goes to, and whether and where mapping functions and Django
+    models go.
 
     Views are read models, Payloads are write models. A View and a Payload cannot
-    share a name. `layout` receives each compiled View and Payload. `django`
-    generates a Django model per Entity, see `DjangoModels`.
+    share a name. `layout` receives each compiled View and Payload. `mappings` is
+    the one module every View's mapping function goes to, see `MappingsRenderer`;
+    it cannot hold View models. `django` generates a Django model per Entity, see
+    `DjangoModels`.
 
     >>> catalog = Catalog(
     ...     entities=[Company],
@@ -47,6 +51,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
     ...         Payload(name=PayloadName("CompanyCreate"), source=Company, step=...)
     ...     ],
     ...     layout=lambda compiled: ModulePath("myapp.models"),
+    ...     mappings=ModulePath("myapp.mappings"),
     ...     django=WithoutDjangoModels(),
     ... )
     """
@@ -55,6 +60,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
     views: Sequence[View]
     payloads: Sequence[Payload]
     layout: ModuleLayout
+    mappings: ModulePath | WithoutMappings
     django: DjangoModels | WithoutDjangoModels
 
     def generate(
@@ -93,11 +99,24 @@ class Catalog(pydantic.BaseModel, frozen=True):
                 return Err(compile_error)
             case Ok(compiled):
                 pass
-        match PythonPlan.of(compiled, PythonLayout.models_only(self.layout)):
+        match PythonPlan.of(compiled, self._python_layout()):
             case Err(plan_error):
                 return Err(plan_error)
             case Ok(plan):
                 return Ok(PythonRenderer.render(plan))
+
+    def _python_layout(self) -> PythonLayout:
+        match self.mappings:
+            case WithoutMappings():
+                return PythonLayout.models_only(self.layout)
+            case ModulePath() as module:
+
+                def into_module(
+                    _: compiler.CompiledView | compiler.CompiledPayload,
+                ) -> ModulePath:
+                    return module
+
+                return PythonLayout(models=self.layout, mappings=into_module)
 
     def _django(
         self, graph: EntityGraph
