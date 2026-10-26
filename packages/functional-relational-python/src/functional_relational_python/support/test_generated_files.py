@@ -10,8 +10,10 @@ from functional_relational_python.support.filesystem import (
     RelativePath,
 )
 from functional_relational_python.support.generated_files import (
+    FileGeneratedTwice,
     GeneratedFile,
     GeneratedFiles,
+    ModuleShadowsPackage,
     StaleFile,
     Staleness,
 )
@@ -119,3 +121,44 @@ def test_write_deletes_generated_files_that_are_no_longer_generated() -> None:
     GeneratedFiles(files=(kept,)).write(filesystem, output).unwrap()
 
     assert set(filesystem.files) == {output.file(kept.path), users_own}
+
+
+VIEWS = RelativePath(PurePosixPath("app/views.py"))
+APP = RelativePath(PurePosixPath("app.py"))
+
+
+def file_at(path: RelativePath) -> GeneratedFiles:
+    return GeneratedFiles(files=(GeneratedFile(path=path, text=generated_text()),))
+
+
+def test_merged_reports_a_file_several_parts_generate() -> None:
+    match GeneratedFiles.merged([file_at(VIEWS)] * 2):
+        case Ok(merged):
+            pytest.fail(f"expected diagnostics, merged {merged}")
+        case Err(error):
+            assert error.diagnostics == (FileGeneratedTwice(path=VIEWS),)
+
+
+@pytest.mark.parametrize(
+    "package", [VIEWS, RelativePath(PurePosixPath("app/sub/views.py"))]
+)
+def test_merged_reports_a_module_that_shadows_a_generated_package(
+    package: RelativePath,
+) -> None:
+    match GeneratedFiles.merged([file_at(package), file_at(APP)]):
+        case Ok(merged):
+            pytest.fail(f"expected diagnostics, merged {merged}")
+        case Err(error):
+            assert error.diagnostics == (ModuleShadowsPackage(path=APP),)
+
+
+def test_merged_accepts_sibling_modules_sharing_a_prefix() -> None:
+    views, extra = (
+        file_at(VIEWS),
+        file_at(RelativePath(PurePosixPath("app/views_extra.py"))),
+    )
+
+    assert GeneratedFiles.merged([views, extra]).unwrap().files == (
+        *views.files,
+        *extra.files,
+    )

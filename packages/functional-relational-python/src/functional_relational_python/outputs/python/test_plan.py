@@ -443,7 +443,7 @@ def test_models_and_mappings_in_one_module_is_a_diagnostic() -> None:
         (
             ModelsAndMappingsInOneModule(module=ModulePath("app.views")),
             (
-                "app.views: View models and mapping functions cannot be generated "
+                "app.views: models and mapping functions cannot be generated "
                 "into the same module."
             ),
         ),
