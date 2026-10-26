@@ -151,11 +151,8 @@ class _Construction:
         match field:
             case ir.Field(value=value):
                 match value:
-                    case ir.SourceField():
-                        return Expression(f"{subject.root}.{value.field.root}")
-                    case ir.Lookup():
-                        entity = self._entity(value, subject)
-                        return self._optional(field, value, subject, lambda _: entity)
+                    case ir.SourceField() | ir.Lookup() | ir.Lifted():
+                        return self.computed(field, value, subject)
                     case ir.Added():
                         return LeftOut()
             case ir.NestedField(value=lookup):
@@ -167,6 +164,25 @@ class _Construction:
                     lambda construction: construction.call(
                         nested, self._entity(lookup, subject)
                     ),
+                )
+
+    def computed(
+        self, field: ir.RelationField, value: ir.SubjectValue, subject: Expression
+    ) -> Expression:
+        """`value` computed from `subject`, as the argument for `field`."""
+        match value:
+            case ir.SourceField():
+                return Expression(f"{subject.root}.{value.field.root}")
+            case ir.Lookup():
+                entity = self._entity(value, subject)
+                return self._optional(field, value, subject, lambda _: entity)
+            case ir.Lifted(lookup=lookup, value=lifted):
+                entity = self._entity(lookup, subject)
+                return self._optional(
+                    field,
+                    lookup,
+                    subject,
+                    lambda construction: construction.computed(field, lifted, entity),
                 )
 
     def _entity(self, lookup: ir.Lookup, subject: Expression) -> Expression:
@@ -182,11 +198,12 @@ class _Construction:
         subject: Expression,
         present: Callable[[_Construction], Expression],
     ) -> Expression:
-        """`present` itself, or `None` when an optional Reference is absent.
+        """`present` itself, or `None` when `lookup`'s Reference is optional and
+        absent.
 
         `present` gets the construction to write its expression at.
         """
-        match field.optionality():
+        match lookup.optionality:
             case Optionality.REQUIRED:
                 return present(self)
             case Optionality.OPTIONAL:

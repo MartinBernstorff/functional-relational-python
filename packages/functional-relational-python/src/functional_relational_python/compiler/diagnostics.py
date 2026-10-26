@@ -91,6 +91,53 @@ class ResolvedNameCollision(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class NotAResolvedField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`flatten` named or selected a field that holds no resolved Entity."""
+
+    view: DefinitionName
+    source: ir.SourceName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot flatten {self.source.root}.{self.field.root}, "
+            "because it is not a resolved Reference."
+        )
+
+
+class FlattenOntoExistingField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A field `flatten` lifts out of `flattened` has the name of a field the
+    relation already has, or of one lifted before it."""
+
+    view: DefinitionName
+    flattened: FieldName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot lift '{self.field.root}' out of "
+            f"'{self.flattened.root}', because it already has a field "
+            f"'{self.field.root}'. Rename or omit it in the nested pipeline of the "
+            "resolve."
+        )
+
+
+class FlattenNestedModel(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A field `flatten` would lift out of `flattened` is typed by the model of a
+    nested pipeline, whose Entity a lifted field cannot look up."""
+
+    view: DefinitionName
+    flattened: FieldName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot lift '{self.field.root}' out of "
+            f"'{self.flattened.root}', because its type is the model of a nested "
+            "pipeline. Flatten or omit it in the nested pipeline of the resolve."
+        )
+
+
 class SharedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
     """A View and a Payload have the same name, so their models would too.
 
@@ -229,6 +276,9 @@ type CompileDiagnostic = (
     | NotAReference
     | UnresolvableReference
     | ResolvedNameCollision
+    | NotAResolvedField
+    | FlattenOntoExistingField
+    | FlattenNestedModel
     | NonLiteralDefault
     | AddOntoExistingField
     | AddWithoutDefault

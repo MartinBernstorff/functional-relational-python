@@ -403,6 +403,104 @@ def test_a_dangling_reference_names_the_entity_the_field_and_the_ids() -> None:
     )
 
 
+def test_flatten_lifts_the_referenced_entitys_values_into_each_row() -> None:
+    view = employee_view(
+        steps.pipeline(
+            steps.resolve(
+                named(FieldName("department_id")),
+                steps.omit(FieldName("id")),
+                steps.hydrate(),
+            ),
+            steps.flatten(FieldName("department")),
+        )
+    )
+    view_engine = hr_engine(view)
+    company = Company.fake(CompanyId.fake())
+    department = Department.fake(DepartmentId(1), company.id)
+    employee = Employee.fake(EmployeeId(1), department.id, None)
+    for entity in (company, department, employee):
+        view_engine.put(entity).unwrap()
+
+    assert read(view_engine, view.name) == (
+        engine.ViewRow(
+            {
+                FieldName("id"): employee.id,
+                FieldName("name"): department.name,
+                FieldName("company"): company,
+                FieldName("mentor_id"): None,
+            }
+        ),
+    )
+
+
+def test_fields_lifted_out_of_an_absent_reference_are_none() -> None:
+    view = employee_view(
+        steps.pipeline(
+            steps.resolve(
+                named(FieldName("mentor_id")),
+                steps.rename(
+                    steps.select(lambda _field: True),
+                    lambda field: FieldName(f"mentor_{field.root}"),
+                ),
+            ),
+            steps.flatten(FieldName("mentor")),
+        )
+    )
+    view_engine = hr_engine(view)
+    department = Department.fake(DepartmentId(1), CompanyId.fake())
+    mentor = Employee.fake(EmployeeId(1), department.id, None)
+    mentee = Employee.fake(EmployeeId(2), department.id, mentor.id)
+    for entity in (department, mentor, mentee):
+        view_engine.put(entity).unwrap()
+
+    assert read(view_engine, view.name) == tuple(
+        engine.ViewRow(
+            {
+                FieldName("id"): employee.id,
+                FieldName("department_id"): department.id,
+                FieldName("mentor_id"): None if lifted is None else lifted.id,
+                FieldName("mentor_department_id"): (
+                    None if lifted is None else lifted.department_id
+                ),
+                FieldName("mentor_mentor_id"): (
+                    None if lifted is None else lifted.mentor_id
+                ),
+            }
+        )
+        for employee, lifted in ((mentor, None), (mentee, mentor))
+    )
+
+
+def test_a_dangling_reference_lifted_out_is_reported_on_its_entity() -> None:
+    view = employee_view(
+        steps.pipeline(
+            steps.resolve(
+                named(FieldName("department_id")),
+                steps.omit(FieldName("id")),
+                steps.hydrate(),
+            ),
+            steps.flatten(FieldName("department")),
+        )
+    )
+    view_engine = hr_engine(view)
+    missing_company = CompanyId(7)
+    department = Department.fake(DepartmentId(1), missing_company)
+    for entity in (department, Employee.fake(EmployeeId(1), department.id, None)):
+        view_engine.put(entity).unwrap()
+
+    match view_engine.read(view.name):
+        case Err(DiagnosticsError() as error):
+            assert error.diagnostics == (
+                engine.DanglingReference(
+                    entity=Department,
+                    field=FieldName("company_id"),
+                    missing=(missing_company,),
+                ),
+            )
+        case result:
+            pytest.fail(f"expected a dangling Reference, got {result}")
+
+
 # Property-based tests: the engine runs every View the compiler compiles, over
 # EntityGraphs generated per example (see `test_compiler`).
 
@@ -532,6 +630,8 @@ def with_ids_again(
             case ir.Added():
                 # An added field holds no value of the Source.
                 pass
+            case ir.Lifted():
+                pytest.fail(f"a View that only resolves lifted {field.name.root}")
     return source(**values)
 
 

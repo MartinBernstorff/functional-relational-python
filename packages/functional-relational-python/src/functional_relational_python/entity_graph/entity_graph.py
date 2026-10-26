@@ -56,6 +56,15 @@ class Optionality(StrEnum):
             )
         return SplitAnnotation(optionality=Optionality.REQUIRED, required=annotation)
 
+    @staticmethod
+    def admitting_none(annotation: RuntimeAnnotation) -> RuntimeAnnotation:
+        """`annotation | None`, or `annotation` itself if it admits `None`."""
+        match Optionality.of_annotation(annotation).optionality:
+            case Optionality.REQUIRED:
+                return functools.reduce(operator.or_, (annotation, types.NoneType))
+            case Optionality.OPTIONAL:
+                return annotation
+
     def annotate[T](self, annotation: type[T]) -> type[T | None]:
         """`annotation` as a run time annotation of this optionality."""
         match self:

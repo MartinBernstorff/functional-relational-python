@@ -3,6 +3,7 @@ from collections.abc import Mapping
 
 import pydantic
 import pytest
+from pydantic.fields import FieldInfo
 
 from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
@@ -166,6 +167,28 @@ def test_lookups_are_one_per_entity_nested_included_in_first_use_order() -> None
                 default=ir.NoDefault(),
             ),
             ir.Field.looked_up(FieldName("department"), department, ir.NoDefault()),
+        ),
+    )
+
+    assert relation.lookups() == (mentor, department, company)
+
+
+def test_a_lifted_field_looks_up_each_entity_on_its_way_outermost_first() -> None:
+    mentor = lookup(FieldName("mentor_id"), Employee, Optionality.OPTIONAL)
+    department = lookup(FieldName("department_id"), Department)
+    company = lookup(FieldName("company_id"), Company)
+    relation = ir.Relation(
+        source=ir.SourceName("Employee"),
+        fields=(
+            ir.Field(
+                name=FieldName("mentor_company"),
+                info=FieldInfo.from_annotation(Company | None),
+                value=ir.Lifted(
+                    lookup=mentor,
+                    value=ir.Lifted(lookup=department, value=company),
+                ),
+                default=ir.NoDefault(),
+            ),
         ),
     )
 

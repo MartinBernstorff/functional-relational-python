@@ -104,6 +104,14 @@ class Resolve(pydantic.BaseModel, frozen=True):
     then: Callable[[Node], Node]
 
 
+class Flatten(pydantic.BaseModel, frozen=True):
+    """Replaces one named resolved field, or every selected one, with the fields
+    of the Entity it holds."""
+
+    input: Node
+    fields: FieldName | Select
+
+
 type UncheckedDefault = object
 """A value given to `default`, before the compiler checks that it is a literal."""
 
@@ -151,6 +159,7 @@ type Node = (
     | Retype
     | Project
     | Resolve
+    | Flatten
     | Default
     | Add
 )
@@ -218,7 +227,28 @@ class Added(pydantic.BaseModel, frozen=True):
     """
 
 
-type Value = SourceField | Lookup | Added
+class Lifted(pydantic.BaseModel, frozen=True):
+    """The value `value` computes on the Entity `lookup` finds: a field `flatten`
+    lifted out of a resolved field. It is `None` when `lookup` finds no Entity."""
+
+    lookup: Lookup
+    value: SubjectValue
+
+    def lookups(self) -> tuple[Lookup, ...]:
+        """`lookup`, then each Lookup `value` makes on the Entity it finds."""
+        match self.value:
+            case SourceField():
+                return (self.lookup,)
+            case Lookup():
+                return (self.lookup, self.value)
+            case Lifted():
+                return (self.lookup, *self.value.lookups())
+
+
+type SubjectValue = SourceField | Lookup | Lifted
+"""A value computed from the subject's fields."""
+
+type Value = SubjectValue | Added
 """How a field of a View result is computed from the subject."""
 
 
@@ -320,6 +350,8 @@ class Relation(pydantic.BaseModel, frozen=True):
                             pass
                         case Lookup():
                             used.append(value)
+                        case Lifted():
+                            used.extend(value.lookups())
                 case NestedField(value=lookup, relation=nested):
                     used.extend((lookup, *nested.lookups()))
         first: dict[type[pydantic.BaseModel], Lookup] = {}

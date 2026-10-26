@@ -184,6 +184,23 @@ def resolve(fields: ir.Select, *then: Step) -> Step:
     return step
 
 
+def flatten(fields: FieldName | ir.Select) -> Step:
+    """Replaces the resolved field named `fields`, or every resolved field `fields`
+    selects, with the fields of the Entity it holds, in its place.
+
+    `resolve(select(...), omit("id"))` then `flatten("department")` gives the
+    Department's `name` at top level. A lifted field may not take a name the
+    relation already has: rename or omit it in the resolve's nested pipeline. A
+    field lifted out of an optional Reference is optional, `None` when the
+    Reference is.
+    """
+
+    def step(node: ir.Node) -> ir.Node:
+        return ir.Flatten(input=node, fields=fields)
+
+    return step
+
+
 def is_primary_key(field: ir.RelationField) -> bool:
     """Whether `field` is the primary key, under whatever name it has been renamed to.
 

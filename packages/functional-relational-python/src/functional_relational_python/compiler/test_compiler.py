@@ -904,6 +904,10 @@ def named(*fields: FieldName) -> ir.Select:
     return steps.select(lambda field: field.name in fields)
 
 
+def is_nested(field: ir.RelationField) -> bool:
+    return isinstance(field, ir.NestedField)
+
+
 def compile_resolving(
     source: type[pydantic.BaseModel], step: steps.Step
 ) -> compiler.CompiledView:
@@ -1192,6 +1196,308 @@ def test_a_resolve_diagnostic_message_names_the_offending_values(
     assert diagnostic.describe().root == message
 
 
+# Flattening resolved fields.
+
+
+def mentor_lookup() -> ir.Lookup:
+    """How an Employee's `mentor_id` is resolved."""
+    return ir.Lookup(
+        reference=ir.SourceField(field=FieldName("mentor_id")),
+        id_type=EmployeeId,
+        target=Employee,
+        optionality=Optionality.OPTIONAL,
+    )
+
+
+def own(name: Text) -> ir.SourceField:
+    return ir.SourceField(field=FieldName(name.root))
+
+
+def resolve_mentor(*then: steps.Step) -> steps.Step:
+    """Resolves the mentor, prefixing its fields so none collides when lifted."""
+    return steps.resolve(
+        named(FieldName("mentor_id")),
+        steps.rename(steps.select(lambda _field: True), prefixed(Text("mentor"))),
+        *then,
+    )
+
+
+def test_flatten_lifts_an_entitys_fields_in_place_of_the_resolved_field() -> None:
+    view = compile_resolving(
+        Memo,
+        steps.pipeline(
+            steps.resolve(named(FieldName("department_id"))),
+            steps.flatten(FieldName("department")),
+        ),
+    )
+
+    assert values(view) == {
+        FieldName("project_id"): own(Text("project_id")),
+        FieldName("id"): ir.Lifted(lookup=department_lookup(), value=own(Text("id"))),
+        FieldName("name"): ir.Lifted(
+            lookup=department_lookup(), value=own(Text("name"))
+        ),
+    }
+    assert annotations(view.relation) == {
+        FieldName("project_id"): ProjectId,
+        FieldName("id"): DepartmentId,
+        FieldName("name"): Text,
+    }
+
+
+def test_flatten_lifts_the_fields_of_a_nested_pipeline_with_their_defaults() -> None:
+    view = compile_resolving(
+        Employee,
+        steps.pipeline(
+            steps.resolve(
+                named(FieldName("department_id")),
+                steps.omit(FieldName("id")),
+                steps.rename(FieldName("name"), FieldName("department_name")),
+                steps.default(FieldName("department_name"), "Sales"),
+            ),
+            steps.flatten(named(FieldName("department"))),
+        ),
+    )
+
+    assert values(view) == {
+        FieldName("id"): own(Text("id")),
+        FieldName("name"): own(Text("name")),
+        FieldName("department_name"): ir.Lifted(
+            lookup=department_lookup(), value=own(Text("name"))
+        ),
+        FieldName("mentor_id"): own(Text("mentor_id")),
+    }
+    assert defaults(view) == {FieldName("department_name"): ir.ScalarDefault("Sales")}
+
+
+def test_fields_lifted_out_of_an_optional_reference_are_optional() -> None:
+    view = compile_resolving(
+        Employee,
+        steps.pipeline(resolve_mentor(), steps.flatten(FieldName("mentor"))),
+    )
+
+    # `mentor_mentor_id` was optional already, and stays `EmployeeId | None`.
+    assert annotations(view.relation) == {
+        FieldName("id"): EmployeeId,
+        FieldName("name"): Text,
+        FieldName("department_id"): DepartmentId,
+        FieldName("mentor_id"): EmployeeId | None,
+        FieldName("mentor_name"): Text | None,
+        FieldName("mentor_department_id"): DepartmentId | None,
+        FieldName("mentor_mentor_id"): EmployeeId | None,
+    }
+
+
+def test_a_resolved_field_lifted_out_looks_up_through_the_flattened_entity() -> None:
+    view = compile_resolving(
+        Employee,
+        steps.pipeline(
+            resolve_mentor(steps.resolve(named(FieldName("mentor_department_id")))),
+            steps.flatten(FieldName("mentor")),
+        ),
+    )
+
+    assert values(view)[FieldName("mentor_department")] == ir.Lifted(
+        lookup=mentor_lookup(), value=department_lookup()
+    )
+    assert annotations(view.relation)[FieldName("mentor_department")] == (
+        Department | None
+    )
+    assert view.relation.lookups() == (mentor_lookup(), department_lookup())
+
+
+def test_a_field_flattened_in_a_nested_pipeline_can_be_lifted_again() -> None:
+    view = compile_resolving(
+        Employee,
+        steps.pipeline(
+            resolve_mentor(
+                steps.resolve(
+                    named(FieldName("mentor_department_id")),
+                    steps.omit(FieldName("id")),
+                    steps.rename(FieldName("name"), FieldName("department_name")),
+                ),
+                steps.flatten(FieldName("mentor_department")),
+            ),
+            steps.flatten(FieldName("mentor")),
+        ),
+    )
+
+    assert values(view)[FieldName("department_name")] == ir.Lifted(
+        lookup=mentor_lookup(),
+        value=ir.Lifted(lookup=department_lookup(), value=own(Text("name"))),
+    )
+
+
+def flatten_diagnostics(
+    *pipeline: steps.Step,
+) -> tuple[diagnostics.CompileDiagnostic, ...]:
+    return resolve_diagnostics(Employee, steps.pipeline(*pipeline))
+
+
+def department_collisions() -> tuple[diagnostics.CompileDiagnostic, ...]:
+    """Flattening a whole Department into an Employee: `id` and `name` collide."""
+    return tuple(
+        diagnostics.FlattenOntoExistingField(
+            view=ViewName.fake(), flattened=FieldName("department"), field=field
+        )
+        for field in (FieldName("id"), FieldName("name"))
+    )
+
+
+@pytest.mark.parametrize(
+    "then",
+    [(), (steps.omit(FieldName("id")), steps.omit(FieldName("name")))],
+    ids=["alone", "steps after it use the existing fields"],
+)
+def test_a_lifted_field_onto_an_existing_name_is_a_diagnostic_per_field(
+    then: tuple[steps.Step, ...],
+) -> None:
+    assert (
+        flatten_diagnostics(
+            steps.resolve(named(FieldName("department_id"))),
+            steps.flatten(FieldName("department")),
+            *then,
+        )
+        == department_collisions()
+    )
+
+
+def test_two_flattened_fields_lifting_one_name_report_the_second() -> None:
+    label = FieldName("label")
+
+    reported = flatten_diagnostics(
+        steps.resolve(
+            named(FieldName("department_id")),
+            steps.omit(FieldName("id")),
+            steps.rename(FieldName("name"), label),
+        ),
+        steps.resolve(
+            named(FieldName("mentor_id")),
+            steps.project([]),
+            steps.add(label, str, default="mentor"),
+        ),
+        steps.flatten(named(FieldName("department"), FieldName("mentor"))),
+    )
+
+    assert reported == (
+        diagnostics.FlattenOntoExistingField(
+            view=ViewName.fake(), flattened=FieldName("mentor"), field=label
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("pipeline", "expected"),
+    [
+        (
+            (steps.flatten(FieldName("name")),),
+            diagnostics.NotAResolvedField(
+                view=ViewName.fake(),
+                source=ir.SourceName("Employee"),
+                field=FieldName("name"),
+            ),
+        ),
+        (
+            (steps.flatten(FieldName("budget")),),
+            diagnostics.UnknownField(
+                view=ViewName.fake(),
+                source=ir.SourceName("Employee"),
+                field=FieldName("budget"),
+                valid=(
+                    FieldName("id"),
+                    FieldName("name"),
+                    FieldName("department_id"),
+                    FieldName("mentor_id"),
+                ),
+            ),
+        ),
+        (
+            (
+                resolve_mentor(
+                    steps.resolve(
+                        named(FieldName("mentor_department_id")),
+                        steps.omit(FieldName("id")),
+                    )
+                ),
+                steps.flatten(FieldName("mentor")),
+                # The fields it could lift are still there.
+                steps.project([FieldName("mentor_name")]),
+            ),
+            diagnostics.FlattenNestedModel(
+                view=ViewName.fake(),
+                flattened=FieldName("mentor"),
+                field=FieldName("mentor_department"),
+            ),
+        ),
+    ],
+    ids=["not resolved", "unknown", "nested model"],
+)
+def test_flattening_what_it_cannot_lift_is_one_diagnostic(
+    pipeline: tuple[steps.Step, ...], expected: diagnostics.CompileDiagnostic
+) -> None:
+    assert flatten_diagnostics(*pipeline) == (expected,)
+
+
+def test_building_a_flatten_checks_nothing() -> None:
+    root = ir.FromSource(source=Memo)
+    unknown = FieldName("does_not_exist")
+
+    node = steps.flatten(unknown)(root)
+
+    match node:
+        case ir.Flatten(input=input_node, fields=fields):
+            assert (input_node, fields) == (root, unknown)
+        case _:
+            pytest.fail(f"expected a Flatten node, got {node}")
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "message"),
+    [
+        (
+            diagnostics.NotAResolvedField(
+                view=ViewName("EmployeeView"),
+                source=ir.SourceName("Employee"),
+                field=FieldName("name"),
+            ),
+            (
+                "EmployeeView: cannot flatten Employee.name, because it is not a "
+                "resolved Reference."
+            ),
+        ),
+        (
+            diagnostics.FlattenOntoExistingField(
+                view=ViewName("EmployeeView"),
+                flattened=FieldName("department"),
+                field=FieldName("name"),
+            ),
+            (
+                "EmployeeView: cannot lift 'name' out of 'department', because it "
+                "already has a field 'name'. Rename or omit it in the nested "
+                "pipeline of the resolve."
+            ),
+        ),
+        (
+            diagnostics.FlattenNestedModel(
+                view=ViewName("EmployeeView"),
+                flattened=FieldName("mentor"),
+                field=FieldName("department"),
+            ),
+            (
+                "EmployeeView: cannot lift 'department' out of 'mentor', because "
+                "its type is the model of a nested pipeline. Flatten or omit it in "
+                "the nested pipeline of the resolve."
+            ),
+        ),
+    ],
+    ids=["not resolved", "collision", "nested model"],
+)
+def test_a_flatten_diagnostic_message_names_the_offending_values(
+    diagnostic: diagnostics.CompileDiagnostic, message: str
+) -> None:
+    assert diagnostic.describe().root == message
+
+
 # Property-based tests over EntityGraphs generated per example. The Entities are
 # built at run time, so each example has its own shape of graph: any number of
 # Entities, References between any of them (self-References included), required or
@@ -1334,6 +1640,33 @@ def stored_entities(draw: st.DrawFn, drawn: Models) -> tuple[pydantic.BaseModel,
     return tuple(stored)
 
 
+def keep_target(
+    references: dict[FieldName, type[pydantic.BaseModel]],
+    old: FieldName,
+    new: FieldName,
+) -> None:
+    """Moves the target of `old`, if it is a Reference, to its new name `new`."""
+    if old in references:
+        references[new] = references.pop(old)
+
+
+def lifting(reference: FieldName, nested: steps.Step, prefix: Text) -> steps.Step:
+    """Resolves `reference` through `nested`, then flattens it.
+
+    Nested models cannot be lifted, so they are omitted. `prefix` keeps the lifted
+    fields from colliding with any other.
+    """
+    return steps.pipeline(
+        steps.resolve(
+            named(reference),
+            nested,
+            steps.omit(steps.select(is_nested)),
+            steps.rename(steps.select(lambda _field: True), prefixed(prefix)),
+        ),
+        steps.flatten(FieldName(reference.root.removesuffix("_id") or reference.root)),
+    )
+
+
 @st.composite
 def pipelines(
     draw: st.DrawFn,
@@ -1341,14 +1674,17 @@ def pipelines(
     source: type[pydantic.BaseModel],
     depth: Depth,
 ) -> steps.Step:
-    """A valid pipeline of omits, renames, projects, adds and resolves over `source`.
+    """A valid pipeline of omits, renames, projects, adds, resolves and flattens
+    over `source`.
 
     Omits and renames name one field or select several. It may start by adding a
     field.
 
     Each step names only fields the earlier steps kept, and each rename gets a name
     no field has, so it never collides. A resolve selects Reference fields only,
-    and its nested pipeline is drawn the same way over the referenced Entity.
+    and its nested pipeline is drawn the same way over the referenced Entity. A
+    flatten lifts the fields of one such resolve, each renamed to a name no other
+    field has. Later steps leave the lifted fields alone.
     """
     fields = list(map(FieldName, source.model_fields))
     references = {
@@ -1374,6 +1710,7 @@ def pipelines(
                     "rename_selected",
                     "project",
                     "resolve",
+                    "flatten",
                 ]
             )
         ):
@@ -1394,21 +1731,28 @@ def pipelines(
             case "rename":
                 new = FieldName(f"renamed_{index}")
                 fields[fields.index(field)] = new
-                if field in references:
-                    references[new] = references.pop(field)
+                keep_target(references, field, new)
                 drawn.append(steps.rename(field, new))
             case "rename_selected":
                 renamed = draw(st.lists(st.sampled_from(fields), unique=True))
                 renaming = prefixed(Text(f"renamed_{index}"))
                 for old in renamed:
                     fields[fields.index(old)] = renaming(old)
-                    if old in references:
-                        references[renaming(old)] = references.pop(old)
+                    keep_target(references, old, renaming(old))
                 drawn.append(steps.rename(named(*renamed), renaming))
             case "project":
                 projected = draw(st.lists(st.sampled_from(fields), unique=True))
                 fields = [kept for kept in fields if kept in projected]
                 drawn.append(steps.project(projected))
+            case "flatten":
+                resolvable = [kept for kept in fields if kept in references]
+                if not resolvable or depth.root == 0:
+                    continue
+                flattened = draw(st.sampled_from(resolvable))
+                target = references.pop(flattened)
+                nested = draw(pipelines(graph, target, Depth(depth.root - 1)))
+                fields.remove(flattened)
+                drawn.append(lifting(flattened, nested, Text(f"flat_{index}")))
             case _:
                 resolved = [kept for kept in fields if kept in references]
                 if not resolved or depth.root == 0:
@@ -1430,19 +1774,19 @@ def any_steps(draw: st.DrawFn, pool: Sequence[FieldName], depth: Depth) -> steps
     """Any step, naming fields from `pool` whether or not they exist.
 
     Unlike `pipelines`, it may omit unknown fields, rename onto existing ones or
-    several fields onto one, resolve fields that are not References, or resolve
-    onto an existing name.
+    several fields onto one, resolve fields that are not References, resolve onto
+    an existing name, or flatten fields that are not resolved.
     """
     names = st.sampled_from(pool)
     match draw(
         st.sampled_from(
-            ["omit", "omit_selected", "rename", "rename_selected", "project", "resolve"]
+            ["omit", "flatten", "rename", "rename_selected", "project", "resolve"]
         )
     ):
-        case "omit":
-            return steps.omit(draw(names))
-        case "omit_selected":
-            return steps.omit(named(*draw(st.lists(names))))
+        case "omit" | "flatten" as action:
+            # One name, or a Select of any names.
+            fields = draw(names | st.lists(names).map(lambda chosen: named(*chosen)))
+            return {"omit": steps.omit, "flatten": steps.flatten}[action](fields)
         case "rename":
             return steps.rename(draw(names), draw(names))
         case "rename_selected":
@@ -1682,6 +2026,33 @@ def test_a_resolved_field_is_optional_iff_its_lookup_is(
         assert field.optionality() == value.optionality
 
 
+def lifted_fields(relation: ir.Relation) -> tuple[tuple[ir.Field, ir.Lifted], ...]:
+    """Every field `flatten` lifted, nested ones included."""
+    found: list[tuple[ir.Field, ir.Lifted]] = []
+    for field in relation.fields:
+        match field:
+            case ir.Field(value=ir.Lifted() as value):
+                found.append((field, value))
+            case ir.NestedField(relation=nested):
+                found.extend(lifted_fields(nested))
+            case ir.Field():
+                pass
+    return tuple(found)
+
+
+@given(compiled_views())
+def test_a_field_lifted_through_an_optional_lookup_is_optional(
+    view: compiler.CompiledView,
+) -> None:
+    lifted = lifted_fields(view.relation)
+    event(f"lifted fields: {bool(lifted)}")
+    for field, value in lifted:
+        if any(
+            lookup.optionality is Optionality.OPTIONAL for lookup in value.lookups()
+        ):
+            assert field.optionality() is Optionality.OPTIONAL
+
+
 @given(compiled_views())
 def test_lookups_name_each_looked_up_entity_once(
     view: compiler.CompiledView,
@@ -1689,7 +2060,14 @@ def test_lookups_name_each_looked_up_entity_once(
     targets = [found.target for found in view.relation.lookups()]
 
     assert sorted(targets, key=lambda target: target.__name__) == sorted(
-        {value.target for _, value in resolved_fields(view.relation)},
+        {
+            *(value.target for _, value in resolved_fields(view.relation)),
+            *(
+                lookup.target
+                for _, value in lifted_fields(view.relation)
+                for lookup in value.lookups()
+            ),
+        },
         key=lambda target: target.__name__,
     )
 

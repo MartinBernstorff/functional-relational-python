@@ -182,10 +182,8 @@ class InMemoryViewEngine:
         match field:
             case ir.Field(value=value):
                 match value:
-                    case ir.SourceField():
-                        return getattr(subject, value.field.root)
-                    case ir.Lookup():
-                        return self._lookup(value, subject, missing)
+                    case ir.SourceField() | ir.Lookup() | ir.Lifted():
+                        return self._value(value, subject, missing)
                     case ir.Added():
                         return InMemoryViewEngine._default(field)
             case ir.NestedField(value=lookup, relation=relation):
@@ -194,6 +192,21 @@ class InMemoryViewEngine:
                         return None
                     case entity:
                         return self._row(relation, entity, missing)
+
+    def _value(
+        self, value: ir.SubjectValue, subject: pydantic.BaseModel, missing: _Missing
+    ) -> FieldValue:
+        match value:
+            case ir.SourceField():
+                return getattr(subject, value.field.root)
+            case ir.Lookup():
+                return self._lookup(value, subject, missing)
+            case ir.Lifted(lookup=lookup, value=lifted):
+                match self._lookup(lookup, subject, missing):
+                    case None:
+                        return None
+                    case entity:
+                        return self._value(lifted, entity, missing)
 
     @staticmethod
     def _default(field: ir.Field) -> FieldValue:
