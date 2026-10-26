@@ -90,11 +90,17 @@ class ProjectDetail(BaseModel):
     id: ProjectDetailId
     project_id: Annotated[ProjectId, OneToOne()]
     successor_id: Annotated[ProjectId | None, OneToOne()]
+    predecessor_id: Annotated[ProjectId, OneToOne()] | None
 
 
 class MarkedPlainField(BaseModel):
     id: ProjectDetailId
     name: Annotated[Name, OneToOne()]
+
+
+class MarkedOptionalPlainField(BaseModel):
+    id: ProjectDetailId
+    nickname: Annotated[Name, OneToOne()] | None
 
 
 class MarkedPrimaryKey(BaseModel):
@@ -342,7 +348,9 @@ def test_an_annotation_is_optional_iff_it_admits_none(
 
     assert entity_graph.Optionality.of_annotation(
         annotation
-    ) == entity_graph.SplitAnnotation(optionality=optionality, required=required)
+    ) == entity_graph.SplitAnnotation(
+        optionality=optionality, required=required, metadata=()
+    )
 
 
 @pytest.mark.parametrize("optionality", list(entity_graph.Optionality))
@@ -351,7 +359,9 @@ def test_an_annotation_built_with_an_optionality_is_recognised_as_it(
 ) -> None:
     assert entity_graph.Optionality.of_annotation(
         optionality.annotate(Label)
-    ) == entity_graph.SplitAnnotation(optionality=optionality, required=Label)
+    ) == entity_graph.SplitAnnotation(
+        optionality=optionality, required=Label, metadata=()
+    )
 
 
 @pytest.mark.parametrize(
@@ -367,7 +377,7 @@ def test_an_annotation_is_written_with_its_optionality(
     assert optionality.annotate_text(Label("Label")) == Label(text)
 
 
-def test_a_reference_marked_one_to_one_is_one_to_one_whether_optional_or_not() -> None:
+def test_a_reference_marked_one_to_one_is_one_to_one_however_it_is_optional() -> None:
     graph = entity_graph.EntityGraph.build(
         [Department, Employee, Project, ProjectDetail], IdBase.fake()
     ).unwrap()
@@ -386,13 +396,35 @@ def test_a_reference_marked_one_to_one_is_one_to_one_whether_optional_or_not() -
             entity_graph.Optionality.OPTIONAL,
             entity_graph.Cardinality.ONE_TO_ONE,
         ),
+        (
+            entity_graph.FieldName("predecessor_id"),
+            entity_graph.Optionality.OPTIONAL,
+            entity_graph.Cardinality.ONE_TO_ONE,
+        ),
     ]
+
+
+def test_an_annotated_type_in_an_optional_union_keeps_its_metadata() -> None:
+    marker = OneToOne()
+
+    assert entity_graph.Optionality.of_annotation(
+        Annotated[Label, marker] | None
+    ) == entity_graph.SplitAnnotation(
+        optionality=entity_graph.Optionality.OPTIONAL,
+        required=Label,
+        metadata=(marker,),
+    )
 
 
 @pytest.mark.parametrize(
     ("model", "field"),
     [
         pytest.param(MarkedPlainField, entity_graph.FieldName("name"), id="plain"),
+        pytest.param(
+            MarkedOptionalPlainField,
+            entity_graph.FieldName("nickname"),
+            id="optional plain",
+        ),
         pytest.param(MarkedPrimaryKey, entity_graph.FieldName("id"), id="primary key"),
     ],
 )

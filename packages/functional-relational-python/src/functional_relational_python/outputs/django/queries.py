@@ -202,15 +202,22 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
         """`prefix` is the chain of foreign keys to the subject of `relation`."""
         for field in relation.fields:
             match field:
-                case ir.Field(value=ir.Lookup() as lookup):
-                    yield (*prefix, DjangoQueriesRenderer.foreign_key(lookup))
-                case ir.NestedField(value=ir.Lookup() as lookup, relation=nested):
-                    path = (*prefix, DjangoQueriesRenderer.foreign_key(lookup))
-                    yield path
-                    yield from ViewQueries._paths(nested, path)
-                case ir.Field() | ir.NestedField():
-                    # A View that reverses a Reference is reported, not written.
-                    pass
+                case ir.Field(value=value):
+                    match value:
+                        case ir.Lookup():
+                            yield (*prefix, DjangoQueriesRenderer.foreign_key(value))
+                        case ir.SourceField() | ir.Added():
+                            pass
+                        case ir.ReverseLookup():
+                            raise ReverseInQueryError(field.name)
+                case ir.NestedField(value=lookup, relation=nested):
+                    match lookup:
+                        case ir.Lookup():
+                            path = (*prefix, DjangoQueriesRenderer.foreign_key(lookup))
+                            yield path
+                            yield from ViewQueries._paths(nested, path)
+                        case ir.ReverseLookup():
+                            raise ReverseInQueryError(field.name)
 
 
 class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):

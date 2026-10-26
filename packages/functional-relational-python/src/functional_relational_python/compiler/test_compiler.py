@@ -1552,18 +1552,27 @@ def test_a_defect_in_a_reversed_nested_pipeline_names_the_reversed_entity() -> N
     )
 
 
-def test_building_a_reverse_checks_nothing() -> None:
+@pytest.mark.parametrize(
+    ("step", "via"),
+    [
+        (steps.reverse(Company), ir.SoleReference()),
+        (
+            steps.reverse_via(Company, FieldName("does_not_exist")),
+            FieldName("does_not_exist"),
+        ),
+    ],
+    ids=["sole", "via"],
+)
+def test_building_a_reverse_checks_nothing(
+    step: steps.Step, via: FieldName | ir.SoleReference
+) -> None:
     root = ir.FromSource(source=Memo)
 
-    node = steps.reverse_via(Company, FieldName("does_not_exist"))(root)
+    node = step(root)
 
     match node:
-        case ir.Reverse(input=input_node, entity=entity, via=via):
-            assert (input_node, entity, via) == (
-                root,
-                Company,
-                FieldName("does_not_exist"),
-            )
+        case ir.Reverse(input=input_node, entity=entity, via=built_via):
+            assert (input_node, entity, built_via) == (root, Company, via)
         case _:
             pytest.fail(f"expected a Reverse node, got {node}")
 

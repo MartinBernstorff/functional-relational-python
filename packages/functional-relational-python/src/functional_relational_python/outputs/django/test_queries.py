@@ -39,8 +39,10 @@ from functional_relational_python.outputs.django.queries import (
     DjangoQueriesRenderer,
     QueriesIntoDjangoModelsModule,
     ReverseInDjangoQueries,
+    ReverseInQueryError,
     ViewModelIntoDjangoModelsModule,
     ViewModelIntoQueriesModule,
+    ViewQueries,
 )
 from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import (
@@ -1011,6 +1013,29 @@ def test_a_view_that_reverses_a_reference_is_a_diagnostic(
                     via=FieldName("company_id"),
                 ),
             )
+
+
+@pytest.mark.parametrize(
+    "then", [(), (steps.project([FieldName("motto")]),)], ids=["entity", "nested"]
+)
+def test_selecting_related_for_a_reversed_field_is_an_error(
+    then: tuple[steps.Step, ...],
+) -> None:
+    graph = EntityGraph.build([Company, CompanyProfile], IdBase.fake()).unwrap()
+    view = View(
+        name=ViewName("CompanyWithProfile"),
+        source=Company,
+        step=steps.reverse(CompanyProfile, *then),
+    )
+    (compiled,) = compiler.compile_views(graph, [view]).unwrap().views
+    queries = ViewQueries(
+        view=compiled,
+        model=Modules.config().model_of(Company),
+        source=Modules.config().model_of(Company),
+    )
+
+    with pytest.raises(ReverseInQueryError, match="company_profile"):
+        _ = queries.related_paths()
 
 
 def test_the_reverse_in_django_queries_message_names_the_reference() -> None:

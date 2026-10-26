@@ -338,18 +338,23 @@ class SourceField(pydantic.BaseModel, frozen=True):
     field: FieldName
 
 
-class Lookup(pydantic.BaseModel, frozen=True):
-    """The Entity a Reference points to, or `None` for an absent optional one."""
+class _FindsEntity(pydantic.BaseModel, frozen=True):
+    """What every lookup has: the Entity it finds, and whether it may find none."""
 
-    reference: SourceField
-    id_type: IdType
     target: type[pydantic.BaseModel]
     optionality: Optionality
 
     def annotation(self) -> type[pydantic.BaseModel | None]:
-        """The looked-up value's type: the target Entity, optional if the
-        Reference is."""
+        """The looked-up value's type: the target Entity, optional if the lookup
+        is."""
         return self.optionality.annotate(self.target)
+
+
+class Lookup(_FindsEntity, frozen=True):
+    """The Entity a Reference points to, or `None` for an absent optional one."""
+
+    reference: SourceField
+    id_type: IdType
 
     def keyed_by(self) -> FieldName:
         """The target's field the subject's ID is matched against: its primary
@@ -357,24 +362,18 @@ class Lookup(pydantic.BaseModel, frozen=True):
         return EntityNode.primary_key
 
 
-class ReverseLookup(pydantic.BaseModel, frozen=True):
+class ReverseLookup(_FindsEntity, frozen=True):
     """The Entity whose one-to-one Reference `via` holds the subject's primary key,
     or `None` when no Entity's does.
 
     `id_type` is the subject's primary key type, which `via` is typed with.
     """
 
-    optionality: typing.ClassVar[Optionality] = Optionality.OPTIONAL
-    """Whether a referencing Entity exists is up to the data, so it is always
-    optional."""
-
-    target: type[pydantic.BaseModel]
+    # Whether a referencing Entity exists is up to the data, so a ReverseLookup
+    # is always optional. Like a tag, the one value it can have is its default.
+    optionality: typing.Literal[Optionality.OPTIONAL] = Optionality.OPTIONAL
     via: FieldName
     id_type: IdType
-
-    def annotation(self) -> type[pydantic.BaseModel | None]:
-        """The looked-up value's type: the target Entity, or `None`."""
-        return self.optionality.annotate(self.target)
 
     def keyed_by(self) -> FieldName:
         """The target's field the subject's ID is matched against: `via`."""

@@ -131,17 +131,46 @@ class _IdsFound:
             found.append(id_value)
 
 
-class _Problems:
-    """The IDs running a View found a problem with.
+type _Stored = Mapping[type[pydantic.BaseModel], Mapping[IdValue, pydantic.BaseModel]]
+"""The stored Entities, by model and ID."""
+
+
+class _Read:
+    """One run of a View: the IDs it found a problem with, and an index per
+    one-to-one Reference it follows backwards.
 
     `missing` are IDs no stored Entity has, by the Entity and field holding them.
     `shared` are IDs several Entities hold in a one-to-one field, by that Entity
-    and field.
+    and field. Only IDs the View looks up are reported.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, stored: _Stored) -> None:
         self.missing = _IdsFound()
         self.shared = _IdsFound()
+        self._stored = stored
+        self._indexes: dict[
+            tuple[type[pydantic.BaseModel], FieldName],
+            dict[IdValue, list[pydantic.BaseModel]],
+        ] = {}
+
+    def referencing(
+        self, lookup: ir.ReverseLookup, id_value: IdValue
+    ) -> pydantic.BaseModel | None:
+        """The Entity whose `lookup.via` holds `id_value`: the first in insertion
+        order when several do, which `shared` records, or `None`.
+
+        The index of `lookup.via` is built the first time it is followed.
+        """
+        key = (lookup.target, lookup.via)
+        if key not in self._indexes:
+            index: dict[IdValue, list[pydantic.BaseModel]] = {}
+            for entity in self._stored.get(lookup.target, {}).values():
+                index.setdefault(getattr(entity, lookup.via.root), []).append(entity)
+            self._indexes[key] = index
+        found = self._indexes[key].get(id_value, [])
+        if len(found) > 1:
+            self.shared.add(lookup.target, lookup.via, id_value)
+        return found[0] if found else None
 
     def diagnostics(self) -> tuple[ReadDiagnostic, ...]:
         """One per Entity and field, each with every ID found."""
@@ -216,29 +245,26 @@ class InMemoryViewEngine:
                 pass
         if compiled.source not in self._entity_graph.entities:
             return Err(NonEntitySourceError(view, compiled.source))
-        problems = _Problems()
+        run = _Read(self._entities)
         rows = tuple(
-            self._row(compiled.relation, entity, problems)
+            self._row(compiled.relation, entity, run)
             for entity in self._entities.get(compiled.source, {}).values()
             if all(
                 InMemoryViewEngine._holds(kept, entity)
                 for kept in compiled.relation.filters
             )
         )
-        return DiagnosticsError.or_ok(problems.diagnostics(), lambda: rows)
+        return DiagnosticsError.or_ok(run.diagnostics(), lambda: rows)
 
     def _row(
-        self, relation: ir.Relation, subject: pydantic.BaseModel, problems: _Problems
+        self, relation: ir.Relation, subject: pydantic.BaseModel, run: _Read
     ) -> ViewRow:
         return ViewRow(
-            {
-                field.name: self._field(field, subject, problems)
-                for field in relation.fields
-            }
+            {field.name: self._field(field, subject, run) for field in relation.fields}
         )
 
     def _field(
-        self, field: ir.RelationField, subject: pydantic.BaseModel, problems: _Problems
+        self, field: ir.RelationField, subject: pydantic.BaseModel, run: _Read
     ) -> FieldValue:
         match field:
             case ir.Field(value=value):
@@ -246,15 +272,15 @@ class InMemoryViewEngine:
                     case ir.SourceField():
                         return getattr(subject, value.field.root)
                     case ir.Lookup() | ir.ReverseLookup():
-                        return self._lookup(value, subject, problems)
+                        return self._lookup(value, subject, run)
                     case ir.Added():
                         return InMemoryViewEngine._default(field)
             case ir.NestedField(value=lookup, relation=relation):
-                match self._lookup(lookup, subject, problems):
+                match self._lookup(lookup, subject, run):
                     case None:
                         return None
                     case entity:
-                        return self._row(relation, entity, problems)
+                        return self._row(relation, entity, run)
 
     @staticmethod
     def _holds(kept: ir.Filter, subject: pydantic.BaseModel) -> bool:
@@ -324,14 +350,14 @@ class InMemoryViewEngine:
         self,
         lookup: ir.EntityLookup,
         subject: pydantic.BaseModel,
-        problems: _Problems,
+        run: _Read,
     ) -> pydantic.BaseModel | None:
         """The Entity `lookup` finds from `subject`, or `None`.
 
         A Lookup gives `None` for an absent optional Reference, or when the Entity
-        is missing, which `problems` records. A ReverseLookup gives `None` when no
+        is missing, which `run` records. A ReverseLookup gives `None` when no
         Entity references the subject, and the first in insertion order when
-        several do, which `problems` records.
+        several do, which `run` records.
         """
         match lookup:
             case ir.Lookup():
@@ -341,19 +367,11 @@ class InMemoryViewEngine:
                     return None
                 match self._entities.get(lookup.target, {}).get(id_value):
                     case None:
-                        problems.missing.add(type(subject), reference, id_value)
+                        run.missing.add(type(subject), reference, id_value)
                         return None
                     case entity:
                         return entity
             case ir.ReverseLookup():
-                id_value = getattr(subject, EntityNode.primary_key.root)
-                found = [
-                    entity
-                    for entity in self._entities.get(lookup.target, {}).values()
-                    if getattr(entity, lookup.via.root) == id_value
-                ]
-                if not found:
-                    return None
-                if len(found) > 1:
-                    problems.shared.add(lookup.target, lookup.via, id_value)
-                return found[0]
+                return run.referencing(
+                    lookup, getattr(subject, EntityNode.primary_key.root)
+                )

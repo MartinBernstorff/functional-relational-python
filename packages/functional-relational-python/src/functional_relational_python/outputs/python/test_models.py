@@ -15,7 +15,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id, IdBase
+from functional_relational_python.entity_graph.id import Id, IdBase, OneToOne
 from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
     PythonLayout,
@@ -619,6 +619,23 @@ from functional_relational_python.outputs.python.test_models import (
 """
         in text
     )
+
+
+class CompanyDetails(pydantic.BaseModel):
+    """`OneToOne` marking a Reference inside and outside its `None`."""
+
+    inside: Annotated[CompanyId | None, OneToOne()]
+    outside: Annotated[CompanyId, OneToOne()] | None
+
+
+def test_a_view_model_leaves_one_to_one_out_wherever_it_marks_a_field() -> None:
+    (file,) = generate(
+        [view(CompanyDetails)], [], single_module(ModulePath("app.views"))
+    ).files
+
+    assert (
+        "    inside: CompanyId | None\n    outside: CompanyId | None\n"
+    ) in file.text.root
 
 
 class WithUnsupported(pydantic.BaseModel):

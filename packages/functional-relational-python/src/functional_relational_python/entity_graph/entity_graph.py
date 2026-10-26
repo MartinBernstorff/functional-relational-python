@@ -32,6 +32,10 @@ type RuntimeAnnotation = object
 alias such as `list[int]`, a union, a `type` alias, or a `Literal` argument."""
 
 
+type AnnotationMetadata = object
+"""One of the objects after the type in `Annotated[X, ...]`, e.g. `OneToOne()`."""
+
+
 class Optionality(StrEnum):
     """Whether a value may be `None`.
 
@@ -46,15 +50,32 @@ class Optionality(StrEnum):
     @staticmethod
     def of_annotation(annotation: RuntimeAnnotation) -> SplitAnnotation:
         """Whether `annotation` admits `None`, and `annotation` without `None`:
-        `X | None` is an optional `X`, `X | Y | None` an optional `X | Y`."""
+        `X | None` is an optional `X`, `X | Y | None` an optional `X | Y`.
+
+        `Annotated[X, ...] | None` is an optional `X` with that metadata. Pydantic
+        moves the metadata of `Annotated[X | None, ...]` to the field, but leaves
+        an `Annotated` inside a union in the annotation.
+        """
         args = typing.get_args(annotation)
         if typing.get_origin(annotation) is typing.Union and types.NoneType in args:
             rest = [arg for arg in args if arg is not types.NoneType]
-            return SplitAnnotation(
-                optionality=Optionality.OPTIONAL,
-                required=functools.reduce(operator.or_, rest),
-            )
-        return SplitAnnotation(optionality=Optionality.REQUIRED, required=annotation)
+            match rest:
+                case [annotated] if typing.get_origin(annotated) is typing.Annotated:
+                    required, *metadata = typing.get_args(annotated)
+                    return SplitAnnotation(
+                        optionality=Optionality.OPTIONAL,
+                        required=required,
+                        metadata=tuple(metadata),
+                    )
+                case _:
+                    return SplitAnnotation(
+                        optionality=Optionality.OPTIONAL,
+                        required=functools.reduce(operator.or_, rest),
+                        metadata=(),
+                    )
+        return SplitAnnotation(
+            optionality=Optionality.REQUIRED, required=annotation, metadata=()
+        )
 
     def annotate[T](self, annotation: type[T]) -> type[T | None]:
         """`annotation` as a run time annotation of this optionality."""
@@ -74,12 +95,14 @@ class Optionality(StrEnum):
 
 
 class SplitAnnotation(BaseModel):
-    """An annotation, told apart into whether it admits `None` and the rest."""
+    """An annotation, told apart into whether it admits `None`, the rest, and the
+    metadata of an `Annotated` the rest was wrapped in inside the union."""
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     optionality: Optionality
     required: RuntimeAnnotation
+    metadata: tuple[AnnotationMetadata, ...]
 
 
 class Cardinality(StrEnum):
@@ -94,7 +117,13 @@ class Cardinality(StrEnum):
 
     @staticmethod
     def of_field(info: FieldInfo) -> Cardinality:
-        if any(isinstance(marker, OneToOne) for marker in info.metadata):
+        """One-to-one if `OneToOne` marks the field, as `Annotated[X, OneToOne()]`,
+        `Annotated[X | None, OneToOne()]` or `Annotated[X, OneToOne()] | None`."""
+        metadata = (
+            *info.metadata,
+            *Optionality.of_annotation(info.annotation).metadata,
+        )
+        if any(isinstance(marker, OneToOne) for marker in metadata):
             return Cardinality.ONE_TO_ONE
         return Cardinality.MANY_TO_ONE
 

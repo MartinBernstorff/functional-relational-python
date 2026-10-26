@@ -55,7 +55,9 @@ class _Column(pydantic.BaseModel, frozen=True):
         required = split.required
         while isinstance(required, typing.TypeAliasType):
             required = required.__value__
-        return SplitAnnotation(optionality=split.optionality, required=required)
+        return SplitAnnotation(
+            optionality=split.optionality, required=required, metadata=split.metadata
+        )
 
 
 type Checked = (

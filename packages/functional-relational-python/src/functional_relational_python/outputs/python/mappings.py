@@ -230,9 +230,10 @@ class _Construction(pydantic.BaseModel, frozen=True):
                         entity = self._entity(value, subject)
                         return self._looked_up(field, value, subject, lambda _: entity)
                     case ir.ReverseLookup():
-                        parameter = self.function.parameter_of(value).root
-                        key = self._key(value, subject).root
-                        return Expression(f"{parameter}.get({key})")
+                        access = self._access(value, subject)
+                        return Expression(
+                            f"{access.parameter.root}.get({access.key.root})"
+                        )
                     case ir.Added():
                         return LeftOut()
             case ir.NestedField(value=lookup):
@@ -246,19 +247,23 @@ class _Construction(pydantic.BaseModel, frozen=True):
                     ),
                 )
 
-    def _key(self, lookup: ir.EntityLookup, subject: Expression) -> Expression:
-        """The subject's value `lookup` finds its Entity by: the Reference's ID,
-        or for a reversed Reference the subject's own ID."""
+    def _access(self, lookup: ir.EntityLookup, subject: Expression) -> _Access:
+        """The parameter `lookup` finds its Entity in, and the subject's value it
+        is keyed by: the Reference's ID, or for a reversed Reference the subject's
+        own ID."""
         match lookup:
             case ir.Lookup():
                 field = lookup.reference.field
             case ir.ReverseLookup():
                 field = EntityNode.primary_key
-        return Expression(f"{subject.root}.{field.root}")
+        return _Access(
+            parameter=Expression(self.function.parameter_of(lookup).root),
+            key=Expression(f"{subject.root}.{field.root}"),
+        )
 
     def _entity(self, lookup: ir.EntityLookup, subject: Expression) -> Expression:
-        parameter = self.function.parameter_of(lookup)
-        return Expression(f"{parameter.root}[{self._key(lookup, subject).root}]")
+        access = self._access(lookup, subject)
+        return Expression(f"{access.parameter.root}[{access.key.root}]")
 
     def _looked_up(
         self,
@@ -269,19 +274,25 @@ class _Construction(pydantic.BaseModel, frozen=True):
     ) -> Expression:
         """`present` itself, or `None` when an optional Reference is absent, or no
         Entity holds a reversed one."""
-        key = self._key(lookup, subject).root
+        access = self._access(lookup, subject)
         match lookup:
             case ir.Lookup():
-                absent = Expression(f"{key} is None")
+                absent = Expression(f"{access.key.root} is None")
             case ir.ReverseLookup():
-                parameter = self.function.parameter_of(lookup).root
-                absent = Expression(f"{key} not in {parameter}")
+                absent = Expression(f"{access.key.root} not in {access.parameter.root}")
         return self.indent.looked_up(
             field.optionality(),
             Expression(f"{field.name.root}="),
             absent,
             present,
         )
+
+
+class _Access(pydantic.BaseModel, frozen=True):
+    """How a mapping function reaches what a lookup finds: `parameter[key]`."""
+
+    parameter: Expression
+    key: Expression
 
 
 class _RenderedFilter(pydantic.BaseModel, frozen=True):

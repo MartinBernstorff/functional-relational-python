@@ -202,14 +202,7 @@ def reverse(entity: type[pydantic.BaseModel], *then: Step) -> Step:
     `then` form a pipeline applied to `entity`; without them, the field holds the
     Entity itself.
     """
-    nested = pipeline(*then)
-
-    def step(node: ir.Node) -> ir.Node:
-        return ir.Reverse(
-            input=node, entity=entity, via=ir.SoleReference(), then=nested
-        )
-
-    return step
+    return _reversing(entity, ir.SoleReference(), then)
 
 
 def reverse_via(entity: type[pydantic.BaseModel], via: FieldName, *then: Step) -> Step:
@@ -217,6 +210,14 @@ def reverse_via(entity: type[pydantic.BaseModel], via: FieldName, *then: Step) -
 
     For an `entity` with several one-to-one References to the subject.
     """
+    return _reversing(entity, via, then)
+
+
+def _reversing(
+    entity: type[pydantic.BaseModel],
+    via: FieldName | ir.SoleReference,
+    then: Iterable[Step],
+) -> Step:
     nested = pipeline(*then)
 
     def step(node: ir.Node) -> ir.Node:

@@ -72,15 +72,12 @@ class OneToOne:
     """Marks a Reference as one-to-one: at most one Entity references each target.
 
     Only a one-to-one Reference can be followed backwards to a single Entity, e.g.
-    from a `ChannelCampaign` to its `MetaCampaign` detail row. It annotates the
-    whole field type, optional or not:
+    from a `ChannelCampaign` to its `MetaCampaign` detail row. An optional
+    Reference may be marked inside or outside its `None`:
 
     >>> class MetaCampaign(pydantic.BaseModel):
     ...     id: MetaCampaignId
     ...     channel_campaign_id: Annotated[ChannelCampaignId, OneToOne()]
     ...     replaces_id: Annotated[ChannelCampaignId | None, OneToOne()]
-
-    Mark an optional Reference as `Annotated[X | None, OneToOne()]`, not
-    `Annotated[X, OneToOne()] | None`: Pydantic keeps metadata nested in a union
-    inside the annotation, so the field is not recognised as a Reference at all.
+    ...     replaced_by_id: Annotated[ChannelCampaignId, OneToOne()] | None
     """

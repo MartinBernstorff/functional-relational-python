@@ -22,6 +22,7 @@ from safe_result import Err, Ok, Result
 from functional_relational_python.compiler import compiler
 from functional_relational_python.compiler.model_names import ModelNames, PascalCase
 from functional_relational_python.entity_graph.entity_graph import FieldName
+from functional_relational_python.entity_graph.id import OneToOne
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     ModulePath,
@@ -513,6 +514,12 @@ class _AnnotationRenderer:
             return TypeExpression(
                 f"{_AnnotationRenderer.literal.reference().root}[{values}]"
             )
+        if origin is typing.Annotated and all(
+            isinstance(marker, OneToOne) for marker in args[1:]
+        ):
+            # A generated model is not an Entity, so it leaves `OneToOne` out, as
+            # it does when `OneToOne` marks the whole field.
+            return self.render(args[0])
         if origin in (typing.Literal, typing.Annotated) or not args:
             return self._unsupported(annotation)
         rendered = ", ".join(self.render(arg).root for arg in args)

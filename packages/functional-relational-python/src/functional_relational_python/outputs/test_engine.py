@@ -450,6 +450,27 @@ def test_reverse_gives_the_entity_referencing_each_row_or_none() -> None:
     )
 
 
+def test_a_reverse_sees_the_entities_put_since_the_last_read() -> None:
+    view = employee_view(
+        steps.pipeline(steps.project([FieldName("id")]), steps.reverse(Profile))
+    )
+    view_engine = profile_engine(view)
+    employee = Employee.fake(EmployeeId(1), DepartmentId(1), None)
+    view_engine.put(employee).unwrap()
+    before = read(view_engine, view.name)
+    profile = Profile.fake(ProfileId(1), employee.id)
+    view_engine.put(profile).unwrap()
+
+    assert (before, read(view_engine, view.name)) == (
+        (engine.ViewRow({FieldName("id"): employee.id, FieldName("profile"): None}),),
+        (
+            engine.ViewRow(
+                {FieldName("id"): employee.id, FieldName("profile"): profile}
+            ),
+        ),
+    )
+
+
 def test_a_nested_pipeline_runs_on_the_reversed_entity() -> None:
     view = employee_view(
         steps.pipeline(
