@@ -329,10 +329,6 @@ def prefixed(prefix: Text) -> ir.FieldRenaming:
     return lambda field: FieldName(f"{prefix.root}_{field.root}")
 
 
-def swapped(first: FieldName, second: FieldName) -> ir.FieldRenaming:
-    return lambda field: second if field == first else first
-
-
 def test_omit_with_a_select_removes_every_selected_field() -> None:
     view = compile_one(steps.omit(named(FieldName("secret"), FieldName("revenue"))))
 
@@ -346,29 +342,30 @@ def test_omit_with_a_select_that_selects_nothing_changes_nothing() -> None:
 
 
 def test_rename_with_a_select_renames_each_selected_field_in_place() -> None:
-    prefix = Text("public")
-    renaming = prefixed(prefix)
-
     view = compile_one(
-        steps.rename(named(FieldName("name"), FieldName("revenue")), renaming)
+        steps.rename(
+            named(FieldName("name"), FieldName("revenue")), prefixed(Text("public"))
+        )
     )
 
-    assert view.relation.fields == tuple(
-        ir.Field(
-            name=renaming(FieldName(name))
-            if name in ("name", "revenue")
-            else FieldName(name),
-            info=info,
-            value=ir.SourceField(field=FieldName(name)),
-        )
-        for name, info in Company.model_fields.items()
+    assert values(view) == {
+        FieldName("public_name"): ir.SourceField(field=FieldName("name")),
+        FieldName("secret"): ir.SourceField(field=FieldName("secret")),
+        FieldName("public_revenue"): ir.SourceField(field=FieldName("revenue")),
+    }
+    assert field_names(view) == names(
+        Text("public_name"), Text("secret"), Text("public_revenue")
     )
 
 
 def test_rename_with_a_select_renames_all_fields_at_once_so_they_can_swap() -> None:
     first, second = FieldName("name"), FieldName("secret")
 
-    view = compile_one(steps.rename(named(first, second), swapped(first, second)))
+    view = compile_one(
+        steps.rename(
+            named(first, second), lambda field: second if field == first else first
+        )
+    )
 
     assert values(view) == {
         second: ir.SourceField(field=first),
@@ -392,6 +389,21 @@ def test_rename_with_a_select_onto_an_unselected_field_is_a_diagnostic() -> None
     )
 
 
+def test_a_selected_field_renamed_to_its_own_name_keeps_it() -> None:
+    kept, renamed = FieldName("secret"), FieldName("name")
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.rename(named(renamed, kept), lambda _field: kept),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.RenameOntoExistingField(
+            view=view.name, renamed=renamed, field=kept
+        ),
+    )
+
+
 def test_renaming_two_selected_fields_onto_one_name_reports_the_second() -> None:
     new = FieldName("code")
     view = View(
@@ -401,6 +413,7 @@ def test_renaming_two_selected_fields_onto_one_name_reports_the_second() -> None
             steps.rename(
                 named(FieldName("secret"), FieldName("revenue")), lambda _field: new
             ),
+            # The first renamed field keeps the name, so a later step finds it.
             steps.omit(new),
         ),
     )
