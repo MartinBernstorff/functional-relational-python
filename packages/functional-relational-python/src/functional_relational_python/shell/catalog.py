@@ -9,6 +9,11 @@ from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
 from functional_relational_python.entity_graph.entity_graph import EntityGraph
+from functional_relational_python.outputs.django.models import (
+    DjangoModels,
+    DjangoModelsRenderer,
+    WithoutDjangoModels,
+)
 from functional_relational_python.outputs.python.plan import (
     ModuleLayout,
     PythonLayout,
@@ -28,11 +33,12 @@ from functional_relational_python.support.identifier import Identifier
 
 
 class Catalog(pydantic.BaseModel, frozen=True):
-    """The Entities, the Views over them, the Payloads, and the module each View's
-    or Payload's model goes to.
+    """The Entities, the Views over them, the Payloads, the module each View's
+    or Payload's model goes to, and whether and where Django models go.
 
     Views are read models, Payloads are write models. A View and a Payload cannot
-    share a name. `layout` receives each compiled View and Payload.
+    share a name. `layout` receives each compiled View and Payload. `django`
+    generates a Django model per Entity, see `DjangoModels`.
 
     >>> catalog = Catalog(
     ...     entities=[Company],
@@ -41,6 +47,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
     ...         Payload(name=PayloadName("CompanyCreate"), source=Company, step=...)
     ...     ],
     ...     layout=lambda compiled: ModulePath("myapp.models"),
+    ...     django=WithoutDjangoModels(),
     ... )
     """
 
@@ -48,15 +55,39 @@ class Catalog(pydantic.BaseModel, frozen=True):
     views: Sequence[View]
     payloads: Sequence[Payload]
     layout: ModuleLayout
+    django: DjangoModels | WithoutDjangoModels
 
     def generate(
         self,
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
+        """Every generated file, or every diagnostic of every output."""
         match EntityGraph.build(self.entities):
             case Err(graph_error):
                 return Err(graph_error)
             case Ok(graph):
                 pass
+        parts: list[GeneratedFiles] = []
+        reported: list[Diagnostic] = []
+        for generated in (self._python(graph), self._django(graph)):
+            match generated:
+                case Ok(files):
+                    parts.append(files)
+                case Err(error):
+                    reported.extend(error.diagnostics)
+        match DiagnosticsError.or_ok(reported, lambda: parts):
+            case Err(output_error):
+                return Err(output_error)
+            case Ok(_):
+                pass
+        match GeneratedFiles.merged(parts):
+            case Ok(merged):
+                return Ok(merged)
+            case Err(merge_error):
+                return Err(merge_error)
+
+    def _python(
+        self, graph: EntityGraph
+    ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
         match compiler.compile_catalog(graph, self.views, self.payloads):
             case Err(compile_error):
                 return Err(compile_error)
@@ -67,6 +98,20 @@ class Catalog(pydantic.BaseModel, frozen=True):
                 return Err(plan_error)
             case Ok(plan):
                 return Ok(PythonRenderer.render(plan))
+
+    def _django(
+        self, graph: EntityGraph
+    ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
+        match self.django:
+            case WithoutDjangoModels():
+                return Ok(GeneratedFiles(files=()))
+            case DjangoModels() as django:
+                pass
+        match DjangoModelsRenderer.render(graph, django):
+            case Ok(files):
+                return Ok(files)
+            case Err(error):
+                return Err(error)
 
 
 class ImportPath(pydantic.RootModel[str], frozen=True):

@@ -40,7 +40,7 @@ def version() -> None:
 
 @app.command()
 def generate() -> None:
-    """Write the View model modules of the project's Catalog."""
+    """Write the modules the project's Catalog generates: View and Payload models, and Django models."""
     match commands.generate(LocalFileSystem(), Directory(Path.cwd())):
         case Ok(written):
             for path in written:
@@ -52,10 +52,10 @@ def generate() -> None:
 
 @app.command()
 def check() -> None:
-    """Fail when a View model module differs from what `generate` would write."""
+    """Fail when a generated module differs from what `generate` would write."""
     match commands.check(LocalFileSystem(), Directory(Path.cwd())):
         case Ok(_):
-            logging.getLogger(__name__).info("Generated View models are up to date.")
+            logging.getLogger(__name__).info("Generated modules are up to date.")
         case Err(error):
             typer.echo(str(error), err=True)
             raise typer.Exit(code=1)

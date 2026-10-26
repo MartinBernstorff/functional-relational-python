@@ -1,11 +1,18 @@
 """Generated files: writing them, and checking that what is on disk is up to date."""
 
+import collections
 import enum
 import typing
+from collections.abc import Iterable
 
 import pydantic
 from safe_result import Err, Ok, Result
 
+from functional_relational_python.support.diagnostic import (
+    Diagnostic,
+    DiagnosticMessage,
+    DiagnosticsError,
+)
 from functional_relational_python.support.filesystem import (
     Directory,
     FilePath,
@@ -59,6 +66,19 @@ class NotGeneratedFilesError(Exception):
         )
 
 
+class FileGeneratedTwice(pydantic.BaseModel, Diagnostic, frozen=True):
+    """Several outputs, e.g. Python models and Django models, would generate one
+    file, so one would overwrite the other."""
+
+    path: RelativePath
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.path.root}: several outputs would generate this file. Generate "
+            "them into different modules."
+        )
+
+
 class GeneratedFiles(pydantic.BaseModel, frozen=True):
     """Generated files, each starting with the line `header`.
 
@@ -72,6 +92,18 @@ class GeneratedFiles(pydantic.BaseModel, frozen=True):
     )
 
     files: tuple[GeneratedFile, ...]
+
+    @staticmethod
+    def merged(
+        parts: Iterable[GeneratedFiles],
+    ) -> Result[GeneratedFiles, DiagnosticsError[FileGeneratedTwice]]:
+        """Every file of every part, or a diagnostic per path several generate."""
+        files = tuple(file for part in parts for file in part.files)
+        counts = collections.Counter(file.path for file in files)
+        return DiagnosticsError.or_ok(
+            (FileGeneratedTwice(path=path) for path, n in counts.items() if n > 1),
+            lambda: GeneratedFiles(files=files),
+        )
 
     def write(
         self, filesystem: FileSystem, output: Directory

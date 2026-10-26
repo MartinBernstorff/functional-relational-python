@@ -55,7 +55,7 @@ def _generated(
 def generate(
     filesystem: FileSystem, start: Directory
 ) -> Result[tuple[FilePath, ...], GenerateError | NotGeneratedFilesError]:
-    """Writes every View model module, and returns the paths written."""
+    """Writes every generated module, and returns the paths written."""
     match _generated(filesystem, start):
         case Err(error):
             return Err(error)
@@ -75,7 +75,7 @@ def generate(
 def check(
     filesystem: FileSystem, start: Directory
 ) -> Result[None, GenerateError | StaleFilesError]:
-    """Ok when every View model module on disk is what `generate` would write."""
+    """Ok when every generated module on disk is what `generate` would write."""
     match _generated(filesystem, start):
         case Err(error):
             return Err(error)
