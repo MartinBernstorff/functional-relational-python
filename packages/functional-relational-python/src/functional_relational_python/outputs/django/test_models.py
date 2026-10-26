@@ -6,6 +6,7 @@ import textwrap
 import uuid
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import Annotated
 
 import pydantic
 import pytest
@@ -16,7 +17,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
     RuntimeAnnotation,
 )
-from functional_relational_python.entity_graph.id import Id, IdBase
+from functional_relational_python.entity_graph.id import Id, IdBase, OneToOne
 from functional_relational_python.outputs.django.models import (
     AppLabel,
     AutoIncrementOnNonPrimaryKey,
@@ -321,6 +322,29 @@ def test_an_optional_reference_is_a_nullable_foreign_key() -> None:
     ) in text
 
 
+class CompanyDetailsId(Id[int]):
+    pass
+
+
+class CompanyDetails(pydantic.BaseModel):
+    """One-to-one References, required and optional."""
+
+    id: CompanyDetailsId
+    company_id: Annotated[CompanyId, OneToOne()]
+    successor_id: Annotated[CompanyId | None, OneToOne()]
+
+
+def test_a_one_to_one_reference_is_a_one_to_one_field() -> None:
+    text = render([Company, CompanyDetails], config({}, {})).root
+
+    assert (
+        "    company = models.OneToOneField('Company', on_delete=models.PROTECT, "
+        "related_name='+')\n"
+        "    successor = models.OneToOneField('Company', on_delete=models.PROTECT, "
+        "related_name='+', null=True)\n"
+    ) in text
+
+
 @pytest.mark.parametrize(
     ("field_types", "expected"),
     [
@@ -481,6 +505,7 @@ def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None
         employer_id: CompanyId
         previous_employer_id: CompanyId | None
         department_id: DepartmentId
+        heads_id: Annotated[DepartmentId | None, OneToOne()]
         born: Moment
 
     graph = EntityGraph.build([Company, Department, Person], IdBase.fake()).unwrap()

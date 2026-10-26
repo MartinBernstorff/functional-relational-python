@@ -3,9 +3,10 @@ name refers to.
 
 For each View and Payload the plan decides its model's Symbol and the Symbols of
 the models nested in it. For each View, when the layout asks for them, it also
-decides its mapping function's Symbol and lookup parameters. Every problem that depends on where things are generated
-(a name bound twice in one module, a type that cannot be imported, a module that
-defines what it would be overwritten with) is found here, once. The renderers in
+decides its mapping function's Symbol and lookup parameters. Every problem that
+depends on where things are generated (a name bound twice in one module, a type
+that cannot be imported, a module that defines what it would be overwritten with)
+is found here, once. The renderers in
 `models` and `mappings` read the plan and cannot fail.
 
 The compiler has already checked the names themselves (`model_names`).
@@ -21,6 +22,7 @@ from safe_result import Err, Ok, Result
 from functional_relational_python.compiler import compiler
 from functional_relational_python.compiler.model_names import ModelNames, PascalCase
 from functional_relational_python.entity_graph.entity_graph import FieldName
+from functional_relational_python.entity_graph.id import OneToOne
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     ModulePath,
@@ -260,23 +262,27 @@ class ModelPlan(pydantic.BaseModel, frozen=True):
 
 
 class LookupParameter(pydantic.BaseModel, frozen=True):
-    """A mapping function's keyword parameter, mapping IDs to the Entity `entity`."""
+    """A mapping function's keyword parameter, mapping each value of the field
+    `keyed_by` of the Entity `entity` to the Entity: its primary key for a
+    resolved Reference, its one-to-one Reference for a reversed one."""
 
     name: Identifier
     entity: type[pydantic.BaseModel]
+    keyed_by: FieldName
     id_type: Symbol
     target: Symbol
 
     @staticmethod
-    def name_for(entity: type[pydantic.BaseModel]) -> Identifier:
-        """The parameter for `entity`, e.g. `department_by_id`."""
+    def name_for(entity: type[pydantic.BaseModel], keyed_by: FieldName) -> Identifier:
+        """The parameter for `entity` by `keyed_by`, e.g. `department_by_id`, or
+        `meta_campaign_by_channel_campaign_id`."""
         snake = PascalCase(entity.__name__).snake_case()
-        return Identifier(f"{snake.root}_by_id")
+        return Identifier(f"{snake.root}_by_{keyed_by.root}")
 
 
 class FunctionPlan(pydantic.BaseModel, frozen=True):
     """One mapping function to generate: from one instance of the View's Source,
-    and an ID mapping per Entity it looks up, to the View's model, or to `None`
+    and an ID mapping per Entity and field it looks up, to the View's model, or to `None`
     for a row the View's Filters exclude.
 
     `literals` has the Symbol of every class the Filters' literals are instances
@@ -339,8 +345,9 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
                 model=model,
                 lookups=tuple(
                     LookupParameter(
-                        name=LookupParameter.name_for(lookup.target),
+                        name=LookupParameter.name_for(lookup.target, lookup.keyed_by()),
                         entity=lookup.target,
+                        keyed_by=lookup.keyed_by(),
                         target=symbols[lookup.target],
                         id_type=symbols[lookup.id_type],
                     )
@@ -388,15 +395,16 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
         """
         return self.literals[literal_type]
 
-    def parameter_of(self, lookup: ir.Lookup) -> Identifier:
+    def parameter_of(self, lookup: ir.EntityLookup) -> Identifier:
         """The parameter holding the Entities `lookup` finds.
 
-        The plan has a parameter for every Lookup of the View's Relation.
+        The plan has a parameter for every lookup of the View's Relation.
         """
         (name,) = (
             parameter.name
             for parameter in self.lookups
             if parameter.entity is lookup.target
+            and parameter.keyed_by == lookup.keyed_by()
         )
         return name
 
@@ -506,6 +514,12 @@ class _AnnotationRenderer:
             return TypeExpression(
                 f"{_AnnotationRenderer.literal.reference().root}[{values}]"
             )
+        if origin is typing.Annotated and all(
+            isinstance(marker, OneToOne) for marker in args[1:]
+        ):
+            # A generated model is not an Entity, so it leaves `OneToOne` out, as
+            # it does when `OneToOne` marks the whole field.
+            return self.render(args[0])
         if origin in (typing.Literal, typing.Annotated) or not args:
             return self._unsupported(annotation)
         rendered = ", ".join(self.render(arg).root for arg in args)

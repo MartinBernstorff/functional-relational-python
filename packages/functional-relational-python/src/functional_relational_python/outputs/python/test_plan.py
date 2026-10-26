@@ -8,6 +8,7 @@ from safe_result import Err, Ok
 from functional_relational_python.compiler import compiler
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
+    EntityNode,
     FieldName,
 )
 from functional_relational_python.entity_graph.id import Id, IdBase
@@ -36,6 +37,7 @@ from functional_relational_python.outputs.python.test_mappings import (
     Department,
     DepartmentId,
     Employee,
+    Profile,
     Text,
     Transfer,
     compile_all,
@@ -111,7 +113,11 @@ def test_a_view_is_planned_into_the_modules_its_layout_gives() -> None:
         (parameter.name, parameter.target, parameter.id_type)
         for parameter in function.lookups
     ] == [
-        (LookupParameter.name_for(entity), symbol(entity), symbol(id_type))
+        (
+            LookupParameter.name_for(entity, EntityNode.primary_key),
+            symbol(entity),
+            symbol(id_type),
+        )
         for entity, id_type in [(Department, DepartmentId), (Company, CompanyId)]
     ]
 
@@ -124,8 +130,18 @@ def test_a_models_only_layout_plans_no_functions() -> None:
     assert (len(plan.models), plan.functions) == (1, {})
 
 
-def test_lookup_parameters_are_named_after_the_entity() -> None:
-    assert LookupParameter.name_for(Department) == Identifier("department_by_id")
+@pytest.mark.parametrize(
+    ("entity", "keyed_by", "expected"),
+    [
+        (Department, EntityNode.primary_key, "department_by_id"),
+        (Profile, FieldName("employee_id"), "profile_by_employee_id"),
+    ],
+    ids=["resolved", "reversed"],
+)
+def test_lookup_parameters_are_named_after_the_entity_and_its_key(
+    entity: type[pydantic.BaseModel], keyed_by: FieldName, expected: str
+) -> None:
+    assert LookupParameter.name_for(entity, keyed_by) == Identifier(expected)
 
 
 def local_entity_and_source() -> tuple[type[pydantic.BaseModel], ...]:
@@ -258,7 +274,9 @@ def hydrated(source: type[pydantic.BaseModel]) -> View:
 
 
 def lookup_parameter_module() -> ModulePath:
-    return ModulePath(f"{LookupParameter.name_for(Department).root}.views")
+    return ModulePath(
+        f"{LookupParameter.name_for(Department, EntityNode.primary_key).root}.views"
+    )
 
 
 @pytest.mark.parametrize(
@@ -300,7 +318,7 @@ def lookup_parameter_module() -> ModulePath:
             layout(lookup_parameter_module(), ModulePath("app.mappings")),
             (
                 Scope("app.mappings.company_summary"),
-                LookupParameter.name_for(Department),
+                LookupParameter.name_for(Department, EntityNode.primary_key),
             ),
         ),
         (
@@ -308,7 +326,7 @@ def lookup_parameter_module() -> ModulePath:
             app_layout(),
             (
                 Scope("app.mappings.company_summary"),
-                LookupParameter.name_for(Department),
+                LookupParameter.name_for(Department, EntityNode.primary_key),
             ),
         ),
     ],

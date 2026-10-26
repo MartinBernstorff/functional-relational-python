@@ -6,7 +6,7 @@ import sys
 import types
 from collections.abc import Callable, Generator, Iterable
 from pathlib import Path
-from typing import ClassVar
+from typing import Annotated, ClassVar
 
 import django
 import pydantic
@@ -26,7 +26,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id, IdBase
+from functional_relational_python.entity_graph.id import Id, IdBase, OneToOne
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.django.models import (
     AppLabel,
@@ -38,8 +38,11 @@ from functional_relational_python.outputs.django.queries import (
     DjangoQueriesDiagnostic,
     DjangoQueriesRenderer,
     QueriesIntoDjangoModelsModule,
+    ReverseInDjangoQueries,
+    ReverseInQueryError,
     ViewModelIntoDjangoModelsModule,
     ViewModelIntoQueriesModule,
+    ViewQueries,
 )
 from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import (
@@ -969,6 +972,84 @@ def another_company() -> type[pydantic.BaseModel]:
         id: AnotherCompanyId
 
     return Company
+
+
+class CompanyProfileId(Id[int]):
+    pass
+
+
+class CompanyProfile(pydantic.BaseModel, frozen=True):
+    id: CompanyProfileId
+    company_id: Annotated[CompanyId, OneToOne()]
+    motto: Text
+
+
+@pytest.mark.parametrize(
+    "then", [(), (steps.project([FieldName("motto")]),)], ids=["entity", "nested"]
+)
+def test_a_view_that_reverses_a_reference_is_a_diagnostic(
+    then: tuple[steps.Step, ...],
+) -> None:
+    graph = EntityGraph.build([Company, CompanyProfile], IdBase.fake()).unwrap()
+    view = View(
+        name=ViewName("CompanyWithProfile"),
+        source=Company,
+        step=steps.reverse(CompanyProfile, *then),
+    )
+
+    match DjangoQueriesRenderer.render(
+        graph,
+        Modules.config(),
+        compiler.compile_views(graph, [view]).unwrap().views,
+        into(Generated.models),
+    ):
+        case Ok(files):
+            pytest.fail(f"expected diagnostics, got {files}")
+        case Err(error):
+            assert error.diagnostics == (
+                ReverseInDjangoQueries(
+                    view=view.name,
+                    entity=CompanyProfile,
+                    via=FieldName("company_id"),
+                ),
+            )
+
+
+@pytest.mark.parametrize(
+    "then", [(), (steps.project([FieldName("motto")]),)], ids=["entity", "nested"]
+)
+def test_selecting_related_for_a_reversed_field_is_an_error(
+    then: tuple[steps.Step, ...],
+) -> None:
+    graph = EntityGraph.build([Company, CompanyProfile], IdBase.fake()).unwrap()
+    view = View(
+        name=ViewName("CompanyWithProfile"),
+        source=Company,
+        step=steps.reverse(CompanyProfile, *then),
+    )
+    (compiled,) = compiler.compile_views(graph, [view]).unwrap().views
+    queries = ViewQueries(
+        view=compiled,
+        model=Modules.config().model_of(Company),
+        source=Modules.config().model_of(Company),
+    )
+
+    with pytest.raises(ReverseInQueryError, match="company_profile"):
+        _ = queries.related_paths()
+
+
+def test_the_reverse_in_django_queries_message_names_the_reference() -> None:
+    diagnostic = ReverseInDjangoQueries(
+        view=ViewName("CompanyWithProfile"),
+        entity=CompanyProfile,
+        via=FieldName("company_id"),
+    )
+
+    assert diagnostic.describe().root == (
+        "CompanyWithProfile: cannot generate Django queries for it, because it "
+        "reverses CompanyProfile.company_id, and Django queries cannot follow a "
+        "Reference backwards yet."
+    )
 
 
 def test_entities_with_one_name_are_left_to_the_django_models_to_report() -> None:

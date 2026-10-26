@@ -3,8 +3,11 @@
 Each View becomes a function from one instance of its Source to its View model.
 A filtered View's function returns `None` for a row its Filters exclude: the
 ticket that introduced `where` specifies that it "returns nothing", so `None`
-carries that meaning rather than an enum variant. A View that resolves References also takes, per Entity it looks up, a keyword
-parameter mapping IDs to Entities; a dangling ID raises `KeyError` there. A
+carries that meaning rather than an enum variant. A View that resolves References
+also takes, per Entity it looks up, a keyword parameter mapping IDs to Entities; a
+dangling ID raises `KeyError` there. A View that reverses a one-to-one Reference
+takes a parameter mapping the IDs in that Reference to the Entities holding them;
+a missing ID gives `None`. A
 module of mapping functions imports only the Source, Entity and View model
 modules, so it runs and type checks without this library installed.
 
@@ -18,7 +21,10 @@ from collections.abc import Callable, Iterable, Sequence
 
 import pydantic
 
-from functional_relational_python.entity_graph.entity_graph import Optionality
+from functional_relational_python.entity_graph.entity_graph import (
+    EntityNode,
+    Optionality,
+)
 from functional_relational_python.outputs.python.plan import (
     FunctionPlan,
     ModelPlan,
@@ -81,12 +87,13 @@ class Indent(pydantic.RootModel[int], frozen=True):
         self,
         optionality: Optionality,
         prefix: Expression,
-        reference: Expression,
+        absent: Expression,
         present: Callable[[Indent], Expression],
     ) -> Expression:
         """The value of an entry at this indentation that starts with `prefix`,
-        e.g. `mentor=`, holding what a Reference finds: `present` itself, or for an
-        optional Reference `None if <reference> is None else <present>`.
+        e.g. `mentor=`, holding what a lookup finds: `present` itself, or when it
+        is optional `None if <absent> else <present>`, where `absent` is the
+        condition under which it finds nothing, e.g. `source.mentor_id is None`.
 
         The conditional stays on one line when `present` is one line and the entry
         fits; otherwise it is split over lines like ruff format does. `present`
@@ -100,13 +107,13 @@ class Indent(pydantic.RootModel[int], frozen=True):
                 pass
         inner = self.deeper()
         written = present(inner).root
-        inline = f"None if {reference.root} is None else {written}"
+        inline = f"None if {absent.root} else {written}"
         line = f"{self.pad().root}{prefix.root}{inline},"
         if "\n" not in written and len(line) <= LineLength.default().root:
             return Expression(inline)
         pad = inner.pad().root
         return Expression(
-            f"(\n{pad}None\n{pad}if {reference.root} is None\n"
+            f"(\n{pad}None\n{pad}if {absent.root}\n"
             f"{pad}else {written}\n{self.pad().root})"
         )
 
@@ -222,6 +229,11 @@ class _Construction(pydantic.BaseModel, frozen=True):
                     case ir.Lookup():
                         entity = self._entity(value, subject)
                         return self._looked_up(field, value, subject, lambda _: entity)
+                    case ir.ReverseLookup():
+                        access = self._access(value, subject)
+                        return Expression(
+                            f"{access.parameter.root}.get({access.key.root})"
+                        )
                     case ir.Added():
                         return LeftOut()
             case ir.NestedField(value=lookup):
@@ -235,25 +247,52 @@ class _Construction(pydantic.BaseModel, frozen=True):
                     ),
                 )
 
-    def _entity(self, lookup: ir.Lookup, subject: Expression) -> Expression:
-        parameter = self.function.parameter_of(lookup)
-        return Expression(
-            f"{parameter.root}[{subject.root}.{lookup.reference.field.root}]"
+    def _access(self, lookup: ir.EntityLookup, subject: Expression) -> _Access:
+        """The parameter `lookup` finds its Entity in, and the subject's value it
+        is keyed by: the Reference's ID, or for a reversed Reference the subject's
+        own ID."""
+        match lookup:
+            case ir.Lookup():
+                field = lookup.reference.field
+            case ir.ReverseLookup():
+                field = EntityNode.primary_key
+        return _Access(
+            parameter=Expression(self.function.parameter_of(lookup).root),
+            key=Expression(f"{subject.root}.{field.root}"),
         )
+
+    def _entity(self, lookup: ir.EntityLookup, subject: Expression) -> Expression:
+        access = self._access(lookup, subject)
+        return Expression(f"{access.parameter.root}[{access.key.root}]")
 
     def _looked_up(
         self,
         field: ir.RelationField,
-        lookup: ir.Lookup,
+        lookup: ir.EntityLookup,
         subject: Expression,
         present: Callable[[Indent], Expression],
     ) -> Expression:
+        """`present` itself, or `None` when an optional Reference is absent, or no
+        Entity holds a reversed one."""
+        access = self._access(lookup, subject)
+        match lookup:
+            case ir.Lookup():
+                absent = Expression(f"{access.key.root} is None")
+            case ir.ReverseLookup():
+                absent = Expression(f"{access.key.root} not in {access.parameter.root}")
         return self.indent.looked_up(
             field.optionality(),
             Expression(f"{field.name.root}="),
-            Expression(f"{subject.root}.{lookup.reference.field.root}"),
+            absent,
             present,
         )
+
+
+class _Access(pydantic.BaseModel, frozen=True):
+    """How a mapping function reaches what a lookup finds: `parameter[key]`."""
+
+    parameter: Expression
+    key: Expression
 
 
 class _RenderedFilter(pydantic.BaseModel, frozen=True):

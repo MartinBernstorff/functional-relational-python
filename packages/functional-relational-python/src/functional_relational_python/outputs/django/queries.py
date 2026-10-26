@@ -121,10 +121,40 @@ class ViewModelIntoDjangoModelsModule(pydantic.BaseModel, Diagnostic, frozen=Tru
         )
 
 
+class ReverseInDjangoQueries(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A View over an Entity follows a one-to-one Reference backwards, which
+    Django queries do not support yet: the generated `OneToOneField`s have no
+    reverse accessor to select related."""
+
+    view: ViewName
+    entity: type[pydantic.BaseModel]
+    via: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot generate Django queries for it, because it "
+            f"reverses {self.entity.__qualname__}.{self.via.root}, and Django "
+            "queries cannot follow a Reference backwards yet."
+        )
+
+
+class ReverseInQueryError(Exception):
+    """Query code was written for a View that reverses a Reference. The renderer
+    reports such a View instead, so this means it wrote it anyway."""
+
+    def __init__(self, field: FieldName) -> None:
+        self.field = field
+        super().__init__(
+            f"Field '{field.root}' reverses a Reference; the Django queries "
+            "renderer should have reported its View."
+        )
+
+
 type DjangoQueriesDiagnostic = (
     QueriesIntoDjangoModelsModule
     | ViewModelIntoQueriesModule
     | ViewModelIntoDjangoModelsModule
+    | ReverseInDjangoQueries
     | NameClash
 )
 
@@ -172,14 +202,22 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
         """`prefix` is the chain of foreign keys to the subject of `relation`."""
         for field in relation.fields:
             match field:
-                case ir.Field(value=ir.Lookup() as lookup):
-                    yield (*prefix, DjangoQueriesRenderer.foreign_key(lookup))
-                case ir.Field():
-                    pass
+                case ir.Field(value=value):
+                    match value:
+                        case ir.Lookup():
+                            yield (*prefix, DjangoQueriesRenderer.foreign_key(value))
+                        case ir.SourceField() | ir.Added():
+                            pass
+                        case ir.ReverseLookup():
+                            raise ReverseInQueryError(field.name)
                 case ir.NestedField(value=lookup, relation=nested):
-                    path = (*prefix, DjangoQueriesRenderer.foreign_key(lookup))
-                    yield path
-                    yield from ViewQueries._paths(nested, path)
+                    match lookup:
+                        case ir.Lookup():
+                            path = (*prefix, DjangoQueriesRenderer.foreign_key(lookup))
+                            yield path
+                            yield from ViewQueries._paths(nested, path)
+                        case ir.ReverseLookup():
+                            raise ReverseInQueryError(field.name)
 
 
 class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
@@ -226,7 +264,8 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         """The module of query code, or every diagnostic.
 
         `layout` gives the module of each View's model. Views over a Source that
-        is not an Entity get no query code. QuerySets are in Entity name order.
+        is not an Entity get no query code. A View over an Entity that reverses a
+        Reference is a diagnostic. QuerySets are in Entity name order.
         """
         views = tuple(views)
         renderer = DjangoQueriesRenderer(
@@ -249,6 +288,14 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         return DiagnosticsError.or_ok(
             (
                 *DjangoQueriesRenderer._modules(config, views, layout),
+                *(
+                    ReverseInDjangoQueries(
+                        view=query.view.name, entity=lookup.target, via=lookup.via
+                    )
+                    for query in renderer.queries
+                    for lookup in query.view.relation.lookups()
+                    if isinstance(lookup, ir.ReverseLookup)
+                ),
                 *renderer._clashes(entities),
             ),
             lambda: GeneratedFiles(
@@ -622,7 +669,9 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                         )
                     case ir.Added():
                         return LeftOut()
-            case ir.NestedField(value=lookup, relation=nested):
+                    case ir.ReverseLookup():
+                        raise ReverseInQueryError(field.name)
+            case ir.NestedField(value=ir.Lookup() as lookup, relation=nested):
                 related = _RowReader._related(lookup, row)
                 return self._looked_up(
                     field,
@@ -631,6 +680,8 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                         nested, lookup.target, related
                     ),
                 )
+            case ir.NestedField():
+                raise ReverseInQueryError(field.name)
 
     @staticmethod
     def _related(lookup: ir.Lookup, row: Expression) -> Expression:
@@ -647,6 +698,6 @@ class _RowReader(pydantic.BaseModel, frozen=True):
         return self.indent.looked_up(
             field.optionality(),
             Expression(f'"{field.name.root}": '),
-            related,
+            Expression(f"{related.root} is None"),
             present,
         )
