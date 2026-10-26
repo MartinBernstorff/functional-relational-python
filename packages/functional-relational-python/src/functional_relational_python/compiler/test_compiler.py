@@ -4119,18 +4119,186 @@ def test_views_mixed_with_payloads_are_a_diagnostic() -> None:
     )
 
 
-def test_a_union_of_payloads_is_a_diagnostic() -> None:
-    def payload(name: PayloadName) -> Payload:
-        return Payload(name=name, source=Subscription, step=steps.pipeline())
+def payload(name: PayloadName, *then: steps.Step) -> Payload:
+    return Payload(name=name, source=Subscription, step=steps.pipeline(*then))
 
-    union = union_of(
+
+def paid_or_free() -> Union:
+    """A Union of Payloads of different Sources: one tagged by `retype_to`, the
+    other by `add`."""
+    return union_of(
         UnionName("Writes"),
         FieldName("plan"),
-        payload(PayloadName("Create")),
-        payload(PayloadName("Update")),
+        payload(
+            PayloadName("PaidPatch"),
+            steps.retype_to(FieldName("plan"), Literal[Plan.PAID]),
+        ),
+        Payload(
+            name=PayloadName("FreeInvoicePatch"),
+            source=Invoice,
+            step=steps.pipeline(
+                steps.omit(FieldName("plan")),
+                steps.add(FieldName("plan"), Literal[Plan.FREE]),
+            ),
+        ),
     )
 
-    assert union_diagnostics(union) == (diagnostics.PayloadUnion(view=union.name),)
+
+def compile_payload_unions(
+    *unions: Union,
+) -> Result[compiler.CompiledCatalog, DiagnosticsError[diagnostics.CompileDiagnostic]]:
+    return compiler.compile_catalog(empty_graph(), (), (), unions)
+
+
+def test_a_union_of_payloads_compiles_with_its_variants_as_payloads() -> None:
+    union = paid_or_free()
+
+    compiled = compile_payload_unions(union).unwrap()
+
+    (compiled_union,) = compiled.payload_unions
+    assert compiled_union.name == union.name
+    assert compiled_union.discriminator == union.discriminator
+    assert [leaf.name for leaf in compiled_union.leaves()] == [
+        variant.name for variant in union.payloads()
+    ]
+    assert [compiled.name for compiled in compiled.payloads] == [
+        variant.name for variant in union.payloads()
+    ]
+    assert compiled.unions == ()
+
+
+def test_a_nested_union_of_payloads_compiles_before_the_union_it_is_nested_in() -> None:
+    paid = union_of(
+        UnionName("PaidByStatus"),
+        FieldName("status"),
+        *(
+            payload(
+                PayloadName(f"Paid{status.name.title()}"),
+                steps.retype_to(FieldName("plan"), Literal[Plan.PAID]),
+                steps.retype_to(
+                    FieldName("status"), typing.cast("_LiteralForm", Literal)[status]
+                ),
+            )
+            for status in Status
+        ),
+    )
+    free = payload(
+        PayloadName("Free"), steps.retype_to(FieldName("plan"), Literal[Plan.FREE])
+    )
+    outer = union_of(UnionName("Writes"), FieldName("plan"), paid, free)
+
+    compiled = compile_payload_unions(outer).unwrap()
+
+    assert [union.name for union in compiled.payload_unions] == [
+        paid.name,
+        outer.name,
+    ]
+    (_, compiled_outer) = compiled.payload_unions
+    assert [leaf.name for leaf in compiled_outer.leaves()] == [
+        PayloadName("PaidActive"),
+        PayloadName("PaidEnded"),
+        free.name,
+    ]
+
+
+def test_a_payload_without_the_discriminator_is_a_diagnostic() -> None:
+    unplanned = payload(PayloadName("Unplanned"), steps.omit(FieldName("plan")))
+    union = paid_or_free().model_copy(
+        update={"variants": (*paid_or_free().variants, unplanned)}
+    )
+
+    assert union_diagnostics(union) == (
+        diagnostics.VariantWithoutDiscriminator(
+            view=union.name, variant=unplanned.name, discriminator=union.discriminator
+        ),
+    )
+
+
+def test_a_payload_typing_the_discriminator_by_no_one_tag_is_a_diagnostic() -> None:
+    untagged = payload(PayloadName("Untagged"))
+    union = paid_or_free().model_copy(
+        update={"variants": (*paid_or_free().variants, untagged)}
+    )
+
+    assert union_diagnostics(union) == (
+        diagnostics.UntaggedVariant(
+            view=union.name,
+            variant=untagged.name,
+            discriminator=union.discriminator,
+            annotation=Plan,
+        ),
+    )
+
+
+def test_payloads_sharing_a_tag_are_one_diagnostic() -> None:
+    sharing = tuple(
+        payload(name, steps.retype_to(FieldName("plan"), Literal[Plan.PAID]))
+        for name in (PayloadName("Paid"), PayloadName("AlsoPaid"))
+    )
+    union = union_of(UnionName("Writes"), FieldName("plan"), *sharing)
+
+    assert union_diagnostics(union) == (
+        diagnostics.SharedTag(
+            view=union.name,
+            discriminator=union.discriminator,
+            tag=diagnostics.TagText.of(Plan.PAID),
+            variants=tuple(variant.name for variant in sharing),
+        ),
+    )
+
+
+def test_a_nested_union_whose_payloads_have_several_tags_is_a_diagnostic() -> None:
+    nested = union_of(
+        UnionName("ByStatus"),
+        FieldName("status"),
+        *(
+            payload(
+                PayloadName(status.name.title()),
+                steps.retype_to(
+                    FieldName("status"), typing.cast("_LiteralForm", Literal)[status]
+                ),
+                steps.retype_to(
+                    FieldName("plan"), typing.cast("_LiteralForm", Literal)[plan]
+                ),
+            )
+            for status, plan in zip(Status, Plan, strict=True)
+        ),
+    )
+    union = union_of(
+        UnionName("Writes"), FieldName("plan"), nested, *paid_or_free().variants
+    )
+
+    assert union_diagnostics(union) == (
+        diagnostics.NestedUnionTagsDiffer(
+            view=union.name,
+            nested=nested.name,
+            discriminator=union.discriminator,
+            tags=tuple(diagnostics.TagText.of(plan) for plan in Plan),
+        ),
+    )
+
+
+def test_a_view_mixed_with_a_nested_union_of_payloads_is_a_diagnostic() -> None:
+    free = subscriptions(ViewName("Free"), (FieldName("plan"), Plan.FREE))
+    writes = paid_or_free()
+    union = union_of(UnionName("Mixed"), FieldName("plan"), free, writes)
+
+    assert union_diagnostics(union) == (
+        diagnostics.ViewsMixedWithPayloads(
+            view=union.name, views=(free.name,), payloads=(writes.name,)
+        ),
+    )
+
+
+def test_a_union_of_a_defective_payload_reports_only_the_payloads_diagnostics() -> None:
+    defective = payload(PayloadName("Defective"), steps.omit(FieldName("missing")))
+    union = paid_or_free().model_copy(
+        update={"variants": (*paid_or_free().variants, defective)}
+    )
+
+    assert [type(diagnostic) for diagnostic in union_diagnostics(union)] == [
+        diagnostics.UnknownField
+    ]
 
 
 def test_a_union_named_like_no_class_is_a_diagnostic() -> None:
@@ -4352,10 +4520,16 @@ def test_a_union_needs_two_variants() -> None:
             ),
         ),
         (
-            diagnostics.PayloadUnion(view=UnionName("Writes")),
+            diagnostics.UntaggedVariant(
+                view=UnionName("Writes"),
+                variant=PayloadName("Patch"),
+                discriminator=FieldName("plan"),
+                annotation=Plan,
+            ),
             (
-                "Writes: its Variants are Payloads, but only Unions of Views are "
-                "supported yet."
+                "Writes: the Variant Patch types 'plan' <enum 'Plan'>, which is not "
+                "one Tag. Type it with `retype_to`, or declare it with `add`, as a "
+                "Literal of one enum member, string or integer."
             ),
         ),
         (
@@ -4389,7 +4563,7 @@ def test_a_union_needs_two_variants() -> None:
         "nested-tags-differ",
         "sources-differ",
         "views-and-payloads",
-        "payload-union",
+        "untagged-payload",
         "invalid-name",
         "unreachable",
         "shared-name",

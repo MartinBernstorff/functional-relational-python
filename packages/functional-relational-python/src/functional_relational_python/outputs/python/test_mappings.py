@@ -52,6 +52,7 @@ from functional_relational_python.outputs.python.symbols import (
     ValueExpression,
 )
 from functional_relational_python.pipeline import conditions, ir, steps
+from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticsError
@@ -230,6 +231,7 @@ def plan_of(compiled: compiler.CompiledViews, layout: PythonLayout) -> PythonPla
             views=compiled.views,
             payloads=(),
             unions=compiled.unions,
+            payload_unions=(),
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         layout,
@@ -852,23 +854,67 @@ def test_models_and_mappings_both_count_as_generated() -> None:
     ]
 
 
-def type_checked_plan() -> PythonPlan:
-    """Models and mapping functions with every kind of field and Union."""
-    return plan_of(
-        compile_all(
-            [
-                *golden_views(),
-                *reversing_views(),
-                tagged_company(),
-                *filtered_views(),
-                *required_views(),
-                flattened_employee(),
-                flattened_profile(),
-            ],
-            [employee_union()],
+def patch_union() -> Union:
+    """A Union of Payloads of two Sources, each tagged by an added `kind`."""
+    return Union(
+        name=UnionName("Patch"),
+        discriminator=FieldName("kind"),
+        variants=(
+            Payload(
+                name=PayloadName("CompanyPatch"),
+                source=Company,
+                step=steps.pipeline(
+                    steps.project([FieldName("name")]), tagged(Text("company"))
+                ),
+            ),
+            Payload(
+                name=PayloadName("EmployeePatch"),
+                source=Employee,
+                step=steps.pipeline(
+                    steps.project([FieldName("name")]), tagged(Text("employee"))
+                ),
+            ),
         ),
-        Generated.layout(),
     )
+
+
+def type_checked_plan() -> PythonPlan:
+    """Models and mapping functions with every kind of field and Union, and a
+    Union of Payloads, which has no mapping function."""
+    match compiler.compile_catalog(
+        entity_graph(),
+        [
+            *golden_views(),
+            *reversing_views(),
+            tagged_company(),
+            *filtered_views(),
+            *required_views(),
+            flattened_employee(),
+            flattened_profile(),
+        ],
+        [],
+        [employee_union(), patch_union()],
+    ):
+        case Ok(compiled):
+            pass
+        case Err(error):
+            pytest.fail(f"expected a compiled catalog, got {error}")
+    match PythonPlan.of(compiled, Generated.layout()):
+        case Ok(plan):
+            return plan
+        case Err(error):
+            pytest.fail(f"expected a plan, got {error}")
+
+
+def test_a_union_of_payloads_has_a_model_but_no_mapping_function() -> None:
+    plan = type_checked_plan()
+
+    assert UnionName("Patch") in {
+        union.union for union in plan.unions[Generated.models]
+    }
+    assert UnionName("Patch") not in {
+        function.union for function in plan.union_functions[Generated.mappings]
+    }
 
 
 def test_generated_models_and_mappings_pass_the_type_checker(tmp_path: Path) -> None:

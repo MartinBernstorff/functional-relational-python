@@ -2,9 +2,10 @@
 generated name refers to.
 
 For each View and Payload the plan decides its model's Symbol and the Symbols of
-the models nested in it, and for each Union the Symbol of its model, a `type`
-alias. For each View and Union, when the layout asks for them, it also decides
-its mapping function's Symbol and lookup parameters. Every problem that
+the models nested in it, and for each Union, of Views or of Payloads, the Symbol
+of its model, a `type` alias. For each View and Union of Views, when the layout
+asks for them, it also decides its mapping function's Symbol and lookup
+parameters. Every problem that
 depends on where things are generated (a name bound twice in one module, a type
 that cannot be imported, a module that defines what it would be overwritten with)
 is found here, once. The renderers in
@@ -51,12 +52,17 @@ from functional_relational_python.support.diagnostic import (
 from functional_relational_python.support.identifier import Identifier
 
 type ModuleLayout = Callable[
-    [compiler.CompiledView | compiler.CompiledPayload | compiler.CompiledUnion],
+    [
+        compiler.CompiledView
+        | compiler.CompiledPayload
+        | compiler.CompiledUnion
+        | compiler.CompiledPayloadUnion
+    ],
     ModulePath,
 ]
 """Maps each compiled View, Payload or Union to the module something of it is
-generated into. Only Views and Unions have mapping functions, so a layout for
-mappings receives only those."""
+generated into. Only Views and Unions of Views have mapping functions, so a
+layout for mappings receives only those."""
 
 
 class WithoutMappings(pydantic.BaseModel, frozen=True):
@@ -82,21 +88,30 @@ class PythonLayout(pydantic.BaseModel, frozen=True):
         def into(
             _: compiler.CompiledView
             | compiler.CompiledPayload
-            | compiler.CompiledUnion,
+            | compiler.CompiledUnion
+            | compiler.CompiledPayloadUnion,
         ) -> ModulePath:
             return mappings
 
         return PythonLayout(models=models, mappings=into)
 
     def model_of(
-        self, compiled: compiler.CompiledView | compiler.CompiledUnion
+        self,
+        compiled: compiler.CompiledView
+        | compiler.CompiledPayload
+        | compiler.CompiledUnion
+        | compiler.CompiledPayloadUnion,
     ) -> Symbol:
-        """The Symbol of a View's or Union's own model."""
+        """The Symbol of a View's, Payload's or Union's own model."""
         match compiled:
             case compiler.CompiledView(names=names):
                 name = names.model.name
+            case compiler.CompiledPayload(names=names):
+                name = names.name
             case compiler.CompiledUnion(names=names):
                 name = names.model
+            case compiler.CompiledPayloadUnion(model=name):
+                pass
         return Symbol(module=self.models(compiled), qualname=(name.identifier(),))
 
 
@@ -338,6 +353,19 @@ class UnionPlan(pydantic.BaseModel, frozen=True):
     symbol: Symbol
     discriminator: FieldName
     variants: tuple[Symbol, ...]
+
+    @staticmethod
+    def of(
+        union: compiler.CompiledUnion | compiler.CompiledPayloadUnion,
+        layout: PythonLayout,
+    ) -> UnionPlan:
+        """The model of a Union of Views or of Payloads, where `layout` puts it."""
+        return UnionPlan(
+            union=union.name,
+            symbol=layout.model_of(union),
+            discriminator=union.discriminator,
+            variants=tuple(map(layout.model_of, union.variants)),
+        )
 
     def uses(self) -> frozenset[Symbol]:
         """Every Symbol the alias refers to."""
@@ -860,7 +888,8 @@ class _ModelPlanner:
 
 
 class _PlannedUnions(pydantic.BaseModel, frozen=True):
-    """Every Union's model and mapping function, by module."""
+    """Every Union's model, and each Union of Views' mapping function, by
+    module."""
 
     models: Mapping[ModulePath, tuple[UnionPlan, ...]]
     functions: Mapping[ModulePath, tuple[UnionFunctionPlan, ...]]
@@ -868,28 +897,23 @@ class _PlannedUnions(pydantic.BaseModel, frozen=True):
     @staticmethod
     def of(
         unions: Iterable[compiler.CompiledUnion],
+        payload_unions: Iterable[compiler.CompiledPayloadUnion],
         layout: PythonLayout,
         mapped: Mapping[ViewName | UnionName, FunctionPlan | UnionFunctionPlan],
     ) -> _PlannedUnions:
-        """`unions` has each Union after those nested in it, and `mapped` the
-        planned mapping function of each View.
+        """`unions` and `payload_unions` have each Union after those nested in
+        it, and `mapped` the planned mapping function of each View.
 
         A Union gets no mapping function when a Variant's could not be planned,
-        which is reported already.
+        which is reported already. A Union of Payloads gets none at all.
         """
         functions_of = dict(mapped)
         models: dict[ModulePath, list[UnionPlan]] = {}
         functions: dict[ModulePath, list[UnionFunctionPlan]] = {}
         for union in unions:
-            symbol = layout.model_of(union)
-            models.setdefault(symbol.module, []).append(
-                UnionPlan(
-                    union=union.name,
-                    symbol=symbol,
-                    discriminator=union.discriminator,
-                    variants=tuple(map(layout.model_of, union.variants)),
-                )
-            )
+            planned = UnionPlan.of(union, layout)
+            symbol = planned.symbol
+            models.setdefault(symbol.module, []).append(planned)
             variants = tuple(
                 functions_of[variant.name]
                 for variant in union.variants
@@ -906,6 +930,9 @@ class _PlannedUnions(pydantic.BaseModel, frozen=True):
                     functions_of[union.name] = function
                 case _:
                     pass
+        for payload_union in payload_unions:
+            planned = UnionPlan.of(payload_union, layout)
+            models.setdefault(planned.symbol.module, []).append(planned)
         return _PlannedUnions(
             models={module: tuple(planned) for module, planned in models.items()},
             functions={module: tuple(planned) for module, planned in functions.items()},
@@ -914,12 +941,12 @@ class _PlannedUnions(pydantic.BaseModel, frozen=True):
 
 class PythonPlan(pydantic.BaseModel, frozen=True):
     """Every model and mapping function to generate, by module: View models in
-    View order, then Payload models in Payload order, then Union models with each
-    after the Unions nested in it.
+    View order, then Payload models in Payload order, then the models of Unions of
+    Views, then of Unions of Payloads, each Union after the Unions nested in it.
 
     `models` holds each View's and Payload's own model; its nested models are in
-    it. `unions` holds each Union's model, and `union_functions` each Union's
-    mapping function. `requiring` are the modules of mapping functions that read
+    it. `unions` holds each Union's model, and `union_functions` each Union of
+    Views' mapping function. `requiring` are the modules of mapping functions that read
     a value a View requires, so they define `FunctionPlan.required_helper`.
     """
 
@@ -984,7 +1011,9 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
             )
             diagnostics.update(dict.fromkeys(model.diagnostics))
             models.setdefault(model.plan.symbol.module, []).append(model.plan)
-        unions = _PlannedUnions.of(compiled.unions, layout, mapped)
+        unions = _PlannedUnions.of(
+            compiled.unions, compiled.payload_unions, layout, mapped
+        )
         plan = PythonPlan(
             models={module: tuple(planned) for module, planned in models.items()},
             unions=unions.models,

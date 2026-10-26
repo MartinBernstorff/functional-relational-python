@@ -557,11 +557,11 @@ class RequireAddedField(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class VariantWithoutDiscriminator(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Union's Variant, or a View of a Union nested in it, has no field named
-    like the Union's Discriminator."""
+    """A Union's Variant, or a View or Payload of a Union nested in it, has no
+    field named like the Union's Discriminator."""
 
     view: UnionName
-    variant: ViewName
+    variant: ViewName | PayloadName
     discriminator: FieldName
 
     def describe(self) -> DiagnosticMessage:
@@ -572,21 +572,28 @@ class VariantWithoutDiscriminator(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class UntaggedVariant(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Union's Variant, or a View of a Union nested in it, types the
+    """A Union's Variant, or a View or Payload of a Union nested in it, types the
     Discriminator by something other than one Tag: a `Literal` of one enum
     member, string or integer."""
 
     view: UnionName
-    variant: ViewName
+    variant: ViewName | PayloadName
     discriminator: FieldName
     annotation: RuntimeAnnotation
 
     def describe(self) -> DiagnosticMessage:
+        # A View narrows a Source column to its Tag, a Payload, with no Filters,
+        # retypes it.
+        match self.variant:
+            case ViewName():
+                fix = "Narrow it to one value with `where`"
+            case PayloadName():
+                fix = "Type it with `retype_to`"
         return DiagnosticMessage(
             f"{self.view.root}: the Variant {self.variant.root} types "
             f"'{self.discriminator.root}' {self.annotation!r}, which is not one Tag. "
-            "Narrow it to one value with `where`, or declare it with `add`, as a "
-            "Literal of one enum member, string or integer."
+            f"{fix}, or declare it with `add`, as a Literal of one enum member, "
+            "string or integer."
         )
 
 
@@ -605,7 +612,7 @@ class SharedTag(pydantic.BaseModel, Diagnostic, frozen=True):
     view: UnionName
     discriminator: FieldName
     tag: TagText
-    variants: tuple[ViewName | UnionName, ...]
+    variants: tuple[ViewName | PayloadName | UnionName, ...]
 
     def describe(self) -> DiagnosticMessage:
         variants = ", ".join(variant.root for variant in self.variants)
@@ -617,8 +624,8 @@ class SharedTag(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class NestedUnionTagsDiffer(pydantic.BaseModel, Diagnostic, frozen=True):
-    """The Views of a Union nested in another have different Tags for the outer
-    Union's Discriminator, so the nested Union has no one Tag there."""
+    """The Views or Payloads of a Union nested in another have different Tags for
+    the outer Union's Discriminator, so the nested Union has no one Tag there."""
 
     view: UnionName
     nested: UnionName
@@ -655,11 +662,12 @@ class VariantSourcesDiffer(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class ViewsMixedWithPayloads(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Union has both Views (or Unions of them) and Payloads as Variants."""
+    """A Union has both Views (or Unions of them) and Payloads (or Unions of
+    them) as Variants."""
 
     view: UnionName
     views: tuple[ViewName | UnionName, ...]
-    payloads: tuple[PayloadName, ...]
+    payloads: tuple[PayloadName | UnionName, ...]
 
     def describe(self) -> DiagnosticMessage:
         views = ", ".join(view.root for view in self.views)
@@ -698,18 +706,6 @@ class SharedUnionName(pydantic.BaseModel, Diagnostic, frozen=True):
             f"{self.view.root}: a Union shares the name '{self.view.root}' with a "
             "View, a Payload or another Union. Model names must be unique across "
             "Views, Payloads and Unions."
-        )
-
-
-class PayloadUnion(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Union's Variants are Payloads, which Unions do not support yet."""
-
-    view: UnionName
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.view.root}: its Variants are Payloads, but only Unions of "
-            "Views are supported yet."
         )
 
 
@@ -757,7 +753,6 @@ type CompileDiagnostic = (
     | NestedUnionTagsDiffer
     | VariantSourcesDiffer
     | ViewsMixedWithPayloads
-    | PayloadUnion
     | UnreachableVariant
     | SharedUnionName
 )
