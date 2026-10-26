@@ -1,7 +1,8 @@
-"""The InMemoryViewEngine: the reference semantics for compiled Views.
+"""The InMemoryViewEngine: the reference semantics for compiled Views and Unions.
 
-It runs compiled Views over Entities held in memory. Users can use it as a
-stateful fake in their own tests, and every other backend is compared against it.
+It runs compiled Views and Unions over Entities held in memory. Users can use it
+as a stateful fake in their own tests, and every other backend is compared
+against it.
 """
 
 from collections.abc import Iterable, Mapping
@@ -19,6 +20,7 @@ from functional_relational_python.entity_graph.entity_graph import (
 )
 from functional_relational_python.entity_graph.id import IdValue
 from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline.unions import UnionName
 from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
@@ -40,6 +42,17 @@ class ViewRow(pydantic.RootModel[Mapping[FieldName, object]], frozen=True):
         return ViewRow({FieldName.fake(): ViewName.fake()})
 
 
+class VariantRow(pydantic.BaseModel, frozen=True):
+    """One Union result: the row of the Variant View that gave it."""
+
+    view: ViewName
+    row: ViewRow
+
+    @staticmethod
+    def fake() -> VariantRow:
+        return VariantRow(view=ViewName.fake(), row=ViewRow.fake())
+
+
 class NotAnEntityError(Exception):
     """`put` got an instance of a model that is not an Entity in the EntityGraph."""
 
@@ -56,15 +69,29 @@ class UnknownViewError(Exception):
         super().__init__(f"No compiled View named '{view.root}'. Known Views: {names}.")
 
 
-class NonEntitySourceError(Exception):
-    """A View's Source is not an Entity, so the engine holds no rows to read."""
+class UnknownUnionError(Exception):
+    def __init__(self, union: UnionName, known: tuple[UnionName, ...]) -> None:
+        self.union = union
+        self.known = known
+        names = ", ".join(f"'{name.root}'" for name in known)
+        super().__init__(
+            f"No compiled Union named '{union.root}'. Known Unions: {names}."
+        )
 
-    def __init__(self, view: ViewName, source: type[pydantic.BaseModel]) -> None:
+
+class NonEntitySourceError(Exception):
+    """A View's or Union's Source is not an Entity, so the engine holds no rows to
+    read."""
+
+    def __init__(
+        self, view: ViewName | UnionName, source: type[pydantic.BaseModel]
+    ) -> None:
         self.view = view
         self.source = source
+        kind = "View" if isinstance(view, ViewName) else "Union"
         super().__init__(
-            f"View '{view.root}' reads {source.__name__}, which is not an Entity in "
-            "the EntityGraph, so the engine holds no rows for it."
+            f"{kind} '{view.root}' reads {source.__name__}, which is not an Entity "
+            "in the EntityGraph, so the engine holds no rows for it."
         )
 
 
@@ -255,7 +282,8 @@ class InMemoryViewEngine:
 
     `put` inserts an Entity, or replaces the one with the same ID. `read` returns
     the View results, one per row of the View's Source its Filters keep, in
-    insertion order.
+    insertion order. `read_union` returns the Union results likewise, one per row
+    a Variant keeps.
     """
 
     def __init__(
@@ -263,6 +291,7 @@ class InMemoryViewEngine:
     ) -> None:
         self._entity_graph = entity_graph
         self._views = {view.name: view for view in views.views}
+        self._unions = {union.name: union for union in views.unions}
         self._entities: dict[
             type[pydantic.BaseModel], dict[IdValue, pydantic.BaseModel]
         ] = {}
@@ -300,12 +329,53 @@ class InMemoryViewEngine:
         rows = tuple(
             self._row(compiled.relation, entity, run)
             for entity in self._entities.get(compiled.source, {}).values()
-            if all(
-                InMemoryViewEngine._holds(kept, entity)
-                for kept in compiled.relation.filters
-            )
+            if InMemoryViewEngine._keeps(compiled, entity)
         )
         return DiagnosticsError.or_ok(run.diagnostics(), lambda: rows)
+
+    def read_union(
+        self, union: UnionName
+    ) -> Result[
+        tuple[VariantRow, ...],
+        UnknownUnionError | NonEntitySourceError | DiagnosticsError[ReadDiagnostic],
+    ]:
+        """The Union's results: per row of its Source, the row of the first Variant
+        View whose Filters keep it, or nothing when none does.
+
+        Problems are reported as `read` reports them, for the Variant each row
+        gives a result of only.
+        """
+        match self._unions.get(union):
+            case None:
+                return Err(UnknownUnionError(union, tuple(self._unions)))
+            case compiled:
+                pass
+        if compiled.source not in self._entity_graph.entities:
+            return Err(NonEntitySourceError(union, compiled.source))
+        run = _Read(self._entities)
+        rows: list[VariantRow] = []
+        leaves = compiled.leaves()
+        for entity in self._entities.get(compiled.source, {}).values():
+            kept_by = (
+                leaf for leaf in leaves if InMemoryViewEngine._keeps(leaf, entity)
+            )
+            match next(kept_by, None):
+                case None:
+                    pass
+                case leaf:
+                    rows.append(
+                        VariantRow(
+                            view=leaf.name, row=self._row(leaf.relation, entity, run)
+                        )
+                    )
+        return DiagnosticsError.or_ok(run.diagnostics(), lambda: tuple(rows))
+
+    @staticmethod
+    def _keeps(view: compiler.CompiledView, subject: pydantic.BaseModel) -> bool:
+        """Whether every Filter of `view` is true of `subject`."""
+        return all(
+            InMemoryViewEngine._holds(kept, subject) for kept in view.relation.filters
+        )
 
     def _row(
         self, relation: ir.Relation, subject: pydantic.BaseModel, run: _Read

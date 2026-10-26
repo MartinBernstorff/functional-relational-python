@@ -13,6 +13,10 @@ field and ID when the value is `None`. A module of mapping functions imports onl
 the Source, Entity and View model modules, so it runs and type checks without
 this library installed.
 
+A Union becomes a function that calls its Variants' functions in turn, and
+returns what the first that maps the row gives, or `None` when none does. It
+takes every lookup parameter of its Variants' functions, and passes each its own.
+
 Like the InMemoryViewEngine, it computes each field from the Values of the
 compiled Relation, so the two agree (the differential test in `test_mappings.py`
 checks this).
@@ -31,11 +35,13 @@ from functional_relational_python.outputs.python.plan import (
     FunctionPlan,
     ModelPlan,
     PythonPlan,
+    UnionFunctionPlan,
 )
 from functional_relational_python.outputs.python.symbols import (
     LineLength,
     ModulePath,
     PythonString,
+    Symbol,
     ValueExpression,
 )
 from functional_relational_python.pipeline import ir
@@ -117,6 +123,23 @@ class Indent(pydantic.RootModel[int], frozen=True):
         else:
             lines = f"{pad}{inner.fitted(body, Expression('')).root}\n"
         return Expression(f"{head.root}\n{lines}{self.pad().root}{tail.root}")
+
+    def optional_annotation(
+        self, start: Expression, annotated: Expression, end: Expression
+    ) -> Expression:
+        """`<annotated> | None`, written after `start` on a line at this
+        indentation that ends with `end`. As ruff splits an annotation that does
+        not fit: in parentheses, then at the `|` if it still does not fit."""
+        optional = f"{annotated.root} | None"
+        if (
+            len(f"{self.pad().root}{start.root}{optional}{end.root}")
+            <= LineLength.default().root
+        ):
+            return Expression(optional)
+        pad = self.deeper().pad().root
+        if len(f"{pad}{optional}") <= LineLength.default().root:
+            return Expression(f"(\n{pad}{optional}\n{self.pad().root})")
+        return Expression(f"(\n{pad}{annotated.root}\n{pad}| None\n{self.pad().root})")
 
     def looked_up(
         self,
@@ -315,7 +338,9 @@ class MappingsRenderer:
 
     @staticmethod
     def files(plan: PythonPlan) -> tuple[GeneratedFile, ...]:
-        """One file per module, in module order, with its functions in View order.
+        """One file per module, in module order, with its View functions in View
+        order, then its Union functions, each after those of the Unions nested in
+        it.
 
         `render.PythonRenderer` writes them together with the View models.
         """
@@ -324,17 +349,20 @@ class MappingsRenderer:
                 path=module.file_path(),
                 text=MappingsRenderer._module(plan, module),
             )
-            for module in sorted(plan.functions, key=lambda module: module.root)
+            for module in plan.function_modules()
         )
 
     @staticmethod
     def _module(plan: PythonPlan, module: ModulePath) -> FileText:
         """The mapping functions of `module`, and `_required` if they need it."""
-        functions = plan.functions[module]
+        functions = plan.functions.get(module, ())
+        union_functions = plan.union_functions.get(module, ())
         imports = "\n".join(
             "".join(f"import {imported.root}\n" for imported in section)
             for section in ModulePath.import_sections(
-                imported for function in functions for imported in function.imports()
+                imported
+                for function in (*functions, *union_functions)
+                for imported in function.imports()
             )
         )
         helper = (
@@ -343,7 +371,11 @@ class MappingsRenderer:
             else ""
         )
         rendered = "".join(
-            f"\n\n{MappingsRenderer._function(function).root}" for function in functions
+            f"\n\n{text.root}"
+            for text in (
+                *map(MappingsRenderer._function, functions),
+                *map(MappingsRenderer._union_function, union_functions),
+            )
         )
         return FileText(f"{MappingsRenderer.header.root}\n{imports}{helper}{rendered}")
 
@@ -364,26 +396,86 @@ class MappingsRenderer:
         )
 
     @staticmethod
-    def _function(function: FunctionPlan) -> FunctionText:
-        lookups = "".join(
+    def _signature(
+        function: FunctionPlan | UnionFunctionPlan,
+        model: Symbol,
+        optionality: Optionality,
+    ) -> Expression:
+        """`def <function>(source: ..., *, <lookups>) -> <model>:`, the model
+        optional when the function may map a row to nothing."""
+        parameters = "".join(
             f"    {parameter.name.root}: {FunctionPlan.mapping.root}.Mapping[\n"
             f"        {parameter.id_type.qualified().root},\n"
             f"        {parameter.target.qualified().root},\n"
             "    ],\n"
             for parameter in function.lookups
         )
-        keyword_only = f"    *,\n{lookups}" if lookups else ""
-        model = function.model.symbol.qualified().root
-        returned = f"{model} | None" if function.filters else model
-        if function.filters and len(f") -> {returned}:") > LineLength.default().root:
-            # As ruff splits a return annotation that does not fit: in parentheses,
-            # then at the `|` if it still does not fit.
-            inner = f"    {returned}"
-            returned = (
-                f"(\n{inner}\n)"
-                if len(inner) <= LineLength.default().root
-                else f"(\n    {model}\n    | None\n)"
+        keyword_only = f"    *,\n{parameters}" if parameters else ""
+        qualified = Expression(model.qualified().root)
+        match optionality:
+            case Optionality.REQUIRED:
+                returned = qualified.root
+            case Optionality.OPTIONAL:
+                returned = (
+                    Indent(0)
+                    .optional_annotation(
+                        Expression(") -> "), qualified, Expression(":")
+                    )
+                    .root
+                )
+        return Expression(
+            f"def {function.symbol.bound_name().root}(\n"
+            f"    {FunctionPlan.source_parameter.root}: "
+            f"{function.source.qualified().root},\n"
+            f"{keyword_only}"
+            f") -> {returned}:\n"
+        )
+
+    @staticmethod
+    def _union_function(function: UnionFunctionPlan) -> FunctionText:
+        """Calls each Variant's function in turn, until one maps the row.
+
+        `found` is declared with the Union's model, so that type checkers let it
+        hold what each Variant's function gives."""
+        found = UnionFunctionPlan.found.root
+        model = Indent(4).optional_annotation(
+            Expression(f"{found}: "),
+            Expression(function.model.qualified().root),
+            Expression(""),
+        )
+        statements: list[str] = [f"    {found}: {model.root}\n"]
+        for index, call in enumerate(function.variants):
+            match function.called(call):
+                case Symbol() as symbol:
+                    callee = symbol.qualified().root
+                case called:
+                    callee = called.root
+            arguments = ", ".join(
+                (
+                    FunctionPlan.source_parameter.root,
+                    *(f"{name.root}={name.root}" for name in call.lookups),
+                )
             )
+            indent = Indent(4) if index == 0 else Indent(8)
+            assignment = indent.fitted(
+                Expression(f"{found} = {callee}({arguments})"), Expression("")
+            )
+            guard = "" if index == 0 else f"    if {found} is None:\n"
+            statements.append(f"{guard}{indent.pad().root}{assignment.root}\n")
+        signature = MappingsRenderer._signature(
+            function, function.model, Optionality.OPTIONAL
+        )
+        return FunctionText(
+            f"{signature.root}{''.join(statements)}    return {found}\n"
+        )
+
+    @staticmethod
+    def _function(function: FunctionPlan) -> FunctionText:
+        signature = MappingsRenderer._signature(
+            function,
+            function.model.symbol,
+            Optionality.OPTIONAL if function.filters else Optionality.REQUIRED,
+        )
         call = _Construction(function=function, indent=Indent(4)).call(
             function.model, Expression(FunctionPlan.source_parameter.root)
         )
@@ -397,16 +489,7 @@ class MappingsRenderer:
                 function.model, Expression(FunctionPlan.source_parameter.root), ()
             )
         )
-        return FunctionText(
-            f"def {function.symbol.bound_name().root}(\n"
-            f"    {FunctionPlan.source_parameter.root}: "
-            f"{function.source.qualified().root},\n"
-            f"{keyword_only}"
-            f") -> {returned}:\n"
-            f"{guards}"
-            f"{unread}"
-            f"    return {call.root}\n"
-        )
+        return FunctionText(f"{signature.root}{guards}{unread}    return {call.root}\n")
 
 
 class _Construction(pydantic.BaseModel, frozen=True):

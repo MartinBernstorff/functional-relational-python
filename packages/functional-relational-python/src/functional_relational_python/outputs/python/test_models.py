@@ -2,6 +2,7 @@ import dataclasses
 import enum
 import subprocess
 import sys
+import types
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Annotated, Literal
@@ -11,7 +12,7 @@ import pytest
 from pydantic import MISSING
 from safe_result import Err, Ok
 
-from functional_relational_python.compiler import compiler
+from functional_relational_python.compiler import compiler, test_compiler
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
@@ -29,12 +30,13 @@ from functional_relational_python.outputs.python.plan import (
 )
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import ModulePath
-from functional_relational_python.pipeline import ir, steps
+from functional_relational_python.pipeline import conditions, ir, steps
 from functional_relational_python.pipeline.payloads import (
     DefinitionName,
     Payload,
     PayloadName,
 )
+from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.filesystem import (
     Directory,
@@ -69,12 +71,15 @@ class Outer(pydantic.BaseModel):
 
 
 def compile_catalog(
-    views: Sequence[View], payloads: Sequence[Payload]
+    views: Sequence[View],
+    payloads: Sequence[Payload],
+    unions: Sequence[Union] = (),
 ) -> compiler.CompiledCatalog:
     return compiler.compile_catalog(
         EntityGraph.build([Company], IdBase.fake(), OneToOneMarker.fake()).unwrap(),
         views,
         payloads,
+        unions,
     ).unwrap()
 
 
@@ -89,10 +94,13 @@ def single_module(module: ModulePath) -> ModuleLayout:
 
 
 def generate(
-    views: Sequence[View], payloads: Sequence[Payload], layout: ModuleLayout
+    views: Sequence[View],
+    payloads: Sequence[Payload],
+    layout: ModuleLayout,
+    unions: Sequence[Union] = (),
 ) -> GeneratedFiles:
     match PythonPlan.of(
-        compile_catalog(views, payloads),
+        compile_catalog(views, payloads, unions),
         PythonLayout.models_only(layout),
     ):
         case Ok(plan):
@@ -131,7 +139,7 @@ class CompanySummary(BaseModel, frozen=True):
     name: Text
     parent: CompanyId | None
     tags: tuple[Text, ...]
-    kind: Literal['shop', 'brand']
+    kind: Literal["shop", "brand"]
 """
     )
 
@@ -260,7 +268,7 @@ class CompanyCreate(NamedBase, frozen=True):
 
 
 class CompanyUpdate(PutModel[CompanyId], frozen=True):
-    kind: Literal['shop', 'brand']
+    kind: Literal["shop", "brand"]
 """
     )
 
@@ -342,7 +350,7 @@ from pydantic import BaseModel
 
 class CompanyTagged(BaseModel, frozen=True):
     name: Text
-    type: Literal['company'] = 'company'
+    type: Literal["company"] = "company"
 
 
 class CompanyCreate(BaseModel, frozen=True):
@@ -439,7 +447,7 @@ class Empty(BaseModel, frozen=True):
 
 def test_each_module_is_one_file_in_module_order() -> None:
     company, outer = view(Company), view(Outer)
-    modules: dict[DefinitionName, ModulePath] = {
+    modules: dict[DefinitionName | UnionName, ModulePath] = {
         company.name: ModulePath("app.z_last"),
         outer.name: ModulePath("app.a_first"),
     }
@@ -663,7 +671,7 @@ def test_a_view_model_leaves_the_marker_out_wherever_it_marks_a_field(
 ) -> None:
     graph = EntityGraph.build([Company], IdBase.fake(), one_to_one_marker).unwrap()
     match PythonPlan.of(
-        compiler.compile_catalog(graph, [view(model)], []).unwrap(),
+        compiler.compile_catalog(graph, [view(model)], [], ()).unwrap(),
         PythonLayout.models_only(single_module(ModulePath("app.views"))),
     ):
         case Ok(plan):
@@ -697,6 +705,7 @@ def test_generated_modules_pass_the_type_checker(tmp_path: Path) -> None:
         ],
         [*base_payloads(), update_payload()],
         single_module(ModulePath("generated.views")),
+        [nested_company_union(), long_union(long_names(Width(30), Count(3)))],
     )
     files.write(LocalFileSystem(), Directory(tmp_path)).unwrap()
     source_root = Path(__file__).parents[2]
@@ -716,3 +725,217 @@ def test_generated_modules_pass_the_type_checker(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def company_variant(name: ViewName, tag: Text) -> View:
+    """A View of Company tagged `tag` by an added `variant` field."""
+    return View(
+        name=name,
+        source=Company,
+        step=steps.pipeline(
+            steps.where(conditions.eq(conditions.field(FieldName("name")), tag)),
+            steps.project([FieldName("name")]),
+            test_compiler.added_tag(FieldName("variant"), test_compiler.Tag(tag.root)),
+        ),
+    )
+
+
+def company_union(name: UnionName, *variants: View | Union) -> Union:
+    return Union(name=name, discriminator=FieldName("variant"), variants=variants)
+
+
+def nested_company_union() -> Union:
+    """A Union, one of whose Variants is a Union of two Views tagged alike."""
+    return company_union(
+        UnionName("AnyCompany"),
+        company_variant(ViewName("ShopCompany"), Text("shop")),
+        Union(
+            name=UnionName("BrandCompany"),
+            discriminator=FieldName("name"),
+            variants=(
+                View(
+                    name=ViewName("NamedBrand"),
+                    source=Company,
+                    step=steps.pipeline(
+                        steps.where(
+                            conditions.eq(
+                                conditions.field(FieldName("name")), Text("Named")
+                            )
+                        ),
+                        steps.project([]),
+                        steps.add(FieldName("variant"), Literal["brand"], "brand"),
+                        steps.add(FieldName("name"), Literal["named"], "named"),
+                    ),
+                ),
+                View(
+                    name=ViewName("UnnamedBrand"),
+                    source=Company,
+                    step=steps.pipeline(
+                        steps.project([]),
+                        steps.add(FieldName("variant"), Literal["brand"], "brand"),
+                        steps.add(FieldName("name"), Literal["unnamed"], "unnamed"),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def test_golden_union_models_in_their_own_module() -> None:
+    union = nested_company_union()
+    modules: dict[DefinitionName | UnionName, ModulePath] = {
+        name: ModulePath("app.unions")
+        for name in (union.name, UnionName("BrandCompany"))
+    }
+
+    files = generate(
+        [],
+        [],
+        lambda compiled: modules.get(compiled.name, ModulePath("app.views")),
+        [union],
+    )
+
+    assert {file.path.root.as_posix(): file.text for file in files.files} == {
+        "app/unions.py": FileText(
+            """\
+# Generated by functional-relational-python. Do not edit.
+# Regenerate with `frp generate`; `frp check` fails when this is stale.
+
+from typing import Annotated
+
+from app.views import NamedBrand, ShopCompany, UnnamedBrand
+from pydantic import Discriminator
+
+
+type BrandCompany = Annotated[NamedBrand | UnnamedBrand, Discriminator("name")]
+type AnyCompany = Annotated[ShopCompany | BrandCompany, Discriminator("variant")]
+"""
+        ),
+        "app/views.py": FileText(
+            """\
+# Generated by functional-relational-python. Do not edit.
+# Regenerate with `frp generate`; `frp check` fails when this is stale.
+
+from typing import Literal
+
+from functional_relational_python.outputs.python.test_models import Text
+from pydantic import BaseModel
+
+
+class ShopCompany(BaseModel, frozen=True):
+    name: Text
+    variant: Literal["shop"] = "shop"
+
+
+class NamedBrand(BaseModel, frozen=True):
+    variant: Literal["brand"] = "brand"
+    name: Literal["named"] = "named"
+
+
+class UnnamedBrand(BaseModel, frozen=True):
+    variant: Literal["brand"] = "brand"
+    name: Literal["unnamed"] = "unnamed"
+"""
+        ),
+    }
+
+
+def long_union(names: Sequence[ViewName]) -> Union:
+    """A Union of a View per name in `names`."""
+    return company_union(
+        UnionName("LongUnion"),
+        *(company_variant(name, Text(f"v{index}")) for index, name in enumerate(names)),
+    )
+
+
+def long_names(width: Width, count: Count) -> tuple[ViewName, ...]:
+    """`count` View names, each `width` characters long."""
+    return tuple(
+        ViewName(f"V{index}".ljust(width.root, "x")) for index in range(count.root)
+    )
+
+
+class Width(pydantic.RootModel[int], frozen=True):
+    pass
+
+
+class Count(pydantic.RootModel[int], frozen=True):
+    pass
+
+
+def union_module(union: Union) -> FileText:
+    files = generate([], [], single_module(ModulePath("app.views")), [union])
+    (file,) = files.files
+    return file.text
+
+
+@pytest.mark.parametrize(
+    ("width", "count", "statement"),
+    [
+        (
+            8,
+            2,
+            (
+                "type LongUnion = Annotated[V0xxxxxx | V1xxxxxx, "
+                'Discriminator("variant")]\n'
+            ),
+        ),
+        (
+            20,
+            2,
+            (
+                "type LongUnion = Annotated[\n"
+                "    V0xxxxxxxxxxxxxxxxxx | V1xxxxxxxxxxxxxxxxxx,\n"
+                '    Discriminator("variant"),\n'
+                "]\n"
+            ),
+        ),
+        (
+            30,
+            3,
+            (
+                "type LongUnion = Annotated[\n"
+                "    V0xxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+                "    | V1xxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+                "    | V2xxxxxxxxxxxxxxxxxxxxxxxxxxxx,\n"
+                '    Discriminator("variant"),\n'
+                "]\n"
+            ),
+        ),
+    ],
+    ids=["one-line", "split-in-brackets", "split-at-bars"],
+)
+def test_a_union_model_is_split_as_ruff_splits_it(
+    width: int, count: int, statement: str
+) -> None:
+    text = union_module(long_union(long_names(Width(width), Count(count))))
+
+    assert text.root.endswith(f"\n\n\n{statement}")
+    assert ruff_format_diff(text) == FileText("")
+
+
+def test_a_union_model_reads_each_variant_by_its_tag() -> None:
+    module = types.ModuleType("app_unions")
+    exec(union_module(nested_company_union()).root, module.__dict__)
+    adapter = pydantic.TypeAdapter(module.AnyCompany)
+
+    assert [
+        type(adapter.validate_python(row)).__name__
+        for row in (
+            {"variant": "brand", "name": "unnamed"},
+            {"variant": "shop", "name": "Acme"},
+            {"variant": "brand", "name": "named"},
+        )
+    ] == ["UnnamedBrand", "ShopCompany", "NamedBrand"]
+
+
+def ruff_format_diff(text: FileText) -> FileText:
+    """How ruff would reformat `text`: empty when it is formatted already."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ruff", "format", "--diff", "-"],
+        input=text.root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return FileText(result.stdout + result.stderr)

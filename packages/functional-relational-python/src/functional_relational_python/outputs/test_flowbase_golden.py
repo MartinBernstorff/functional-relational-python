@@ -16,6 +16,12 @@ A third golden test reads Flowbase's multi-table campaigns: a base `ChannelCampa
 row, plus at most one detail row per channel (`MetaCampaign`, `LinkedInCampaign`),
 each holding a one-to-one Reference to its `ChannelCampaign`. A View over
 `ChannelCampaign` reverses those References to read each campaign's detail rows.
+
+A fourth rebuilds Flowbase's Meta campaign classes (`djank/db_models/
+meta_campaign.py`) as the Union `Template | (Draft | Submitted)`: each Variant is
+a View over the base table that filters by the campaign's `kind` and
+`submit_state`, and flattens the Meta detail row into itself. The Meta campaign
+Union is itself a Variant of a cross-channel Union, discriminated by `channel`.
 """
 
 import datetime
@@ -27,6 +33,7 @@ import pytest
 from safe_result import Err, Ok
 
 from functional_relational_python.compiler import compiler
+from functional_relational_python.compiler.model_names import PascalCase
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
@@ -41,7 +48,8 @@ from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.python.plan import PythonLayout, PythonPlan
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import ModulePath
-from functional_relational_python.pipeline import ir, steps
+from functional_relational_python.pipeline import conditions, ir, steps
+from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.filesystem import FileText
 
@@ -234,6 +242,7 @@ def test_golden_flowbase_view_models() -> None:
         compiler.CompiledCatalog(
             views=compiled_views().views,
             payloads=(),
+            unions=(),
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
@@ -395,6 +404,7 @@ def test_golden_flowbase_campaign_view_model() -> None:
         compiler.CompiledCatalog(
             views=compiled_campaign_views().views,
             payloads=(),
+            unions=(),
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
@@ -489,5 +499,419 @@ def test_golden_flowbase_campaign_view_results() -> None:
                     }
                 ),
             }
+        ),
+    )
+
+
+class Channel(enum.StrEnum):
+    META = "meta"
+    LINKEDIN = "linkedin"
+
+
+class CampaignKind(enum.StrEnum):
+    TEMPLATE = "template"
+    INSTANCE = "instance"
+
+
+class SubmitState(enum.StrEnum):
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
+
+
+class SubmittedAt(pydantic.RootModel[datetime.datetime], frozen=True):
+    @staticmethod
+    def fake() -> SubmittedAt:
+        return SubmittedAt(datetime.datetime(2026, 5, 6, tzinfo=datetime.UTC))
+
+
+class CampaignName(pydantic.RootModel[str], frozen=True):
+    pass
+
+
+class LifetimeBudget(pydantic.RootModel[int], frozen=True):
+    pass
+
+
+class ChannelCampaignEntityId(Id[int]):
+    pass
+
+
+class ChannelCampaignEntity(pydantic.BaseModel, frozen=True):
+    """The base table every channel's campaigns share."""
+
+    id: ChannelCampaignEntityId
+    company_id: CompanyId
+    channel: Channel
+    kind: CampaignKind
+    submit_state: SubmitState
+    submitted_at: SubmittedAt | None
+
+
+class MetaCampaignEntityId(Id[int]):
+    pass
+
+
+class MetaCampaignEntity(pydantic.BaseModel, frozen=True):
+    """The Meta detail table: at most one row per base row."""
+
+    id: MetaCampaignEntityId
+    channel_campaign_id: Annotated[ChannelCampaignEntityId, OneToOne()]
+    name: CampaignName | None
+    lifetime_budget: LifetimeBudget | None
+
+
+class LinkedInCampaignEntityId(Id[int]):
+    pass
+
+
+class LinkedInCampaignEntity(pydantic.BaseModel, frozen=True):
+    """The LinkedIn detail table: at most one row per base row."""
+
+    id: LinkedInCampaignEntityId
+    channel_campaign_id: Annotated[ChannelCampaignEntityId, OneToOne()]
+    campaign_group: Text
+
+
+def has(field: FieldName, value: enum.Enum) -> ir.Comparison:
+    return conditions.eq(conditions.field(field), value)
+
+
+def with_detail(entity: type[pydantic.BaseModel], *then: steps.Step) -> steps.Step:
+    """Reads the campaign's detail row, which it must have, into its own fields;
+    the base table's `id` stays the campaign's."""
+    field = FieldName(PascalCase(entity.__name__).snake_case().root)
+    return steps.pipeline(
+        steps.reverse(
+            entity,
+            steps.omit(FieldName("id")),
+            steps.omit(FieldName("channel_campaign_id")),
+            *then,
+        ),
+        steps.require(field),
+        steps.flatten(field),
+    )
+
+
+def meta_campaign_variants() -> tuple[View, View, View]:
+    """Flowbase's `TemplateMetaCampaignDb`, `DraftMetaCampaignDb` and
+    `SubmittedMetaCampaignDb`."""
+    instance = (
+        has(FieldName("channel"), Channel.META),
+        has(FieldName("kind"), CampaignKind.INSTANCE),
+    )
+    return (
+        View(
+            name=ViewName("TemplateMetaCampaign"),
+            source=ChannelCampaignEntity,
+            step=steps.pipeline(
+                steps.where(
+                    conditions.and_(
+                        has(FieldName("channel"), Channel.META),
+                        has(FieldName("kind"), CampaignKind.TEMPLATE),
+                        conditions.is_null(conditions.field(FieldName("submitted_at"))),
+                    )
+                ),
+                steps.omit(FieldName("submit_state")),
+                with_detail(MetaCampaignEntity),
+            ),
+        ),
+        View(
+            name=ViewName("DraftMetaCampaign"),
+            source=ChannelCampaignEntity,
+            step=steps.pipeline(
+                steps.where(
+                    conditions.and_(
+                        *instance, has(FieldName("submit_state"), SubmitState.DRAFT)
+                    )
+                ),
+                with_detail(MetaCampaignEntity),
+            ),
+        ),
+        View(
+            name=ViewName("SubmittedMetaCampaign"),
+            source=ChannelCampaignEntity,
+            step=steps.pipeline(
+                steps.where(
+                    conditions.and_(
+                        *instance, has(FieldName("submit_state"), SubmitState.SUBMITTED)
+                    )
+                ),
+                steps.require(FieldName("submitted_at")),
+                with_detail(MetaCampaignEntity, steps.require(FieldName("name"))),
+            ),
+        ),
+    )
+
+
+def linkedin_campaign() -> View:
+    return View(
+        name=ViewName("LinkedInCampaign"),
+        source=ChannelCampaignEntity,
+        step=steps.pipeline(
+            steps.where(has(FieldName("channel"), Channel.LINKEDIN)),
+            with_detail(LinkedInCampaignEntity),
+        ),
+    )
+
+
+def channel_campaign_union() -> Union:
+    """`Template | (Draft | Submitted)` for Meta, itself a Variant of the Union of
+    every channel's campaigns."""
+    template, draft, submitted = meta_campaign_variants()
+    meta = Union(
+        name=UnionName("MetaCampaign"),
+        discriminator=FieldName("kind"),
+        variants=(
+            template,
+            Union(
+                name=UnionName("InstanceMetaCampaign"),
+                discriminator=FieldName("submit_state"),
+                variants=(draft, submitted),
+            ),
+        ),
+    )
+    return Union(
+        name=UnionName("ChannelCampaignUnion"),
+        discriminator=FieldName("channel"),
+        variants=(meta, linkedin_campaign()),
+    )
+
+
+def channel_campaign_graph() -> EntityGraph:
+    return EntityGraph.build(
+        [Company, ChannelCampaignEntity, MetaCampaignEntity, LinkedInCampaignEntity],
+        IdBase.fake(),
+        OneToOneMarker.fake(),
+    ).unwrap()
+
+
+def compiled_channel_campaigns() -> compiler.CompiledViews:
+    match compiler.compile_views(
+        channel_campaign_graph(), [], [channel_campaign_union()]
+    ):
+        case Ok(compiled):
+            return compiled
+        case Err(error):
+            pytest.fail(f"expected a compiled Union, got {error}")
+
+
+def test_golden_flowbase_meta_campaign_union_models() -> None:
+    compiled = compiled_channel_campaigns()
+    match PythonPlan.of(
+        compiler.CompiledCatalog(
+            views=compiled.views,
+            payloads=(),
+            unions=compiled.unions,
+            one_to_one_marker=OneToOneMarker.fake(),
+        ),
+        PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
+    ):
+        case Ok(plan):
+            (file,) = PythonRenderer.render(plan).files
+        case Err(error):
+            pytest.fail(f"expected Union models, got {error}")
+
+    assert file.text == FileText(
+        """\
+# Generated by functional-relational-python. Do not edit.
+# Regenerate with `frp generate`; `frp check` fails when this is stale.
+
+from typing import Annotated, Literal
+
+from functional_relational_python.outputs.test_flowbase_golden import (
+    CampaignKind,
+    CampaignName,
+    Channel,
+    ChannelCampaignEntityId,
+    CompanyId,
+    LifetimeBudget,
+    SubmitState,
+    SubmittedAt,
+    Text,
+)
+from pydantic import BaseModel, Discriminator
+
+
+class TemplateMetaCampaign(BaseModel, frozen=True):
+    id: ChannelCampaignEntityId
+    company_id: CompanyId
+    channel: Literal[Channel.META]
+    kind: Literal[CampaignKind.TEMPLATE]
+    submitted_at: Literal[None]
+    name: CampaignName | None
+    lifetime_budget: LifetimeBudget | None
+
+
+class DraftMetaCampaign(BaseModel, frozen=True):
+    id: ChannelCampaignEntityId
+    company_id: CompanyId
+    channel: Literal[Channel.META]
+    kind: Literal[CampaignKind.INSTANCE]
+    submit_state: Literal[SubmitState.DRAFT]
+    submitted_at: SubmittedAt | None
+    name: CampaignName | None
+    lifetime_budget: LifetimeBudget | None
+
+
+class SubmittedMetaCampaign(BaseModel, frozen=True):
+    id: ChannelCampaignEntityId
+    company_id: CompanyId
+    channel: Literal[Channel.META]
+    kind: Literal[CampaignKind.INSTANCE]
+    submit_state: Literal[SubmitState.SUBMITTED]
+    submitted_at: SubmittedAt
+    name: CampaignName
+    lifetime_budget: LifetimeBudget | None
+
+
+class LinkedInCampaign(BaseModel, frozen=True):
+    id: ChannelCampaignEntityId
+    company_id: CompanyId
+    channel: Literal[Channel.LINKEDIN]
+    kind: CampaignKind
+    submit_state: SubmitState
+    submitted_at: SubmittedAt | None
+    campaign_group: Text
+
+
+type InstanceMetaCampaign = Annotated[
+    DraftMetaCampaign | SubmittedMetaCampaign,
+    Discriminator("submit_state"),
+]
+type MetaCampaign = Annotated[
+    TemplateMetaCampaign | InstanceMetaCampaign,
+    Discriminator("kind"),
+]
+type ChannelCampaignUnion = Annotated[
+    MetaCampaign | LinkedInCampaign,
+    Discriminator("channel"),
+]
+"""
+    )
+
+
+def test_golden_flowbase_meta_campaign_union_results() -> None:
+    company = Company.fake()
+
+    def campaign(
+        id_value: ChannelCampaignEntityId,
+        channel: Channel,
+        kind: CampaignKind,
+        submit_state: SubmitState,
+        submitted_at: SubmittedAt | None,
+    ) -> ChannelCampaignEntity:
+        return ChannelCampaignEntity(
+            id=id_value,
+            company_id=company.id,
+            channel=channel,
+            kind=kind,
+            submit_state=submit_state,
+            submitted_at=submitted_at,
+        )
+
+    template = campaign(
+        ChannelCampaignEntityId(1),
+        Channel.META,
+        CampaignKind.TEMPLATE,
+        SubmitState.DRAFT,
+        None,
+    )
+    draft = campaign(
+        ChannelCampaignEntityId(2),
+        Channel.META,
+        CampaignKind.INSTANCE,
+        SubmitState.DRAFT,
+        None,
+    )
+    submitted = campaign(
+        ChannelCampaignEntityId(3),
+        Channel.META,
+        CampaignKind.INSTANCE,
+        SubmitState.SUBMITTED,
+        SubmittedAt.fake(),
+    )
+    on_linkedin = campaign(
+        ChannelCampaignEntityId(4),
+        Channel.LINKEDIN,
+        CampaignKind.INSTANCE,
+        SubmitState.DRAFT,
+        None,
+    )
+    # A submitted template matches no Variant, so it is no result.
+    submitted_template = campaign(
+        ChannelCampaignEntityId(5),
+        Channel.META,
+        CampaignKind.TEMPLATE,
+        SubmitState.SUBMITTED,
+        SubmittedAt.fake(),
+    )
+    meta_details = {
+        meta.id: MetaCampaignEntity(
+            id=MetaCampaignEntityId(meta.id.root),
+            channel_campaign_id=meta.id,
+            name=CampaignName(f"Campaign {meta.id.root}"),
+            lifetime_budget=None,
+        )
+        for meta in (template, draft, submitted, submitted_template)
+    }
+    linkedin = LinkedInCampaignEntity(
+        id=LinkedInCampaignEntityId(1),
+        channel_campaign_id=on_linkedin.id,
+        campaign_group=Text("Talent"),
+    )
+    view_engine = engine.InMemoryViewEngine(
+        channel_campaign_graph(), compiled_channel_campaigns()
+    )
+    for entity in (
+        company,
+        template,
+        draft,
+        submitted,
+        on_linkedin,
+        submitted_template,
+        *meta_details.values(),
+        linkedin,
+    ):
+        view_engine.put(entity).unwrap()
+
+    def with_meta(row: ChannelCampaignEntity, *without: FieldName) -> engine.ViewRow:
+        """The campaign's own fields but `without`, then its Meta detail's."""
+        detail = meta_details[row.id]
+        return engine.ViewRow(
+            {
+                **{
+                    FieldName(name): value
+                    for name, value in vars(row).items()
+                    if FieldName(name) not in without
+                },
+                FieldName("name"): detail.name,
+                FieldName("lifetime_budget"): detail.lifetime_budget,
+            }
+        )
+
+    assert view_engine.read_union(UnionName("ChannelCampaignUnion")).unwrap() == (
+        engine.VariantRow(
+            view=ViewName("TemplateMetaCampaign"),
+            row=with_meta(template, FieldName("submit_state")),
+        ),
+        engine.VariantRow(
+            view=ViewName("DraftMetaCampaign"),
+            row=with_meta(draft),
+        ),
+        engine.VariantRow(
+            view=ViewName("SubmittedMetaCampaign"),
+            row=with_meta(submitted),
+        ),
+        engine.VariantRow(
+            view=ViewName("LinkedInCampaign"),
+            row=engine.ViewRow(
+                {
+                    **{
+                        FieldName(name): value
+                        for name, value in vars(on_linkedin).items()
+                    },
+                    FieldName("campaign_group"): linkedin.campaign_group,
+                }
+            ),
         ),
     )

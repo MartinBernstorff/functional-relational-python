@@ -38,6 +38,11 @@ class ModulePath(pydantic.RootModel[str], frozen=True):
         return Identifier(self.root.split(".")[0])
 
     @staticmethod
+    def ordered(modules: Iterable[ModulePath]) -> tuple[ModulePath, ...]:
+        """`modules` in module order, each once."""
+        return tuple(sorted(set(modules), key=lambda module: module.root))
+
+    @staticmethod
     def import_sections(
         modules: Iterable[ModulePath],
     ) -> tuple[tuple[ModulePath, ...], ...]:
@@ -45,7 +50,7 @@ class ModulePath(pydantic.RootModel[str], frozen=True):
 
         Each section is sorted, and an empty one is left out.
         """
-        ordered = sorted(set(modules), key=lambda module: module.root)
+        ordered = ModulePath.ordered(modules)
         stdlib = tuple(
             module
             for module in ordered

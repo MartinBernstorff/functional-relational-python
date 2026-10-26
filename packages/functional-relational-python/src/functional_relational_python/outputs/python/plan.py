@@ -1,9 +1,10 @@
-"""Plans the Python output of compiled Views and Payloads: what each generated
-name refers to.
+"""Plans the Python output of compiled Views, Payloads and Unions: what each
+generated name refers to.
 
 For each View and Payload the plan decides its model's Symbol and the Symbols of
-the models nested in it. For each View, when the layout asks for them, it also
-decides its mapping function's Symbol and lookup parameters. Every problem that
+the models nested in it, and for each Union the Symbol of its model, a `type`
+alias. For each View and Union, when the layout asks for them, it also decides
+its mapping function's Symbol and lookup parameters. Every problem that
 depends on where things are generated (a name bound twice in one module, a type
 that cannot be imported, a module that defines what it would be overwritten with)
 is found here, once. The renderers in
@@ -30,6 +31,7 @@ from functional_relational_python.entity_graph.id import OneToOneMarker
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     ModulePath,
+    PythonString,
     Symbol,
     TypeExpression,
     ValueExpression,
@@ -39,6 +41,7 @@ from functional_relational_python.pipeline.payloads import (
     DefinitionName,
     PayloadName,
 )
+from functional_relational_python.pipeline.unions import UnionName
 from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
@@ -48,11 +51,12 @@ from functional_relational_python.support.diagnostic import (
 from functional_relational_python.support.identifier import Identifier
 
 type ModuleLayout = Callable[
-    [compiler.CompiledView | compiler.CompiledPayload], ModulePath
+    [compiler.CompiledView | compiler.CompiledPayload | compiler.CompiledUnion],
+    ModulePath,
 ]
-"""Maps each compiled View or Payload to the module something of it is generated
-into. Only Views have mapping functions, so a layout for mappings receives only
-Views."""
+"""Maps each compiled View, Payload or Union to the module something of it is
+generated into. Only Views and Unions have mapping functions, so a layout for
+mappings receives only those."""
 
 
 class WithoutMappings(pydantic.BaseModel, frozen=True):
@@ -72,12 +76,28 @@ class PythonLayout(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def mappings_into(models: ModuleLayout, mappings: ModulePath) -> PythonLayout:
-        """Every View's mapping function into the one module `mappings`."""
+        """Every View's and Union's mapping function into the one module
+        `mappings`."""
 
-        def into(_: compiler.CompiledView | compiler.CompiledPayload) -> ModulePath:
+        def into(
+            _: compiler.CompiledView
+            | compiler.CompiledPayload
+            | compiler.CompiledUnion,
+        ) -> ModulePath:
             return mappings
 
         return PythonLayout(models=models, mappings=into)
+
+    def model_of(
+        self, compiled: compiler.CompiledView | compiler.CompiledUnion
+    ) -> Symbol:
+        """The Symbol of a View's or Union's own model."""
+        match compiled:
+            case compiler.CompiledView(names=names):
+                name = names.model.name
+            case compiler.CompiledUnion(names=names):
+                name = names.model
+        return Symbol(module=self.models(compiled), qualname=(name.identifier(),))
 
 
 class Scope(pydantic.RootModel[str], frozen=True):
@@ -303,6 +323,29 @@ class ModelPlan(pydantic.BaseModel, frozen=True):
         )
 
 
+class UnionPlan(pydantic.BaseModel, frozen=True):
+    """One Union model to generate: a `type` alias of the `Annotated` union of
+    `variants`, the Variants' models, discriminated by `discriminator`."""
+
+    annotated: typing.ClassVar[Symbol] = Symbol(
+        module=ModulePath("typing"), qualname=(Identifier("Annotated"),)
+    )
+    discriminator_class: typing.ClassVar[Symbol] = Symbol(
+        module=ModulePath("pydantic"), qualname=(Identifier("Discriminator"),)
+    )
+
+    union: UnionName
+    symbol: Symbol
+    discriminator: FieldName
+    variants: tuple[Symbol, ...]
+
+    def uses(self) -> frozenset[Symbol]:
+        """Every Symbol the alias refers to."""
+        return frozenset(
+            {UnionPlan.annotated, UnionPlan.discriminator_class, *self.variants}
+        )
+
+
 class LookupParameter(pydantic.BaseModel, frozen=True):
     """A mapping function's keyword parameter, mapping each value of the field
     `keyed_by` of the Entity `entity` to the Entity: its primary key for a
@@ -322,10 +365,34 @@ class LookupParameter(pydantic.BaseModel, frozen=True):
         return Identifier(f"{snake.root}_by_{keyed_by.root}")
 
 
-class FunctionPlan(pydantic.BaseModel, frozen=True):
+class MappingFunctionPlan(pydantic.BaseModel, frozen=True):
+    """What every mapping function to generate has: its Symbol, the Source it
+    maps, and its keyword parameters, an ID mapping per Entity and field it looks
+    up."""
+
+    symbol: Symbol
+    source: Symbol
+    lookups: tuple[LookupParameter, ...]
+
+    def parameter_imports(self) -> frozenset[ModulePath]:
+        """The modules the function's parameters refer to, each imported whole."""
+        return frozenset(
+            {
+                self.source.module,
+                *(parameter.target.module for parameter in self.lookups),
+                *(parameter.id_type.module for parameter in self.lookups),
+                *((FunctionPlan.mapping,) if self.lookups else ()),
+            }
+        )
+
+    def scope(self) -> Scope:
+        return Scope(self.symbol.describe().root)
+
+
+class FunctionPlan(MappingFunctionPlan, frozen=True):
     """One mapping function to generate: from one instance of the View's Source,
-    and an ID mapping per Entity and field it looks up, to the View's model, or to `None`
-    for a row the View's Filters exclude.
+    and an ID mapping per Entity and field it looks up, to the View's model, or to
+    `None` for a row the View's Filters exclude.
 
     `literals` has the Symbol of every class the Filters' literals are instances
     of, e.g. an enum or a RootModel.
@@ -338,10 +405,7 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
     mapping: typing.ClassVar[ModulePath] = ModulePath("collections.abc")
 
     view: ViewName
-    symbol: Symbol
-    source: Symbol
     model: ModelPlan
-    lookups: tuple[LookupParameter, ...]
     filters: tuple[ir.Filter, ...]
     literals: Mapping[type, Symbol]
 
@@ -455,19 +519,83 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
 
     def imports(self) -> frozenset[ModulePath]:
         """The modules the function refers to, each imported whole."""
-        return frozenset(
-            {
-                self.model.symbol.module,
-                self.source.module,
-                *(parameter.target.module for parameter in self.lookups),
-                *(parameter.id_type.module for parameter in self.lookups),
-                *((FunctionPlan.mapping,) if self.lookups else ()),
-                *(symbol.module for symbol in self.literals.values()),
-            }
+        return self.parameter_imports() | {
+            self.model.symbol.module,
+            *(symbol.module for symbol in self.literals.values()),
+        }
+
+
+class VariantCall(pydantic.BaseModel, frozen=True):
+    """A call of a Variant's mapping function from a Union's: `function`, passed
+    the Source and each of `lookups`, its keyword parameters, by name."""
+
+    function: Symbol
+    lookups: tuple[Identifier, ...]
+
+
+class UnionFunctionPlan(MappingFunctionPlan, frozen=True):
+    """One Union's mapping function to generate: from one instance of the Source
+    its Variants read, and the lookup parameters of every Variant's mapping
+    function, to the model of the first Variant whose function maps it, or to
+    `None` when none does.
+
+    `lookups` has each parameter of a Variant's function once.
+    """
+
+    found: typing.ClassVar[Identifier] = Identifier("found")
+    """The variable holding what the Variants' functions have mapped so far."""
+
+    union: UnionName
+    model: Symbol
+    variants: tuple[VariantCall, ...]
+
+    @staticmethod
+    def of(
+        union: compiler.CompiledUnion,
+        model: Symbol,
+        module: ModulePath,
+        variants: Sequence[FunctionPlan | UnionFunctionPlan],
+    ) -> UnionFunctionPlan:
+        """The Union's mapping function, generated into `module`, building `model`
+        by calling `variants`, the Variants' mapping functions, in turn."""
+        return UnionFunctionPlan(
+            union=union.name,
+            symbol=Symbol(
+                module=module, qualname=(Identifier(union.names.function.root),)
+            ),
+            source=variants[0].source,
+            model=model,
+            lookups=tuple(
+                dict.fromkeys(
+                    parameter for variant in variants for parameter in variant.lookups
+                )
+            ),
+            variants=tuple(
+                VariantCall(
+                    function=variant.symbol,
+                    lookups=tuple(parameter.name for parameter in variant.lookups),
+                )
+                for variant in variants
+            ),
         )
 
-    def scope(self) -> Scope:
-        return Scope(self.symbol.describe().root)
+    def called(self, call: VariantCall) -> Symbol | Identifier:
+        """How the function refers to a Variant's: by name in its own module, else
+        by its Symbol, its module imported whole."""
+        if call.function.module == self.symbol.module:
+            return call.function.bound_name()
+        return call.function
+
+    def imports(self) -> frozenset[ModulePath]:
+        """The modules the function refers to, each imported whole."""
+        return self.parameter_imports() | {
+            self.model.module,
+            *(
+                called.module
+                for call in self.variants
+                if isinstance(called := self.called(call), Symbol)
+            ),
+        }
 
 
 class _AnnotationRenderer:
@@ -534,6 +662,8 @@ class _AnnotationRenderer:
         match default:
             case ir.NoDefault():
                 return default
+            case ir.ScalarDefault(root=str() as text):
+                return PythonString(text).literal()
             case ir.ScalarDefault(root=value):
                 written = repr(value)
             case ir.MissingDefault():
@@ -593,6 +723,8 @@ class _AnnotationRenderer:
         match arg:
             case enum.Enum():
                 return ValueExpression.of_enum_member(self._named(type(arg)), arg)
+            case str():
+                return PythonString(arg).literal()
             case _:
                 return ValueExpression(repr(arg))
 
@@ -727,18 +859,83 @@ class _ModelPlanner:
         self.diagnostics.extend(renderer.diagnostics)
 
 
+class _PlannedUnions(pydantic.BaseModel, frozen=True):
+    """Every Union's model and mapping function, by module."""
+
+    models: Mapping[ModulePath, tuple[UnionPlan, ...]]
+    functions: Mapping[ModulePath, tuple[UnionFunctionPlan, ...]]
+
+    @staticmethod
+    def of(
+        unions: Iterable[compiler.CompiledUnion],
+        layout: PythonLayout,
+        mapped: Mapping[ViewName | UnionName, FunctionPlan | UnionFunctionPlan],
+    ) -> _PlannedUnions:
+        """`unions` has each Union after those nested in it, and `mapped` the
+        planned mapping function of each View.
+
+        A Union gets no mapping function when a Variant's could not be planned,
+        which is reported already.
+        """
+        functions_of = dict(mapped)
+        models: dict[ModulePath, list[UnionPlan]] = {}
+        functions: dict[ModulePath, list[UnionFunctionPlan]] = {}
+        for union in unions:
+            symbol = layout.model_of(union)
+            models.setdefault(symbol.module, []).append(
+                UnionPlan(
+                    union=union.name,
+                    symbol=symbol,
+                    discriminator=union.discriminator,
+                    variants=tuple(map(layout.model_of, union.variants)),
+                )
+            )
+            variants = tuple(
+                functions_of[variant.name]
+                for variant in union.variants
+                if variant.name in functions_of
+            )
+            match layout.mappings:
+                case WithoutMappings():
+                    continue
+                case mappings if len(variants) == len(union.variants):
+                    function = UnionFunctionPlan.of(
+                        union, symbol, mappings(union), variants
+                    )
+                    functions.setdefault(function.symbol.module, []).append(function)
+                    functions_of[union.name] = function
+                case _:
+                    pass
+        return _PlannedUnions(
+            models={module: tuple(planned) for module, planned in models.items()},
+            functions={module: tuple(planned) for module, planned in functions.items()},
+        )
+
+
 class PythonPlan(pydantic.BaseModel, frozen=True):
     """Every model and mapping function to generate, by module: View models in
-    View order, then Payload models in Payload order.
+    View order, then Payload models in Payload order, then Union models with each
+    after the Unions nested in it.
 
     `models` holds each View's and Payload's own model; its nested models are in
-    it. `requiring` are the modules of mapping functions that read a value a View
-    requires, so they define `FunctionPlan.required_helper`.
+    it. `unions` holds each Union's model, and `union_functions` each Union's
+    mapping function. `requiring` are the modules of mapping functions that read
+    a value a View requires, so they define `FunctionPlan.required_helper`.
     """
 
     models: Mapping[ModulePath, tuple[ModelPlan, ...]]
+    unions: Mapping[ModulePath, tuple[UnionPlan, ...]]
     functions: Mapping[ModulePath, tuple[FunctionPlan, ...]]
+    union_functions: Mapping[ModulePath, tuple[UnionFunctionPlan, ...]]
     requiring: frozenset[ModulePath]
+
+    def model_modules(self) -> tuple[ModulePath, ...]:
+        """Every module models go to, in module order."""
+        return ModulePath.ordered(self.models.keys() | self.unions.keys())
+
+    def function_modules(self) -> tuple[ModulePath, ...]:
+        """Every module mapping functions go to, in module order."""
+        return ModulePath.ordered(self.functions.keys() | self.union_functions.keys())
 
     @staticmethod
     def of(
@@ -751,6 +948,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         diagnostics: dict[PlanDiagnostic, None] = {}
         models: dict[ModulePath, list[ModelPlan]] = {}
         functions: dict[ModulePath, list[FunctionPlan]] = {}
+        mapped: dict[ViewName | UnionName, FunctionPlan | UnionFunctionPlan] = {}
         for view in compiled.views:
             model = _ModelPlanner.definition_model(
                 view, layout.models(view), compiled.one_to_one_marker
@@ -765,6 +963,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
             match FunctionPlan.of(view, model.plan, mappings(view)):
                 case Ok(function):
                     functions.setdefault(function.symbol.module, []).append(function)
+                    mapped[view.name] = function
                 case Err(error):
                     unimportable_fields = {
                         diagnostic.annotation
@@ -785,9 +984,12 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
             )
             diagnostics.update(dict.fromkeys(model.diagnostics))
             models.setdefault(model.plan.symbol.module, []).append(model.plan)
+        unions = _PlannedUnions.of(compiled.unions, layout, mapped)
         plan = PythonPlan(
             models={module: tuple(planned) for module, planned in models.items()},
+            unions=unions.models,
             functions={module: tuple(planned) for module, planned in functions.items()},
+            union_functions=unions.functions,
             requiring=frozenset(
                 module
                 for module, planned in functions.items()
@@ -798,56 +1000,82 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         return DiagnosticsError.or_ok(diagnostics, lambda: plan)
 
     def _layout_diagnostics(self) -> Iterable[PlanDiagnostic]:
-        for module, models in self.models.items():
-            namespace = Namespace(Scope(module.root))
-            for model in (m for own in models for m in own.with_nested()):
-                match model.view:
-                    case ViewName():
-                        definition = f"View {model.view.root}"
-                    case PayloadName():
-                        definition = f"Payload {model.view.root}"
-                namespace.define(
-                    model.symbol.bound_name(),
-                    AnnotationText(
-                        f"{model.symbol.describe().root} (the model of {definition})"
-                    ),
-                )
-                for symbol in model.uses:
-                    if symbol.module != module:
-                        namespace.refer(
-                            symbol.bound_name(), symbol.imported().describe()
-                        )
-            yield from namespace.clashes()
-        for module, functions in self.functions.items():
-            namespace = Namespace(Scope(module.root))
-            for function in functions:
-                namespace.define(
-                    function.symbol.bound_name(),
-                    AnnotationText(
-                        f"{function.symbol.describe().root} "
-                        f"(the mapping function of View {function.view.root})"
-                    ),
-                )
-                for imported in function.imports():
-                    namespace.refer_to_module(imported)
-            if module in self.requiring:
-                namespace.define(
-                    FunctionPlan.required_helper,
-                    AnnotationText(
-                        f"{module.root}.{FunctionPlan.required_helper.root} (the "
-                        "function giving each value a View requires)"
-                    ),
-                )
-            yield from namespace.clashes()
-            for function in functions:
-                yield from Namespace.of_function(function).clashes()
+        for module in self.model_modules():
+            yield from self._model_clashes(module)
+        for module in self.function_modules():
+            yield from self._function_clashes(module)
         yield from (
             ModelsAndMappingsInOneModule(module=module)
-            for module in sorted(
-                self.models.keys() & self.functions.keys(),
-                key=lambda module: module.root,
+            for module in ModulePath.ordered(
+                set(self.model_modules()) & set(self.function_modules())
             )
         )
+
+    def _model_clashes(self, module: ModulePath) -> Iterable[NameClash]:
+        """The names the models of `module` and their imports bind twice."""
+        namespace = Namespace(Scope(module.root))
+        defined: list[tuple[Symbol, AnnotationText, Iterable[Symbol]]] = [
+            (
+                union.symbol,
+                AnnotationText(f"the model of Union {union.union.root}"),
+                union.uses(),
+            )
+            for union in self.unions.get(module, ())
+        ]
+        for model in (
+            nested
+            for own in self.models.get(module, ())
+            for nested in own.with_nested()
+        ):
+            match model.view:
+                case ViewName():
+                    definition = f"View {model.view.root}"
+                case PayloadName():
+                    definition = f"Payload {model.view.root}"
+            defined.append(
+                (model.symbol, AnnotationText(f"the model of {definition}"), model.uses)
+            )
+        for symbol, role, uses in defined:
+            namespace.define(
+                symbol.bound_name(),
+                AnnotationText(f"{symbol.describe().root} ({role.root})"),
+            )
+            for used in uses:
+                if used.module != module:
+                    namespace.refer(used.bound_name(), used.imported().describe())
+        return namespace.clashes()
+
+    def _function_clashes(self, module: ModulePath) -> Iterable[NameClash]:
+        """The names the mapping functions of `module`, their imports and the
+        scopes of each bind twice."""
+        functions = self.functions.get(module, ())
+        union_functions = self.union_functions.get(module, ())
+        namespace = Namespace(Scope(module.root))
+        for function in (*union_functions, *functions):
+            match function:
+                case FunctionPlan(view=name):
+                    role = f"the mapping function of View {name.root}"
+                case UnionFunctionPlan(union=name):
+                    role = f"the mapping function of Union {name.root}"
+            namespace.define(
+                function.symbol.bound_name(),
+                AnnotationText(f"{function.symbol.describe().root} ({role})"),
+            )
+            for imported in function.imports():
+                namespace.refer_to_module(imported)
+        if module in self.requiring:
+            namespace.define(
+                FunctionPlan.required_helper,
+                AnnotationText(
+                    f"{module.root}.{FunctionPlan.required_helper.root} (the "
+                    "function giving each value a View requires)"
+                ),
+            )
+        yield from namespace.clashes()
+        for function in functions:
+            yield from Namespace.of_function(function).clashes()
+        for union_function in union_functions:
+            yield from Namespace.of_union_function(union_function).clashes()
 
 
 class Namespace:
@@ -890,6 +1118,35 @@ class Namespace:
                 AnnotationText(f"the parameter for {parameter.target.describe().root}"),
             )
         namespace.refer_to_module(function.model.symbol.module)
+        return namespace
+
+    @staticmethod
+    def of_union_function(function: UnionFunctionPlan) -> Namespace:
+        """A Union function's parameters and variable, the functions it calls by
+        name, and the modules it refers to."""
+        namespace = Namespace(function.scope())
+        namespace.define(
+            FunctionPlan.source_parameter,
+            AnnotationText(
+                f"the parameter for the Source {function.source.describe().root}"
+            ),
+        )
+        for parameter in function.lookups:
+            namespace.define(
+                parameter.name,
+                AnnotationText(f"the parameter for {parameter.target.describe().root}"),
+            )
+        namespace.define(
+            UnionFunctionPlan.found,
+            AnnotationText("the variable holding the mapped Variant"),
+        )
+        for call in function.variants:
+            match function.called(call):
+                case Identifier() as name:
+                    namespace.refer(name, call.function.describe())
+                case Symbol() as symbol:
+                    namespace.refer_to_module(symbol.module)
+        namespace.refer_to_module(function.model.module)
         return namespace
 
     def clashes(self) -> Iterable[NameClash]:

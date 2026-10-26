@@ -2,21 +2,24 @@ import pydantic
 import pytest
 from safe_result import Err, Ok
 
-from functional_relational_python.compiler import compiler
+from functional_relational_python.compiler import compiler, test_compiler
 from functional_relational_python.compiler.model_names import InvalidModelName
 from functional_relational_python.entity_graph.entity_graph import FieldName
 from functional_relational_python.entity_graph.id import Id, IdBase, OneToOneMarker
 from functional_relational_python.outputs.django.models import (
     DjangoModels,
     NoDjangoFieldRule,
+    WithoutDjangoModels,
 )
+from functional_relational_python.outputs.django.queries import UnionInDjangoQueries
 from functional_relational_python.outputs.python.plan import (
     ModelsAndMappingsInOneModule,
     WithoutMappings,
 )
 from functional_relational_python.outputs.python.symbols import ModulePath
-from functional_relational_python.pipeline import steps
+from functional_relational_python.pipeline import conditions, steps
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
+from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.shell import commands
 from functional_relational_python.shell.catalog import (
@@ -54,9 +57,11 @@ class Company(pydantic.BaseModel):
     name: Text
 
 
-def by_kind(compiled: compiler.CompiledView | compiler.CompiledPayload) -> ModulePath:
+def by_kind(
+    compiled: compiler.CompiledView | compiler.CompiledPayload | compiler.CompiledUnion,
+) -> ModulePath:
     match compiled:
-        case compiler.CompiledView():
+        case compiler.CompiledView() | compiler.CompiledUnion():
             return ModulePath("app.cards")
         case compiler.CompiledPayload():
             return ModulePath("app.payloads")
@@ -74,6 +79,7 @@ catalog = Catalog(
             step=steps.omit(FieldName("id")),
         )
     ],
+    unions=[],
     layout=by_kind,
     mappings=ModulePath("app.mappings"),
     django=DjangoModels.fake(),
@@ -287,3 +293,60 @@ def test_generate_reports_the_diagnostics_of_every_output() -> None:
                 InvalidModelName,
                 NoDjangoFieldRule,
             }
+
+
+def tagged_card(tag: Text) -> View:
+    return View(
+        name=ViewName(f"{tag.root.title()}Card"),
+        source=Company,
+        step=steps.pipeline(
+            steps.where(conditions.eq(conditions.field(FieldName("name")), tag)),
+            test_compiler.added_tag(FieldName("kind"), test_compiler.Tag(tag.root)),
+        ),
+    )
+
+
+union_catalog = catalog.model_copy(
+    update={
+        "unions": [
+            Union(
+                name=UnionName("AnyCard"),
+                discriminator=FieldName("kind"),
+                variants=(tagged_card(Text("small")), tagged_card(Text("large"))),
+            )
+        ],
+        "django": WithoutDjangoModels(),
+    }
+)
+
+union_with_django_catalog = union_catalog.model_copy(
+    update={"django": DjangoModels.fake()}
+)
+
+
+def test_generate_writes_a_union_and_its_variants() -> None:
+    filesystem, root = project(in_this_module(Text("union_catalog")))
+    _ = commands.generate(filesystem, root).unwrap()
+
+    cards = filesystem.files[root.file(ModulePath("app.cards").file_path())]
+    mappings = filesystem.files[root.file(ModulePath("app.mappings").file_path())]
+
+    assert "class SmallCard(" in cards.root
+    assert 'type AnyCard = Annotated[SmallCard | LargeCard, Discriminator("kind")]' in (
+        cards.root
+    )
+    assert "def any_card(" in mappings.root
+    assert commands.check(filesystem, root) == Ok(None)
+
+
+def test_generate_reports_a_union_over_an_entity_with_django_queries() -> None:
+    filesystem, root = project(in_this_module(Text("union_with_django_catalog")))
+
+    match commands.generate(filesystem, root):
+        case Ok(written):
+            pytest.fail(f"expected diagnostics, wrote {written}")
+        case Err(error):
+            assert isinstance(error, DiagnosticsError)
+            assert error.diagnostics == (
+                UnionInDjangoQueries(union=UnionName("AnyCard")),
+            )

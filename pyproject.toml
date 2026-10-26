@@ -14,6 +14,7 @@ dev = [
     "django-stubs>=6.1.2",
     "hypothesis>=6.170.0",
     "lefthook>=2.2.2",
+    "mypy>=2.4.0",
     "noprim>=0.4.0",
     "pyrefly>=1.4.0",
     "pytest>=9.1.1",

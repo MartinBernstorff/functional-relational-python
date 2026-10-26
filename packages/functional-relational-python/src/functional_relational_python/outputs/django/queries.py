@@ -67,6 +67,7 @@ from functional_relational_python.outputs.python.symbols import (
     Symbol,
 )
 from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline.unions import UnionName
 from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
@@ -157,6 +158,19 @@ class FilterInDjangoQueries(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class UnionInDjangoQueries(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Union over an Entity, which Django queries do not support yet: its rows
+    would each need converting by the Variant whose Filters keep them."""
+
+    union: UnionName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.union.root}: cannot generate Django queries for it, because it "
+            "is a Union, and Django queries cannot read Unions yet."
+        )
+
+
 class ReverseInQueryError(Exception):
     """Query code was written for a View that reverses a Reference. The renderer
     reports such a View instead, so this means it wrote it anyway."""
@@ -175,6 +189,7 @@ type DjangoQueriesDiagnostic = (
     | ViewModelIntoDjangoModelsModule
     | ReverseInDjangoQueries
     | FilterInDjangoQueries
+    | UnionInDjangoQueries
     | NameClash
 )
 
@@ -277,14 +292,22 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         config: DjangoModels,
         views: Iterable[compiler.CompiledView],
         layout: ModuleLayout,
+        unions: Iterable[compiler.CompiledUnion] = (),
     ) -> Result[GeneratedFiles, DiagnosticsError[DjangoQueriesDiagnostic]]:
         """The module of query code, or every diagnostic.
 
-        `layout` gives the module of each View's model. Views over a Source that
-        is not an Entity get no query code. A View over an Entity that reverses a
-        Reference, or that filters, is a diagnostic. QuerySets are in Entity name order.
+        `layout` gives the module of each View's model. Views and Unions over a
+        Source that is not an Entity get no query code. A View over an Entity that
+        reverses a Reference, or that filters, is a diagnostic, and so is a Union
+        over an Entity: once, rather than once more per Variant View that reverses
+        or filters. QuerySets are in Entity name order.
         """
         views = tuple(views)
+        reported_unions = tuple(
+            union for union in unions if union.source in graph.entities
+        )
+        # A Variant's defects are the Union's, which is reported once instead.
+        in_unions = {leaf.name for union in reported_unions for leaf in union.leaves()}
         renderer = DjangoQueriesRenderer(
             graph=graph,
             config=config,
@@ -310,14 +333,16 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                         view=query.view.name, entity=lookup.target, via=lookup.via
                     )
                     for query in renderer.queries
+                    if query.view.name not in in_unions
                     for lookup in query.view.relation.lookups()
                     if isinstance(lookup, ir.ReverseLookup)
                 ),
                 *(
                     FilterInDjangoQueries(view=query.view.name)
                     for query in renderer.queries
-                    if query.view.relation.filters
+                    if query.view.relation.filters and query.view.name not in in_unions
                 ),
+                *(UnionInDjangoQueries(union=union.name) for union in reported_unions),
                 *renderer._clashes(entities),
             ),
             lambda: GeneratedFiles(

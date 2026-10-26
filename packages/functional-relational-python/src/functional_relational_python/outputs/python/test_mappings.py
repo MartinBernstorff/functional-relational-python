@@ -1,5 +1,6 @@
 import contextlib
 import enum
+import os
 import re
 import subprocess
 import sys
@@ -10,11 +11,11 @@ from typing import Annotated, ClassVar, Literal
 
 import pydantic
 import pytest
-from hypothesis import event, given, settings
+from hypothesis import assume, event, given, settings
 from hypothesis import strategies as st
 from safe_result import Err, Ok
 
-from functional_relational_python.compiler import compiler
+from functional_relational_python.compiler import compiler, test_compiler
 from functional_relational_python.compiler.test_compiler import (
     Depth,
     Score,
@@ -51,6 +52,7 @@ from functional_relational_python.outputs.python.symbols import (
     ValueExpression,
 )
 from functional_relational_python.pipeline import conditions, ir, steps
+from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticsError
 from functional_relational_python.support.filesystem import (
@@ -159,8 +161,10 @@ def named(*names: FieldName) -> ir.Select:
     return steps.select(lambda field: field.name in names)
 
 
-def compile_all(views: Iterable[View]) -> compiler.CompiledViews:
-    match compiler.compile_views(entity_graph(), views):
+def compile_all(
+    views: Iterable[View], unions: Iterable[Union] = ()
+) -> compiler.CompiledViews:
+    match compiler.compile_views(entity_graph(), views, unions):
         case Ok(compiled):
             return compiled
         case Err(error):
@@ -225,6 +229,7 @@ def plan_of(compiled: compiler.CompiledViews, layout: PythonLayout) -> PythonPla
         compiler.CompiledCatalog(
             views=compiled.views,
             payloads=(),
+            unions=compiled.unions,
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         layout,
@@ -247,6 +252,10 @@ class Generated:
         return PythonLayout(
             models=into(Generated.models), mappings=into(Generated.mappings)
         )
+
+    @staticmethod
+    def modules() -> tuple[ModulePath, ModulePath]:
+        return (Generated.models, Generated.mappings)
 
     @staticmethod
     def text(files: tuple[GeneratedFile, ...]) -> FileText:
@@ -843,8 +852,9 @@ def test_models_and_mappings_both_count_as_generated() -> None:
     ]
 
 
-def test_generated_models_and_mappings_pass_the_type_checker(tmp_path: Path) -> None:
-    plan = plan_of(
+def type_checked_plan() -> PythonPlan:
+    """Models and mapping functions with every kind of field and Union."""
+    return plan_of(
         compile_all(
             [
                 *golden_views(),
@@ -854,12 +864,18 @@ def test_generated_models_and_mappings_pass_the_type_checker(tmp_path: Path) -> 
                 *required_views(),
                 flattened_employee(),
                 flattened_profile(),
-            ]
+            ],
+            [employee_union()],
         ),
         Generated.layout(),
     )
+
+
+def test_generated_models_and_mappings_pass_the_type_checker(tmp_path: Path) -> None:
     generated = tmp_path / "generated"
-    PythonRenderer.render(plan).write(LocalFileSystem(), Directory(generated)).unwrap()
+    PythonRenderer.render(type_checked_plan()).write(
+        LocalFileSystem(), Directory(generated)
+    ).unwrap()
     source_root = Path(__file__).parents[3]
     _ = (tmp_path / "pyrefly.toml").write_text(
         f'search-path = ["{generated}", "{source_root}"]\n'
@@ -872,6 +888,34 @@ def test_generated_models_and_mappings_pass_the_type_checker(tmp_path: Path) -> 
     result = subprocess.run(
         [sys.executable, "-m", "pyrefly", "check", "--config", "pyrefly.toml"],
         cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_generated_models_and_mappings_pass_mypy_strict(tmp_path: Path) -> None:
+    generated = Directory(tmp_path)
+    PythonRenderer.render(type_checked_plan()).write(
+        LocalFileSystem(), generated
+    ).unwrap()
+    source_root = Path(__file__).parents[3]
+
+    # Imported modules are checked only as far as the generated code uses them.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--strict",
+            "--follow-imports=silent",
+            "--no-incremental",
+            *(module.file_path().root.as_posix() for module in Generated.modules()),
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "MYPYPATH": str(source_root)},
         capture_output=True,
         text=True,
         check=False,
@@ -1860,3 +1904,254 @@ def test_any_required_mapping_function_is_as_ruff_formats_it(
 ) -> None:
     diff = ruff_format_diff(generated_mappings(case.views))
     assert diff == FileText(""), diff.root
+
+
+# Unions.
+
+
+def tagged(tag: Text) -> steps.Step:
+    return test_compiler.added_tag(FieldName("kind"), test_compiler.Tag(tag.root))
+
+
+def employee_union() -> Union:
+    """Mentored Employees, with their mentor, then the rest by whether they are
+    called Ann, with their Profile if they have one."""
+    mentor = conditions.field(FieldName("mentor_id"))
+    ann = conditions.eq(conditions.field(FieldName("name")), Text("Ann"))
+    unmentored = steps.pipeline(
+        steps.where(conditions.is_null(mentor)),
+        steps.project([FieldName("id"), FieldName("name")]),
+        steps.reverse(Profile, steps.project([FieldName("bio")])),
+        tagged(Text("unmentored")),
+    )
+    return Union(
+        name=UnionName("EmployeeByMentor"),
+        discriminator=FieldName("kind"),
+        variants=(
+            View(
+                name=ViewName("MentoredEmployee"),
+                source=Employee,
+                step=steps.pipeline(
+                    steps.where(conditions.not_(conditions.is_null(mentor))),
+                    steps.project([FieldName("id"), FieldName("mentor_id")]),
+                    steps.hydrate(steps.project([FieldName("name")])),
+                    tagged(Text("mentored")),
+                ),
+            ),
+            Union(
+                name=UnionName("UnmentoredEmployee"),
+                discriminator=FieldName("named"),
+                variants=(
+                    View(
+                        name=ViewName("UnmentoredAnn"),
+                        source=Employee,
+                        step=steps.pipeline(
+                            steps.where(ann),
+                            unmentored,
+                            steps.add(FieldName("named"), Literal["ann"], "ann"),
+                        ),
+                    ),
+                    View(
+                        name=ViewName("UnmentoredOther"),
+                        source=Employee,
+                        step=steps.pipeline(
+                            unmentored,
+                            steps.add(FieldName("named"), Literal["other"], "other"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def test_golden_mapping_functions_of_a_union() -> None:
+    plan = plan_of(compile_all([], [employee_union()]), Generated.layout())
+
+    text = Generated.text(MappingsRenderer.files(plan)).root
+
+    assert text.endswith(
+        """
+
+def unmentored_employee(
+    source: functional_relational_python.outputs.python.test_mappings.Employee,
+    *,
+    profile_by_employee_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.EmployeeId,
+        functional_relational_python.outputs.python.test_mappings.Profile,
+    ],
+) -> frp_generated_models.UnmentoredEmployee | None:
+    found: frp_generated_models.UnmentoredEmployee | None
+    found = unmentored_ann(source, profile_by_employee_id=profile_by_employee_id)
+    if found is None:
+        found = unmentored_other(source, profile_by_employee_id=profile_by_employee_id)
+    return found
+
+
+def employee_by_mentor(
+    source: functional_relational_python.outputs.python.test_mappings.Employee,
+    *,
+    employee_by_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.EmployeeId,
+        functional_relational_python.outputs.python.test_mappings.Employee,
+    ],
+    profile_by_employee_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.EmployeeId,
+        functional_relational_python.outputs.python.test_mappings.Profile,
+    ],
+) -> frp_generated_models.EmployeeByMentor | None:
+    found: frp_generated_models.EmployeeByMentor | None
+    found = mentored_employee(source, employee_by_id=employee_by_id)
+    if found is None:
+        found = unmentored_employee(
+            source, profile_by_employee_id=profile_by_employee_id
+        )
+    return found
+"""
+    )
+    assert ruff_format_diff(FileText(text)) == FileText("")
+
+
+def test_a_union_function_calls_variant_functions_in_another_module_by_module() -> None:
+    union = employee_union()
+    unions = ModulePath("frp_generated_union_mappings")
+
+    def mappings(
+        compiled: compiler.CompiledView
+        | compiler.CompiledPayload
+        | compiler.CompiledUnion,
+    ) -> ModulePath:
+        match compiled:
+            case compiler.CompiledUnion():
+                return unions
+            case compiler.CompiledView() | compiler.CompiledPayload():
+                return Generated.mappings
+
+    plan = plan_of(
+        compile_all([], [union]),
+        PythonLayout(models=into(Generated.models), mappings=mappings),
+    )
+
+    texts = {file.path: file.text.root for file in MappingsRenderer.files(plan)}
+    text = texts[unions.file_path()]
+
+    assert "import frp_generated_mappings\n" in text
+    assert (
+        "    found = frp_generated_mappings.unmentored_ann(\n"
+        "        source, profile_by_employee_id=profile_by_employee_id\n"
+        "    )\n"
+    ) in text
+    # The outer Union calls the nested one in its own module by name.
+    assert "    found = mentored_employee(" not in text
+    assert "        found = unmentored_employee(\n" in text
+
+
+def test_a_union_function_returns_nothing_for_a_row_no_variant_keeps() -> None:
+    union = Union(
+        name=UnionName("AnnOrBo"),
+        discriminator=FieldName("kind"),
+        variants=tuple(
+            View(
+                name=ViewName(f"{name}Employee"),
+                source=Employee,
+                step=steps.pipeline(
+                    steps.where(
+                        conditions.eq(conditions.field(FieldName("name")), Text(name))
+                    ),
+                    tagged(Text(name.lower())),
+                ),
+            )
+            for name in ("Ann", "Bo")
+        ),
+    )
+    cy = Employee(
+        id=EmployeeId(1), name=Text("Cy"), department_id=DepartmentId(1), mentor_id=None
+    )
+
+    with mapping_functions(plan_of(compile_all([], [union]), Generated.layout())) as (
+        module
+    ):
+        assert module.ann_or_bo(cy) is None
+
+
+@st.composite
+def union_cases(draw: st.DrawFn) -> DifferentialCase:
+    """A Union of Views over one Source, each tagged by an added field, and each
+    with a random pipeline, which starts by filtering with a random Condition;
+    the last Variant's may keep every row. Filters may overlap, so the first
+    Variant keeping a row wins."""
+    stored = draw(entities())
+    source = draw(st.sampled_from([Company, Wide, Department, Employee, Profile]))
+    # With one row, at most one Variant gives a result.
+    _ = assume(sum(isinstance(entity, source) for entity in stored) > 1)
+    tags = (Literal["v0"], Literal["v1"], Literal["v2"])
+    count = draw(st.integers(min_value=2, max_value=len(tags)))
+    variants: list[View] = []
+    for index in range(count):
+        # Without a Filter, a Variant keeps every row the ones before leave.
+        filters = draw(
+            st.lists(
+                where_conditions(source, stored, Depth(0)),
+                min_size=0 if index == count - 1 else 1,
+                max_size=2,
+            )
+        )
+        variants.append(
+            View(
+                name=ViewName(f"Variant{index}"),
+                source=source,
+                step=steps.pipeline(
+                    *map(steps.where, filters),
+                    draw(pipelines(entity_graph(), source, Depth(1))),
+                    steps.add(FieldName("variant_tag"), tags[index], f"v{index}"),
+                ),
+            )
+        )
+    return DifferentialCase(views=tuple(variants), entities=stored)
+
+
+@given(union_cases())
+def test_union_mapping_functions_give_the_same_results_as_the_engine(
+    case: DifferentialCase,
+) -> None:
+    union = Union(
+        name=UnionName("Variants"),
+        discriminator=FieldName("variant_tag"),
+        variants=case.views,
+    )
+    compiled = compile_all([], [union])
+    view_engine = engine.InMemoryViewEngine(entity_graph(), compiled)
+    for entity in case.entities:
+        view_engine.put(entity).unwrap()
+    plan = plan_of(compiled, Generated.layout())
+    (function,) = plan.union_functions[Generated.mappings]
+    (compiled_union,) = compiled.unions
+    lookups = {
+        parameter.name.root: {
+            getattr(entity, parameter.keyed_by.root): entity
+            for entity in case.entities
+            if isinstance(entity, parameter.entity)
+        }
+        for parameter in function.lookups
+    }
+
+    with mapping_functions(plan) as module:
+        mapped = [
+            module.variants(entity, **lookups)
+            for entity in case.entities
+            if isinstance(entity, compiled_union.source)
+        ]
+        mapped_rows = [
+            (ViewName(type(model).__name__), list(Executed.row_of(model).root.items()))
+            for model in mapped
+            if model is not None
+        ]
+
+    engine_rows = [
+        (row.view, list(row.row.root.items()))
+        for row in view_engine.read_union(union.name).unwrap()
+    ]
+    # Catches a strategy whose Variants all keep every row, or none.
+    event(f"several variants give rows: {len({view for view, _ in mapped_rows}) > 1}")
+    event(f"a row matches no variant: {len(mapped_rows) < len(mapped)}")
+    assert mapped_rows == engine_rows
