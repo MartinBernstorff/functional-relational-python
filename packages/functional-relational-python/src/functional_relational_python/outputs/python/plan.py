@@ -11,6 +11,7 @@ defines what it would be overwritten with) is found here, once. The renderers in
 The compiler has already checked the names themselves (`model_names`).
 """
 
+import keyword
 import types
 import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -26,6 +27,7 @@ from functional_relational_python.outputs.python.symbols import (
     ModulePath,
     Symbol,
     TypeExpression,
+    ValueExpression,
 )
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.payloads import (
@@ -208,11 +210,12 @@ class Inherited(pydantic.BaseModel, frozen=True):
 
 
 class ModelField(pydantic.BaseModel, frozen=True):
-    """A field of a planned model: the Relation field it holds, and its type as
-    source, or that the model inherits it from its base."""
+    """A field of a planned model: the Relation field it holds, and its type and
+    default as source, or that the model inherits it from its base."""
 
     field: ir.RelationField
     type: TypeExpression | Inherited
+    default: ValueExpression | ir.NoDefault
 
 
 class ModelPlan(pydantic.BaseModel, frozen=True):
@@ -352,7 +355,8 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
 
 
 class _AnnotationRenderer:
-    """Writes one field's annotation as source, collecting what it refers to.
+    """Writes one field's annotation and default as source, collecting what they
+    refer to.
 
     Problems are collected rather than returned early, so every unsupported part
     of an annotation is reported.
@@ -360,6 +364,9 @@ class _AnnotationRenderer:
 
     literal: typing.ClassVar[Symbol] = Symbol(
         module=ModulePath("typing"), qualname=(Identifier("Literal"),)
+    )
+    missing: typing.ClassVar[Symbol] = Symbol(
+        module=ModulePath("pydantic"), qualname=(Identifier("MISSING"),)
     )
 
     def __init__(self, view: DefinitionName, field: FieldName | None) -> None:
@@ -395,6 +402,30 @@ class _AnnotationRenderer:
         if isinstance(annotation, (type, typing.TypeAliasType)):
             return self._named(annotation)
         return self._unsupported(annotation)
+
+    def render_default(
+        self, default: ir.DefaultValue | ir.NoDefault
+    ) -> ValueExpression | ir.NoDefault:
+        match default:
+            case ir.NoDefault():
+                return default
+            case ir.ScalarDefault(root=value):
+                written = repr(value)
+            case ir.MissingDefault():
+                self.symbols.add(_AnnotationRenderer.missing)
+                written = _AnnotationRenderer.missing.reference().root
+            case ir.EmptyListDefault():
+                written = "[]"
+            case ir.EmptyDictDefault():
+                written = "{}"
+            case ir.EnumDefault(member=member):
+                enum_class = self._named(type(member)).root
+                name = member.name
+                if name.isidentifier() and not keyword.iskeyword(name):
+                    written = f"{enum_class}.{name}"
+                else:
+                    written = f"{enum_class}[{name!r}]"
+        return ValueExpression(written)
 
     def _parameterised(
         self,
@@ -484,8 +515,8 @@ class _ModelPlanner:
         """The model of `relation`, subclassing `base`.
 
         The compiler has checked that each kept field `base` declares has the type
-        it declares, so the model inherits it. Nested models subclass the default
-        base.
+        it declares, so the model inherits it, unless a step gave it a default,
+        which only a declaration can set. Nested models subclass the default base.
         """
         fields: list[ModelField] = []
         uses: set[Symbol] = set()
@@ -496,7 +527,10 @@ class _ModelPlanner:
         for field in relation.fields:
             renderer = _AnnotationRenderer(self.view, field.name)
             match field:
-                case _ if field.name.root in base.model_fields:
+                case _ if (
+                    field.name.root in base.model_fields
+                    and field.default == ir.NoDefault()
+                ):
                     rendered = Inherited()
                 case ir.Field():
                     rendered = renderer.render(field.annotation())
@@ -510,7 +544,13 @@ class _ModelPlanner:
                     rendered = field.optionality().annotate_text(
                         model.symbol.reference()
                     )
-            fields.append(ModelField(field=field, type=rendered))
+            fields.append(
+                ModelField(
+                    field=field,
+                    type=rendered,
+                    default=renderer.render_default(field.default),
+                )
+            )
             self._record(renderer, uses)
         return ModelPlan(
             view=self.view,

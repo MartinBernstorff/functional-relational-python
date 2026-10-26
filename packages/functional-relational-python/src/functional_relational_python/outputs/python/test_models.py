@@ -1,3 +1,4 @@
+import enum
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -21,7 +22,7 @@ from functional_relational_python.outputs.python.plan import (
 )
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import ModulePath
-from functional_relational_python.pipeline import steps
+from functional_relational_python.pipeline import ir, steps
 from functional_relational_python.pipeline.payloads import (
     DefinitionName,
     Payload,
@@ -220,6 +221,24 @@ class CompanyUpdate(PutModel[CompanyId], frozen=True):
     )
 
 
+class ParentBase(pydantic.BaseModel):
+    parent: CompanyId | None
+
+
+def test_a_field_the_base_declares_is_declared_again_to_set_its_default() -> None:
+    parent = FieldName("parent")
+    payload = Payload(
+        name=PayloadName("CompanyCreate"),
+        source=Company,
+        step=steps.pipeline(steps.project([parent]), steps.default(parent, None)),
+        base=ParentBase,
+    )
+
+    text = generate([], [payload], single_module(ModulePath.fake())).files[0].text
+
+    assert "    parent: CompanyId | None = None\n" in text.root
+
+
 def test_nested_models_subclass_the_default_base() -> None:
     parent = steps.select(lambda field: field.name == FieldName("parent"))
     tree = View(
@@ -338,6 +357,155 @@ def test_each_module_is_one_file_in_module_order() -> None:
     ]
 
 
+class Colour(enum.Enum):
+    RED = "red"
+
+
+class Settings(pydantic.BaseModel):
+    note: Text | None
+    label: Text
+    colour: Colour
+
+
+class DefaultCase(pydantic.BaseModel, frozen=True):
+    """How a default on `field` of Settings is written, and what it imports.
+
+    Only the generated text is checked, so the field's type need not fit the value.
+    """
+
+    field: FieldName
+    value: ir.UncheckedDefault
+    line: Text
+    imports: Text
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        DefaultCase(
+            field=FieldName("note"),
+            value=None,
+            line=Text("note: Text | None = None"),
+            imports=Text(
+                "from functional_relational_python.outputs.python.test_models "
+                "import Text\nfrom pydantic import BaseModel\n"
+            ),
+        ),
+        DefaultCase(
+            field=FieldName("label"),
+            value=pydantic.MISSING,
+            line=Text("label: Text = MISSING"),
+            imports=Text(
+                "from functional_relational_python.outputs.python.test_models "
+                "import Text\nfrom pydantic import BaseModel, MISSING\n"
+            ),
+        ),
+        DefaultCase(
+            field=FieldName("label"),
+            value=3,
+            line=Text("label: Text = 3"),
+            imports=Text(
+                "from functional_relational_python.outputs.python.test_models "
+                "import Text\nfrom pydantic import BaseModel\n"
+            ),
+        ),
+        DefaultCase(
+            field=FieldName("label"),
+            value=0.5,
+            line=Text("label: Text = 0.5"),
+            imports=Text(
+                "from functional_relational_python.outputs.python.test_models "
+                "import Text\nfrom pydantic import BaseModel\n"
+            ),
+        ),
+        DefaultCase(
+            field=FieldName("label"),
+            value="it's",
+            line=Text('label: Text = "it\'s"'),
+            imports=Text(
+                "from functional_relational_python.outputs.python.test_models "
+                "import Text\nfrom pydantic import BaseModel\n"
+            ),
+        ),
+        DefaultCase(
+            field=FieldName("label"),
+            value=False,
+            line=Text("label: Text = False"),
+            imports=Text(
+                "from functional_relational_python.outputs.python.test_models "
+                "import Text\nfrom pydantic import BaseModel\n"
+            ),
+        ),
+        DefaultCase(
+            field=FieldName("label"),
+            value=[],
+            line=Text("label: Text = []"),
+            imports=Text(
+                "from functional_relational_python.outputs.python.test_models "
+                "import Text\nfrom pydantic import BaseModel\n"
+            ),
+        ),
+        DefaultCase(
+            field=FieldName("label"),
+            value={},
+            line=Text("label: Text = {}"),
+            imports=Text(
+                "from functional_relational_python.outputs.python.test_models "
+                "import Text\nfrom pydantic import BaseModel\n"
+            ),
+        ),
+        DefaultCase(
+            field=FieldName("colour"),
+            value=Colour.RED,
+            line=Text("colour: Colour = Colour.RED"),
+            imports=Text(
+                "from functional_relational_python.outputs.python.test_models "
+                "import Colour\nfrom pydantic import BaseModel\n"
+            ),
+        ),
+    ],
+    ids=["none", "missing", "int", "float", "str", "bool", "list", "dict", "enum"],
+)
+def test_golden_default(case: DefaultCase) -> None:
+    files = generate(
+        [
+            View(
+                name=ViewName("Defaulted"),
+                source=Settings,
+                step=steps.pipeline(
+                    steps.project([case.field]), steps.default(case.field, case.value)
+                ),
+            )
+        ],
+        [],
+        single_module(ModulePath.fake()),
+    )
+
+    assert files.files[0].text == FileText(
+        f"""\
+# Generated by functional-relational-python. Do not edit.
+# Regenerate with `frp generate`; `frp check` fails when this is stale.
+
+{case.imports.root}
+
+class Defaulted(BaseModel, frozen=True):
+    {case.line.root}
+"""
+    )
+
+
+def defaulted_settings() -> View:
+    """Settings with the defaults its field types allow."""
+    return View(
+        name=ViewName("DefaultedSettings"),
+        source=Settings,
+        step=steps.pipeline(
+            steps.default(FieldName("note"), None),
+            steps.default(FieldName("colour"), Colour.RED),
+        ),
+    )
+
+
 class ATypeWithAVeryLongNameSoThatImportsWrap(pydantic.RootModel[str], frozen=True):
     pass
 
@@ -382,6 +550,7 @@ def test_generated_modules_pass_the_type_checker(tmp_path: Path) -> None:
             ),
             View(name=ViewName("WithInner"), source=Outer, step=steps.pipeline()),
             *hydrated_views(),
+            defaulted_settings(),
         ],
         base_payloads(),
         single_module(ModulePath("generated.views")),

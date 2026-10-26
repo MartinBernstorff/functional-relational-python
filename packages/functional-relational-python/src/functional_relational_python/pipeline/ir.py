@@ -5,6 +5,7 @@ and derives its Relation: the fields a View result will have, each with its type
 and the Value that computes it. Backends run the Relation, not the node tree.
 """
 
+import enum
 from collections.abc import Callable, Collection, Mapping
 
 import pydantic
@@ -88,7 +89,57 @@ class Resolve(pydantic.BaseModel, frozen=True):
     then: Callable[[Node], Node]
 
 
-type Node = FromSource | Omit | Rename | RenameSelected | Project | Resolve
+type UncheckedDefault = object
+"""A value given to `default`, before the compiler checks that it is a literal."""
+
+
+class Default(pydantic.BaseModel, frozen=True):
+    """Sets the default of one named field, or of every selected field, in the
+    generated model.
+
+    `value` is unchecked: the compiler checks that it is a literal a generated
+    model can write out.
+    """
+
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
+    input: Node
+    fields: FieldName | Select
+    value: UncheckedDefault
+
+
+type Node = FromSource | Omit | Rename | RenameSelected | Project | Resolve | Default
+
+
+class NoDefault(pydantic.BaseModel, frozen=True):
+    """The field is required: its generated model gives it no default."""
+
+
+class ScalarDefault(pydantic.RootModel[None | bool | int | float | str], frozen=True):
+    """A default written as its `repr`: `None`, a boolean, a finite number or a
+    string."""
+
+
+class MissingDefault(pydantic.BaseModel, frozen=True):
+    """Pydantic's `MISSING` sentinel: the field is left out when unset."""
+
+
+class EmptyListDefault(pydantic.BaseModel, frozen=True):
+    pass
+
+
+class EmptyDictDefault(pydantic.BaseModel, frozen=True):
+    pass
+
+
+class EnumDefault(pydantic.BaseModel, frozen=True):
+    member: enum.Enum
+
+
+type DefaultValue = (
+    ScalarDefault | MissingDefault | EmptyListDefault | EmptyDictDefault | EnumDefault
+)
+"""A literal a generated model can write out as a field's default."""
 
 
 class SourceField(pydantic.BaseModel, frozen=True):
@@ -127,12 +178,18 @@ class Field(pydantic.BaseModel, frozen=True):
     name: FieldName
     info: FieldInfo
     value: Value
+    default: DefaultValue | NoDefault
 
     @staticmethod
-    def looked_up(name: FieldName, lookup: Lookup) -> Field:
+    def looked_up(
+        name: FieldName, lookup: Lookup, default: DefaultValue | NoDefault
+    ) -> Field:
         """The field holding the Entity `lookup` finds, typed by `lookup.annotation()`."""
         return Field(
-            name=name, info=FieldInfo.from_annotation(lookup.annotation()), value=lookup
+            name=name,
+            info=FieldInfo.from_annotation(lookup.annotation()),
+            value=lookup,
+            default=default,
         )
 
     def annotation(self) -> RuntimeAnnotation:
@@ -152,6 +209,7 @@ class NestedField(pydantic.BaseModel, frozen=True):
     name: FieldName
     value: Lookup
     relation: Relation
+    default: DefaultValue | NoDefault
 
     def optionality(self) -> Optionality:
         return self.value.optionality
@@ -177,6 +235,7 @@ class Relation(pydantic.BaseModel, frozen=True):
                     name=FieldName(name),
                     info=info,
                     value=SourceField(field=FieldName(name)),
+                    default=NoDefault(),
                 )
                 for name, info in node.source.model_fields.items()
             ),
@@ -217,6 +276,20 @@ class Relation(pydantic.BaseModel, frozen=True):
             source=self.source,
             fields=tuple(
                 field.model_copy(update={"name": names[field.name]})
+                if field.name in names
+                else field
+                for field in self.fields
+            ),
+        )
+
+    def defaulted(
+        self, names: Collection[FieldName], default: DefaultValue
+    ) -> Relation:
+        """Gives each field in `names` the default `default`, replacing any other."""
+        return Relation(
+            source=self.source,
+            fields=tuple(
+                field.model_copy(update={"default": default})
                 if field.name in names
                 else field
                 for field in self.fields

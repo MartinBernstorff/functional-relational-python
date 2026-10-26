@@ -73,6 +73,10 @@ class TypeExpression(pydantic.RootModel[str], frozen=True):
     """An annotation as it is written in generated source."""
 
 
+class ValueExpression(pydantic.RootModel[str], frozen=True):
+    """A value as it is written in generated source, e.g. a field's default."""
+
+
 class Symbol(pydantic.BaseModel, frozen=True):
     """A module-level object generated source refers to, e.g. `pydantic.BaseModel`.
 

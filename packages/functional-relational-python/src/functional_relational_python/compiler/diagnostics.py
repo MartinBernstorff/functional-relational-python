@@ -140,6 +140,28 @@ class BaseFieldIsNestedModel(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class DefaultText(pydantic.RootModel[str], frozen=True):
+    """How a default's value reads in a diagnostic: its `repr`."""
+
+    @staticmethod
+    def of(value: ir.UncheckedDefault) -> DefaultText:
+        return DefaultText(repr(value))
+
+
+class NonLiteralDefault(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`default` got a value that is not a literal a generated model can write out."""
+
+    view: DefinitionName
+    value: DefaultText
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot use {self.value.root} as a default. A default "
+            "is None, MISSING, a finite number, a string, a boolean, an empty list "
+            "or dict, or an enum member."
+        )
+
+
 type CompileDiagnostic = (
     UnknownField
     | RenameOntoExistingField
@@ -149,6 +171,7 @@ type CompileDiagnostic = (
     | NotAReference
     | UnresolvableReference
     | ResolvedNameCollision
+    | NonLiteralDefault
     | SharedModelName
     | BaseFieldTypeMismatch
     | BaseFieldIsNestedModel
