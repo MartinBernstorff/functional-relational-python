@@ -605,6 +605,46 @@ class TagText(pydantic.RootModel[str], frozen=True):
         return TagText(repr(tag))
 
 
+class FieldDefaultText(pydantic.RootModel[str], frozen=True):
+    """How a field's default reads in a diagnostic: as a generated model writes
+    it."""
+
+    @staticmethod
+    def of(default: ir.DefaultValue | ir.NoDefault) -> FieldDefaultText:
+        match default:
+            case ir.NoDefault():
+                return FieldDefaultText("no default")
+            case ir.ScalarDefault(root=value):
+                return FieldDefaultText(repr(value))
+            case ir.EnumDefault(member=member):
+                return FieldDefaultText(repr(member))
+            case ir.MissingDefault():
+                return FieldDefaultText("MISSING")
+            case ir.EmptyListDefault():
+                return FieldDefaultText("[]")
+            case ir.EmptyDictDefault():
+                return FieldDefaultText("{}")
+
+
+class DiscriminatorDefaultNotTag(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Union's Variant, or a View or Payload of a Union nested in it, gives the
+    Discriminator a default other than its Tag, such as `MISSING`, so its model
+    can be built without its Tag."""
+
+    view: UnionName
+    variant: ViewName | PayloadName
+    discriminator: FieldName
+    tag: TagText
+    default: FieldDefaultText
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: the Variant {self.variant.root} defaults "
+            f"'{self.discriminator.root}' to {self.default.root}, not its Tag "
+            f"{self.tag.root}. Give it no default, or its Tag."
+        )
+
+
 class SharedTag(pydantic.BaseModel, Diagnostic, frozen=True):
     """Several Variants of a Union have the same Tag, so a model cannot tell which
     one it is."""
@@ -763,6 +803,7 @@ type CompileDiagnostic = (
     | model_names.InvalidUnionName
     | VariantWithoutDiscriminator
     | UntaggedVariant
+    | DiscriminatorDefaultNotTag
     | SharedTag
     | NestedUnionTagsDiffer
     | VariantSourcesDiffer

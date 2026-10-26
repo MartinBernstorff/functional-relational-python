@@ -4172,14 +4172,16 @@ def test_a_union_of_payloads_compiles_with_its_variants_as_payloads() -> None:
     assert [leaf.name for leaf in compiled_union.leaves()] == [
         variant.name for variant in union.payloads()
     ]
-    assert [compiled.name for compiled in compiled.payloads] == [
+    assert [payload.name for payload in compiled.payloads] == [
         variant.name for variant in union.payloads()
     ]
     assert compiled.unions == ()
 
 
-def test_compiling_a_union_of_payloads_as_views_is_a_diagnostic() -> None:
-    union = paid_or_free()
+def test_compiling_a_union_of_payloads_as_views_is_only_that_diagnostic() -> None:
+    union = paid_or_free(
+        payload(PayloadName("Defective"), steps.omit(FieldName("missing")))
+    )
 
     assert union_diagnostics(union) == (
         diagnostics.PayloadUnionInViews(view=union.name),
@@ -4240,6 +4242,32 @@ def test_a_payload_typing_the_discriminator_by_no_one_tag_is_a_diagnostic() -> N
             variant=untagged.name,
             discriminator=union.discriminator,
             annotation=Plan,
+        ),
+    )
+
+
+def test_a_discriminator_defaulting_to_other_than_its_tag_is_a_diagnostic() -> None:
+    defaulted = payload(
+        PayloadName("Defaulted"),
+        steps.retype_to(FieldName("plan"), Literal[Plan.PAID]),
+        steps.default(FieldName("plan"), MISSING),
+    )
+    union = union_of(
+        UnionName("Writes"),
+        FieldName("plan"),
+        defaulted,
+        payload(
+            PayloadName("Free"), steps.retype_to(FieldName("plan"), Literal[Plan.FREE])
+        ),
+    )
+
+    assert payload_union_diagnostics(union) == (
+        diagnostics.DiscriminatorDefaultNotTag(
+            view=union.name,
+            variant=defaulted.name,
+            discriminator=union.discriminator,
+            tag=diagnostics.TagText.of(Plan.PAID),
+            default=diagnostics.FieldDefaultText("MISSING"),
         ),
     )
 
@@ -4568,6 +4596,19 @@ def test_a_union_needs_two_variants() -> None:
             ),
         ),
         (
+            diagnostics.DiscriminatorDefaultNotTag(
+                view=UnionName("Writes"),
+                variant=PayloadName("Defaulted"),
+                discriminator=FieldName("plan"),
+                tag=diagnostics.TagText.of(Plan.PAID),
+                default=diagnostics.FieldDefaultText("MISSING"),
+            ),
+            (
+                "Writes: the Variant Defaulted defaults 'plan' to MISSING, not its "
+                "Tag <Plan.PAID: 'paid'>. Give it no default, or its Tag."
+            ),
+        ),
+        (
             diagnostics.PayloadUnionInViews(view=UnionName("Writes")),
             (
                 "Writes: a Union of Payloads is a write model, but `compile_views` "
@@ -4586,6 +4627,7 @@ def test_a_union_needs_two_variants() -> None:
         "invalid-name",
         "unreachable",
         "shared-name",
+        "discriminator-default",
         "payload-union-in-views",
     ],
 )

@@ -56,27 +56,22 @@ class Union(pydantic.BaseModel, frozen=True):
     def views(self) -> tuple[View, ...]:
         """The Views among this Union's Variants and those of the Unions nested in
         it, in Variant order, once each."""
-        found: list[View] = []
-        for variant in self.variants:
-            match variant:
-                case View():
-                    found.append(variant)
-                case Union():
-                    found.extend(variant.views())
-                case Payload():
-                    pass
-        return tuple(dict.fromkeys(found))
+        return tuple(
+            dict.fromkeys(leaf for leaf in self.leaves() if isinstance(leaf, View))
+        )
 
     def payloads(self) -> tuple[Payload, ...]:
         """The Payloads among this Union's Variants and those of the Unions nested
         in it, in Variant order, once each."""
-        found: list[Payload] = []
-        for variant in self.variants:
-            match variant:
-                case Payload():
-                    found.append(variant)
-                case Union():
-                    found.extend(variant.payloads())
-                case View():
-                    pass
-        return tuple(dict.fromkeys(found))
+        return tuple(
+            dict.fromkeys(leaf for leaf in self.leaves() if isinstance(leaf, Payload))
+        )
+
+    def leaves(self) -> tuple[View | Payload, ...]:
+        """The Views and Payloads among this Union's Variants and those of the
+        Unions nested in it, in Variant order."""
+        return tuple(
+            leaf
+            for variant in self.variants
+            for leaf in (variant.leaves() if isinstance(variant, Union) else (variant,))
+        )

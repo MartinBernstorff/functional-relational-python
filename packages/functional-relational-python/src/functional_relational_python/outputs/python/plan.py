@@ -64,8 +64,60 @@ generated into. Only Views and Unions of Views have mapping functions, so a
 layout for mappings receives only those."""
 
 
+type _Placed = (
+    compiler.CompiledView
+    | compiler.CompiledPayload
+    | compiler.CompiledUnion
+    | compiler.CompiledPayloadUnion
+)
+"""Anything a layout places."""
+
+
 class WithoutMappings(pydantic.BaseModel, frozen=True):
     """Plan models only, without mapping functions."""
+
+
+class LayoutRole(enum.Enum):
+    """What a layout places: models, or mapping functions."""
+
+    MODELS = "models"
+    MAPPINGS = "mappings"
+
+
+class ReturnedText(pydantic.RootModel[str], frozen=True):
+    """How a value a layout returned reads in a diagnostic: its `repr`."""
+
+    @staticmethod
+    def of(returned: object) -> ReturnedText:
+        return ReturnedText(repr(returned))
+
+
+class NoModuleFromLayout(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A layout returned something other than a `ModulePath` for a View, Payload
+    or Union, e.g. `None` from a layout that does not handle Unions of Payloads."""
+
+    definition: DefinitionName | UnionName
+    role: LayoutRole
+    returned: ReturnedText
+
+    @staticmethod
+    def check(
+        layout: ModuleLayout, role: LayoutRole, compiled: _Placed
+    ) -> ModulePath | NoModuleFromLayout:
+        """The module `layout` gives `compiled`, or why it gives none."""
+        returned: object = layout(compiled)
+        if isinstance(returned, ModulePath):
+            return returned
+        return NoModuleFromLayout(
+            definition=compiled.name, role=role, returned=ReturnedText.of(returned)
+        )
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.definition.root}: the {self.role.value} layout returned "
+            f"{self.returned.root} for it, not a ModulePath. A layout returns a "
+            "ModulePath for every View, Payload and Union it receives."
+        )
 
 
 class PythonLayout(pydantic.BaseModel, frozen=True):
@@ -94,14 +146,9 @@ class PythonLayout(pydantic.BaseModel, frozen=True):
 
         return PythonLayout(models=models, mappings=into)
 
-    def model_of(
-        self,
-        compiled: compiler.CompiledView
-        | compiler.CompiledPayload
-        | compiler.CompiledUnion
-        | compiler.CompiledPayloadUnion,
-    ) -> Symbol:
-        """The Symbol of a View's, Payload's or Union's own model."""
+    def model_of(self, compiled: _Placed) -> Symbol | NoModuleFromLayout:
+        """The Symbol of a View's, Payload's or Union's own model, or why the
+        layout gives it no module."""
         match compiled:
             case compiler.CompiledView(names=names):
                 name = names.model.name
@@ -111,7 +158,11 @@ class PythonLayout(pydantic.BaseModel, frozen=True):
                 name = names.model
             case compiler.CompiledPayloadUnion(model=name):
                 pass
-        return Symbol(module=self.models(compiled), qualname=(name.identifier(),))
+        match NoModuleFromLayout.check(self.models, LayoutRole.MODELS, compiled):
+            case NoModuleFromLayout() as unplaced:
+                return unplaced
+            case module:
+                return Symbol(module=module, qualname=(name.identifier(),))
 
 
 class Scope(pydantic.RootModel[str], frozen=True):
@@ -249,6 +300,7 @@ type PlanDiagnostic = (
     | Unimportable
     | NameClash
     | ModelsAndMappingsInOneModule
+    | NoModuleFromLayout
 )
 
 
@@ -357,13 +409,19 @@ class UnionPlan(pydantic.BaseModel, frozen=True):
     def of(
         union: compiler.CompiledUnion | compiler.CompiledPayloadUnion,
         layout: PythonLayout,
-    ) -> UnionPlan:
-        """The model of a Union of Views or of Payloads, where `layout` puts it."""
-        return UnionPlan(
-            union=union.name,
-            symbol=layout.model_of(union),
-            discriminator=union.discriminator,
-            variants=tuple(map(layout.model_of, union.variants)),
+    ) -> Result[UnionPlan, DiagnosticsError[NoModuleFromLayout]]:
+        """The model of a Union of Views or of Payloads, where `layout` puts it,
+        or why the layout gives it or a Variant's model no module."""
+        placed = (layout.model_of(union), *map(layout.model_of, union.variants))
+        symbols = [symbol for symbol in placed if isinstance(symbol, Symbol)]
+        return DiagnosticsError.or_ok(
+            (found for found in placed if isinstance(found, NoModuleFromLayout)),
+            lambda: UnionPlan(
+                union=union.name,
+                symbol=symbols[0],
+                discriminator=union.discriminator,
+                variants=tuple(symbols[1:]),
+            ),
         )
 
     def uses(self) -> frozenset[Symbol]:
@@ -892,6 +950,7 @@ class _PlannedUnions(pydantic.BaseModel, frozen=True):
 
     models: Mapping[ModulePath, tuple[UnionPlan, ...]]
     functions: Mapping[ModulePath, tuple[UnionFunctionPlan, ...]]
+    diagnostics: tuple[PlanDiagnostic, ...]
 
     @staticmethod
     def of(
@@ -904,13 +963,20 @@ class _PlannedUnions(pydantic.BaseModel, frozen=True):
         it, and `mapped` the planned mapping function of each View.
 
         A Union gets no mapping function when a Variant's could not be planned,
-        which is reported already. A Union of Payloads gets none at all.
+        which is reported already. A Union of Payloads gets none at all. A Union
+        the layout gives no module is reported, and gets neither.
         """
         functions_of = dict(mapped)
         models: dict[ModulePath, list[UnionPlan]] = {}
         functions: dict[ModulePath, list[UnionFunctionPlan]] = {}
+        reported: list[PlanDiagnostic] = []
         for union in unions:
-            planned = UnionPlan.of(union, layout)
+            match UnionPlan.of(union, layout):
+                case Ok(planned):
+                    pass
+                case Err(error):
+                    reported.extend(error.diagnostics)
+                    continue
             symbol = planned.symbol
             models.setdefault(symbol.module, []).append(planned)
             variants = tuple(
@@ -922,19 +988,26 @@ class _PlannedUnions(pydantic.BaseModel, frozen=True):
                 case WithoutMappings():
                     continue
                 case mappings if len(variants) == len(union.variants):
-                    function = UnionFunctionPlan.of(
-                        union, symbol, mappings(union), variants
-                    )
+                    pass
+                case _:
+                    continue
+            match NoModuleFromLayout.check(mappings, LayoutRole.MAPPINGS, union):
+                case NoModuleFromLayout() as unplaced:
+                    reported.append(unplaced)
+                case module:
+                    function = UnionFunctionPlan.of(union, symbol, module, variants)
                     functions.setdefault(function.symbol.module, []).append(function)
                     functions_of[union.name] = function
-                case _:
-                    pass
         for payload_union in payload_unions:
-            planned = UnionPlan.of(payload_union, layout)
-            models.setdefault(planned.symbol.module, []).append(planned)
+            match UnionPlan.of(payload_union, layout):
+                case Ok(planned):
+                    models.setdefault(planned.symbol.module, []).append(planned)
+                case Err(error):
+                    reported.extend(error.diagnostics)
         return _PlannedUnions(
             models={module: tuple(planned) for module, planned in models.items()},
             functions={module: tuple(planned) for module, planned in functions.items()},
+            diagnostics=tuple(reported),
         )
 
 
@@ -970,14 +1043,23 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         """The plan, or every diagnostic. Each diagnostic is reported once, even
         when both a model and a mapping function run into it. A type a model field
         cannot import is reported for that field only, not again for the mapping
-        function that looks it up. Models leave the catalog's one-to-one markers out."""
+        function that looks it up. Models leave the catalog's one-to-one markers out.
+
+        A View, Payload or Union the layout gives no `ModulePath` is reported, and
+        not planned."""
         diagnostics: dict[PlanDiagnostic, None] = {}
         models: dict[ModulePath, list[ModelPlan]] = {}
         functions: dict[ModulePath, list[FunctionPlan]] = {}
         mapped: dict[ViewName | UnionName, FunctionPlan | UnionFunctionPlan] = {}
         for view in compiled.views:
+            match NoModuleFromLayout.check(layout.models, LayoutRole.MODELS, view):
+                case NoModuleFromLayout() as unplaced:
+                    diagnostics[unplaced] = None
+                    continue
+                case module:
+                    pass
             model = _ModelPlanner.definition_model(
-                view, layout.models(view), compiled.one_to_one_marker
+                view, module, compiled.one_to_one_marker
             )
             diagnostics.update(dict.fromkeys(model.diagnostics))
             models.setdefault(model.plan.symbol.module, []).append(model.plan)
@@ -986,7 +1068,13 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                     continue
                 case mappings:
                     pass
-            match FunctionPlan.of(view, model.plan, mappings(view)):
+            match NoModuleFromLayout.check(mappings, LayoutRole.MAPPINGS, view):
+                case NoModuleFromLayout() as unplaced:
+                    diagnostics[unplaced] = None
+                    continue
+                case module:
+                    pass
+            match FunctionPlan.of(view, model.plan, module):
                 case Ok(function):
                     functions.setdefault(function.symbol.module, []).append(function)
                     mapped[view.name] = function
@@ -1005,14 +1093,21 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                         )
                     )
         for payload in compiled.payloads:
+            match NoModuleFromLayout.check(layout.models, LayoutRole.MODELS, payload):
+                case NoModuleFromLayout() as unplaced:
+                    diagnostics[unplaced] = None
+                    continue
+                case module:
+                    pass
             model = _ModelPlanner.definition_model(
-                payload, layout.models(payload), compiled.one_to_one_marker
+                payload, module, compiled.one_to_one_marker
             )
             diagnostics.update(dict.fromkeys(model.diagnostics))
             models.setdefault(model.plan.symbol.module, []).append(model.plan)
         unions = _PlannedUnions.of(
             compiled.unions, compiled.payload_unions, layout, mapped
         )
+        diagnostics.update(dict.fromkeys(unions.diagnostics))
         plan = PythonPlan(
             models={module: tuple(planned) for module, planned in models.items()},
             unions=unions.models,
