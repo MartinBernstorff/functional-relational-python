@@ -11,7 +11,6 @@ from functional_relational_python.outputs.django.models import (
     NoDjangoFieldRule,
     WithoutDjangoModels,
 )
-from functional_relational_python.outputs.django.queries import UnionInDjangoQueries
 from functional_relational_python.outputs.python.plan import (
     ModelsAndMappingsInOneModule,
     WithoutMappings,
@@ -339,14 +338,12 @@ def test_generate_writes_a_union_and_its_variants() -> None:
     assert commands.check(filesystem, root) == Ok(None)
 
 
-def test_generate_reports_a_union_over_an_entity_with_django_queries() -> None:
+def test_generate_writes_django_queries_for_a_union_over_an_entity() -> None:
     filesystem, root = project(in_this_module(Text("union_with_django_catalog")))
+    _ = commands.generate(filesystem, root).unwrap()
 
-    match commands.generate(filesystem, root):
-        case Ok(written):
-            pytest.fail(f"expected diagnostics, wrote {written}")
-        case Err(error):
-            assert isinstance(error, DiagnosticsError)
-            assert error.diagnostics == (
-                UnionInDjangoQueries(union=UnionName("AnyCard")),
-            )
+    queries = filesystem.files[root.file(DjangoModels.fake().queries.file_path())]
+
+    assert "def any_card_queryset(" in queries.root
+    assert "def as_any_card(" in queries.root
+    assert commands.check(filesystem, root) == Ok(None)

@@ -3,6 +3,12 @@
 Each model's manager `objects` is its Entity's Manager, which `queries`
 generates with a method per View over the Entity.
 
+A one-to-one Reference is a `OneToOneField` with a reverse accessor on the
+referenced Entity's model, `<entity>_by_<foreign key>`, e.g.
+`company_profile_by_company` for `CompanyProfile.company_id`, so that a query can
+follow it backwards. A many-to-one Reference has no reverse accessor, so several
+never clash.
+
 Everything here is pure: it builds file contents and touches no filesystem, and
 it never imports Django. Migrations are the user's to make.
 """
@@ -17,6 +23,7 @@ from collections.abc import Iterable, Iterator, Mapping
 import pydantic
 from safe_result import Err, Ok, Result
 
+from functional_relational_python.compiler import model_names
 from functional_relational_python.entity_graph.entity_graph import (
     Cardinality,
     EntityGraph,
@@ -274,6 +281,30 @@ class InvalidDjangoFieldName(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class ReverseAccessorClash(pydantic.BaseModel, Diagnostic, frozen=True):
+    """The reverse accessor of a one-to-one Reference would have a name the
+    referenced Entity's Django model binds otherwise: a field, an ID attribute, a
+    name the model reserves, or the reverse accessor of another one-to-one
+    Reference.
+
+    `references` are the one-to-one References whose reverse accessor it is.
+    """
+
+    entity: type[pydantic.BaseModel]
+    name: FieldName
+    references: tuple[ReferenceKey, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        references = ", ".join(
+            f"{reference.entity.__qualname__}.{reference.field.root}"
+            for reference in self.references
+        )
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}: '{self.name.root}', the reverse accessor "
+            f"of {references}, is bound more than once on its Django model."
+        )
+
+
 class AutoIncrementOnNonPrimaryKey(pydantic.BaseModel, Diagnostic, frozen=True):
     """A type override gives a field other than the primary key an
     auto-incrementing Django field, e.g. an override keyed on `int`."""
@@ -299,6 +330,7 @@ type DjangoDiagnostic = (
     | SetNullOnRequiredReference
     | DjangoFieldNameClash
     | DjangoModelNameClash
+    | ReverseAccessorClash
 )
 
 
@@ -496,6 +528,9 @@ class DjangoModelsRenderer:
                     case NoDjangoFieldRule() | AutoIncrementOnNonPrimaryKey():
                         reported.append(declared)
             reported.extend(DjangoModelsRenderer._field_clashes(model, declarations))
+            reported.extend(
+                DjangoModelsRenderer._accessor_clashes(graph, model, declarations)
+            )
             planned.append(
                 _PlannedModel(
                     entity=model,
@@ -609,31 +644,96 @@ class DjangoModelsRenderer:
         return field
 
     @staticmethod
+    def reverse_accessor(
+        entity: type[pydantic.BaseModel], reference: FieldName
+    ) -> FieldName:
+        """The attribute of the referenced Entity's Django model holding the
+        `entity` whose one-to-one Reference `reference` points to it, e.g.
+        `company_profile_by_company` for `CompanyProfile.company_id`."""
+        snake = model_names.PascalCase(entity.__name__).snake_case().root
+        foreign_key = DjangoModelsRenderer.foreign_key_name(reference)
+        return FieldName(f"{snake}_by_{foreign_key.root}")
+
+    @staticmethod
+    def column_optionality(
+        node: EntityNode, field: FieldName, field_types: FieldTypes
+    ) -> Optionality:
+        """Whether the column holding the Entity's `field` may be NULL: an optional
+        Reference's, or one whose type, or a type it wraps, admits `None`. A field
+        without a Django field rule may be."""
+        for reference in node.references:
+            if reference.field == field:
+                return reference.optionality
+        annotation = node.model.model_fields[field.root].annotation
+        match field_types.field_of(annotation, FieldRole.PLAIN):
+            case Ok(typed):
+                return typed.optionality
+            case Err():
+                return Optionality.OPTIONAL
+
+    @staticmethod
+    def _accessor_clashes(
+        graph: EntityGraph,
+        model: type[pydantic.BaseModel],
+        declarations: Iterable[_Declaration],
+    ) -> Iterator[ReverseAccessorClash]:
+        """Reverse accessors on `model`'s Django model named like another one, or
+        like a name the model binds or reserves. References are in Entity name and
+        field order."""
+        bound = {
+            *DjangoModelsRenderer.reserved,
+            *(
+                attribute
+                for declaration in declarations
+                for attribute in declaration.attributes()
+            ),
+        }
+        by_name: dict[FieldName, list[ReferenceKey]] = {}
+        for entity, node in sorted(
+            graph.entities.items(), key=lambda item: item[0].__name__
+        ):
+            for reference in node.references:
+                if (
+                    reference.target is model
+                    and reference.cardinality == Cardinality.ONE_TO_ONE
+                ):
+                    by_name.setdefault(
+                        DjangoModelsRenderer.reverse_accessor(entity, reference.field),
+                        [],
+                    ).append(ReferenceKey(entity=entity, field=reference.field))
+        for name, references in by_name.items():
+            if len(references) > 1 or name in bound:
+                yield ReverseAccessorClash(
+                    entity=model, name=name, references=tuple(references)
+                )
+
+    @staticmethod
     def _foreign_key(
         model: type[pydantic.BaseModel],
         reference: Reference,
         on_delete: Mapping[ReferenceKey, OnDelete],
     ) -> _Declaration:
         """A foreign key to the referenced Entity's model, named without `_id`: a
-        `OneToOneField` for a one-to-one Reference, else a `ForeignKey`.
-
-        Reverse accessors are off (`related_name='+'`), so several References to
-        one Entity never clash.
-        """
+        `OneToOneField` with a reverse accessor for a one-to-one Reference, else a
+        `ForeignKey` without one (`related_name='+'`)."""
         deleted = on_delete.get(
             ReferenceKey(entity=model, field=reference.field), OnDelete.PROTECT
         )
-        arguments = {
-            Identifier("on_delete"): ValueExpression(f"models.{deleted.value}"),
-            Identifier("related_name"): ValueExpression(repr("+")),
-        }
-        if reference.optionality == Optionality.OPTIONAL:
-            arguments[Identifier("null")] = ValueExpression("True")
         match reference.cardinality:
             case Cardinality.MANY_TO_ONE:
                 field_class = Identifier("ForeignKey")
+                related_name = "+"
             case Cardinality.ONE_TO_ONE:
                 field_class = Identifier("OneToOneField")
+                related_name = DjangoModelsRenderer.reverse_accessor(
+                    model, reference.field
+                ).root
+        arguments = {
+            Identifier("on_delete"): ValueExpression(f"models.{deleted.value}"),
+            Identifier("related_name"): ValueExpression(repr(related_name)),
+        }
+        if reference.optionality == Optionality.OPTIONAL:
+            arguments[Identifier("null")] = ValueExpression("True")
         return _Declaration(
             name=DjangoModelsRenderer.foreign_key_name(reference.field),
             field=DjangoField.builtin(field_class, arguments),
