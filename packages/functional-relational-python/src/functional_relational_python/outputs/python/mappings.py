@@ -124,6 +124,23 @@ class Indent(pydantic.RootModel[int], frozen=True):
             lines = f"{pad}{inner.fitted(body, Expression('')).root}\n"
         return Expression(f"{head.root}\n{lines}{self.pad().root}{tail.root}")
 
+    def optional_annotation(
+        self, start: Expression, annotated: Expression, end: Expression
+    ) -> Expression:
+        """`<annotated> | None`, written after `start` on a line at this
+        indentation that ends with `end`. As ruff splits an annotation that does
+        not fit: in parentheses, then at the `|` if it still does not fit."""
+        optional = f"{annotated.root} | None"
+        if (
+            len(f"{self.pad().root}{start.root}{optional}{end.root}")
+            <= LineLength.default().root
+        ):
+            return Expression(optional)
+        pad = self.deeper().pad().root
+        if len(f"{pad}{optional}") <= LineLength.default().root:
+            return Expression(f"(\n{pad}{optional}\n{self.pad().root})")
+        return Expression(f"(\n{pad}{annotated.root}\n{pad}| None\n{self.pad().root})")
+
     def looked_up(
         self,
         prefix: Expression,
@@ -394,21 +411,18 @@ class MappingsRenderer:
             for parameter in function.lookups
         )
         keyword_only = f"    *,\n{parameters}" if parameters else ""
-        qualified = model.qualified().root
+        qualified = Expression(model.qualified().root)
         match optionality:
             case Optionality.REQUIRED:
-                returned = qualified
+                returned = qualified.root
             case Optionality.OPTIONAL:
-                returned = f"{qualified} | None"
-                if len(f") -> {returned}:") > LineLength.default().root:
-                    # As ruff splits a return annotation that does not fit: in
-                    # parentheses, then at the `|` if it still does not fit.
-                    inner = f"    {returned}"
-                    returned = (
-                        f"(\n{inner}\n)"
-                        if len(inner) <= LineLength.default().root
-                        else f"(\n    {qualified}\n    | None\n)"
+                returned = (
+                    Indent(0)
+                    .optional_annotation(
+                        Expression(") -> "), qualified, Expression(":")
                     )
+                    .root
+                )
         return Expression(
             f"def {function.symbol.bound_name().root}(\n"
             f"    {FunctionPlan.source_parameter.root}: "
@@ -419,9 +433,17 @@ class MappingsRenderer:
 
     @staticmethod
     def _union_function(function: UnionFunctionPlan) -> FunctionText:
-        """Calls each Variant's function in turn, until one maps the row."""
+        """Calls each Variant's function in turn, until one maps the row.
+
+        `found` is declared with the Union's model, so that type checkers let it
+        hold what each Variant's function gives."""
         found = UnionFunctionPlan.found.root
-        statements: list[str] = []
+        model = Indent(4).optional_annotation(
+            Expression(f"{found}: "),
+            Expression(function.model.qualified().root),
+            Expression(""),
+        )
+        statements: list[str] = [f"    {found}: {model.root}\n"]
         for index, call in enumerate(function.variants):
             match function.called(call):
                 case Symbol() as symbol:

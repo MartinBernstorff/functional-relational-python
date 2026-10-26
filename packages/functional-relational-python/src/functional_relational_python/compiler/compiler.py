@@ -5,9 +5,8 @@ recovers with the best relation it can build, so later steps and other Views and
 Payloads are still checked and independent defects are all reported, once each.
 """
 
-import enum
 import typing
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Annotated
 
 import pydantic
@@ -111,11 +110,10 @@ class PoisonedUnion(pydantic.BaseModel, frozen=True):
 
 
 class BlockedUnion(pydantic.BaseModel, frozen=True):
-    """A Union with no defect of its own that is not compiled, because the
-    Variants `blocked_by` did not compile. Their diagnostics are reported."""
+    """A Union with no defect of its own that is not compiled, because a Variant
+    of it did not compile. That Variant's diagnostics are reported."""
 
     name: UnionName
-    blocked_by: tuple[ViewName | UnionName, ...]
 
 
 class CompiledViews(pydantic.BaseModel, frozen=True):
@@ -202,6 +200,13 @@ def compile_catalog(
     shared_names = dict.fromkeys(
         view.name for view in checked_views if view.name.root in payload_names
     )
+    other_names = {view.name.root for view in all_views} | payload_names
+    union_names = [union.name.root for union in all_unions]
+    shared_union_names = dict.fromkeys(
+        union.name
+        for union in all_unions
+        if union.name.root in other_names or union_names.count(union.name.root) > 1
+    )
     return DiagnosticsError.or_ok(
         (
             *(
@@ -211,6 +216,7 @@ def compile_catalog(
                 for diagnostic in checked.diagnostics
             ),
             *(diagnostics.SharedModelName(view=name) for name in shared_names),
+            *(diagnostics.SharedUnionName(view=name) for name in shared_union_names),
         ),
         lambda: CompiledCatalog(
             views=tuple(v for v in checked_views if isinstance(v, CompiledView)),
@@ -1222,17 +1228,12 @@ def _check_union(
     A Variant that did not compile is left out of the checks, so the Variants
     that did are still checked.
     """
-    reported: list[diagnostics.CompileDiagnostic] = []
-    names: UnionModelNames | None
-    match UnionModelNames.check(union.name):
-        case Ok(names):
-            pass
-        case Err(error):
-            names = None
-            reported.extend(error.diagnostics)
     variants = _SortedVariants.of(union, views, unions)
-    reported.extend(variants.kind_diagnostics(union))
-    reported.extend(_tag_diagnostics(union, variants.compiled))
+    reported: list[diagnostics.CompileDiagnostic] = [
+        *variants.kind_diagnostics(union),
+        *_tag_diagnostics(union, variants.compiled),
+        *_unreachable_diagnostics(union, variants.compiled),
+    ]
     sources = tuple(variant.source for variant in variants.compiled)
     if len(set(sources)) > 1:
         reported.append(
@@ -1242,10 +1243,17 @@ def _check_union(
                 sources=tuple(ir.SourceName(source.__name__) for source in sources),
             )
         )
+    match UnionModelNames.check(union.name):
+        case Err(error):
+            return PoisonedUnion(
+                name=union.name, diagnostics=(*error.diagnostics, *reported)
+            )
+        case Ok(names):
+            pass
     if reported:
         return PoisonedUnion(name=union.name, diagnostics=tuple(reported))
-    if variants.failed or names is None:
-        return BlockedUnion(name=union.name, blocked_by=variants.failed)
+    if variants.failed:
+        return BlockedUnion(name=union.name)
     return CompiledUnion(
         name=union.name,
         source=sources[0],
@@ -1313,8 +1321,26 @@ class _SortedVariants(pydantic.BaseModel, frozen=True):
         return (diagnostics.PayloadUnion(view=union.name),)
 
 
-type Tag = enum.Enum | str | int
-"""The one value a Variant's Discriminator is typed a `Literal` of."""
+def _unreachable_diagnostics(
+    union: Union, variants: Sequence[CompiledView | CompiledUnion]
+) -> tuple[diagnostics.UnreachableVariant, ...]:
+    """A diagnostic per Variant after one that keeps every row, which leaves it
+    none: a View without Filters, or a Union with such a View."""
+    for index, variant in enumerate(variants):
+        leaves = variant.leaves() if isinstance(variant, CompiledUnion) else (variant,)
+        if any(not leaf.relation.filters for leaf in leaves):
+            return tuple(
+                diagnostics.UnreachableVariant(
+                    view=union.name, variant=later.name, kept_by=variant.name
+                )
+                for later in variants[index + 1 :]
+            )
+    return ()
+
+
+type Tag = ir.EnumLiteral | ir.ScalarLiteral
+"""The one value a Variant's Discriminator is typed a `Literal` of: an enum
+member, a string or an integer."""
 
 
 def _tag_diagnostics(
@@ -1323,7 +1349,8 @@ def _tag_diagnostics(
     """A diagnostic per View with no Tag for the Union's Discriminator, per
     nested Union whose Views have several, and per Tag several Variants share."""
     reported: list[diagnostics.CompileDiagnostic] = []
-    tagged: dict[Tag, list[ViewName | UnionName]] = {}
+    # By the value, as pydantic tells Tags apart: a `StrEnum` member is its string.
+    tagged: dict[object, list[ViewName | UnionName]] = {}
     for variant in variants:
         leaves = variant.leaves() if isinstance(variant, CompiledUnion) else (variant,)
         found: list[Tag] = []
@@ -1336,18 +1363,18 @@ def _tag_diagnostics(
                     reported.append(untagged)
                 case tag:
                     found.append(tag)
-        distinct = tuple(dict.fromkeys(found))
+        distinct = tuple({tag.value(): tag for tag in found}.values())
         if len(distinct) > 1 and isinstance(variant, CompiledUnion):
             reported.append(
                 diagnostics.NestedUnionTagsDiffer(
                     view=union.name,
                     nested=variant.name,
                     discriminator=union.discriminator,
-                    tags=tuple(diagnostics.TagText.of(tag) for tag in distinct),
+                    tags=tuple(diagnostics.TagText.of(tag.value()) for tag in distinct),
                 )
             )
         elif len(found) == len(leaves) and len(distinct) == 1:
-            tagged.setdefault(distinct[0], []).append(variant.name)
+            tagged.setdefault(distinct[0].value(), []).append(variant.name)
     reported.extend(
         diagnostics.SharedTag(
             view=union.name,
@@ -1383,13 +1410,11 @@ def _tag(
         and typing.get_origin(split.required) is typing.Literal
         and len(values) == 1
     ):
-        match values[0]:
-            case bool():
+        match literals.classify_scalar(values[0]):
+            case ir.ScalarLiteral(root=bool() | float()) | literals.NotALiteral():
                 pass
-            case enum.Enum() | str() | int() as tag:
+            case ir.EnumLiteral() | ir.ScalarLiteral() as tag:
                 return tag
-            case _:
-                pass
     return diagnostics.UntaggedVariant(
         view=union.name,
         variant=view.name,

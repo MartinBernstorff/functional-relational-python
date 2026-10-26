@@ -3904,7 +3904,10 @@ def test_an_added_field_tags_variants_of_a_source_with_no_tag_column() -> None:
         return View(
             name=name,
             source=Company,
-            step=added_tag(FieldName("kind"), Tag(tag.root)),
+            step=steps.pipeline(
+                steps.where(conditions.eq(conditions.field(FieldName("name")), tag)),
+                added_tag(FieldName("kind"), Tag(tag.root)),
+            ),
         )
 
     union = union_of(
@@ -4154,6 +4157,113 @@ def test_a_union_of_a_defective_view_reports_only_the_views_diagnostics() -> Non
     ]
 
 
+def test_each_variant_after_one_keeping_every_row_is_a_diagnostic() -> None:
+    free = subscriptions(ViewName("Free"), (FieldName("plan"), Plan.FREE))
+    unfiltered = kept_where(ViewName("Paid"), source=Subscription)
+    unreachable = (
+        subscriptions(ViewName("PaidAgain"), (FieldName("plan"), Plan.PAID)),
+        union_of(
+            UnionName("PaidByStatus"),
+            FieldName("status"),
+            subscriptions(ViewName("PaidActive"), (FieldName("status"), Status.ACTIVE)),
+            subscriptions(ViewName("PaidEnded"), (FieldName("status"), Status.ENDED)),
+        ),
+    )
+    union = union_of(
+        UnionName("Subscriptions"), FieldName("plan"), free, unfiltered, *unreachable
+    )
+
+    assert [
+        diagnostic
+        for diagnostic in union_diagnostics(union)
+        if isinstance(diagnostic, diagnostics.UnreachableVariant)
+    ] == [
+        diagnostics.UnreachableVariant(
+            view=union.name, variant=variant.name, kept_by=unfiltered.name
+        )
+        for variant in unreachable
+    ]
+
+
+def test_a_last_variant_keeping_every_row_is_no_diagnostic() -> None:
+    union = union_of(
+        UnionName("Subscriptions"),
+        FieldName("status"),
+        subscriptions(ViewName("Active"), (FieldName("status"), Status.ACTIVE)),
+        View(
+            name=ViewName("Rest"),
+            source=Subscription,
+            step=steps.pipeline(
+                steps.omit(FieldName("status")),
+                added_tag(FieldName("status"), Tag("rest")),
+            ),
+        ),
+    )
+
+    assert isinstance(compile_unions([union]), Ok)
+
+
+def test_a_variant_after_a_union_with_a_view_keeping_every_row_is_a_diagnostic() -> (
+    None
+):
+    keeping = union_of(
+        UnionName("FreeByStatus"),
+        FieldName("status"),
+        subscriptions(ViewName("FreeActive"), (FieldName("status"), Status.ACTIVE)),
+        View(
+            name=ViewName("FreeRest"),
+            source=Subscription,
+            step=steps.pipeline(
+                steps.omit(FieldName("status")),
+                added_tag(FieldName("status"), Tag("rest")),
+            ),
+        ),
+    )
+    paid = subscriptions(ViewName("Paid"), (FieldName("plan"), Plan.PAID))
+    union = union_of(UnionName("Subscriptions"), FieldName("plan"), keeping, paid)
+
+    assert diagnostics.UnreachableVariant(
+        view=union.name, variant=paid.name, kept_by=keeping.name
+    ) in union_diagnostics(union)
+
+
+@pytest.mark.parametrize(
+    "taken_by",
+    [
+        View(
+            name=ViewName("Subscriptions"), source=Subscription, step=steps.pipeline()
+        ),
+        Payload(
+            name=PayloadName("Subscriptions"),
+            source=Subscription,
+            step=steps.pipeline(),
+        ),
+        Union(
+            name=UnionName("Subscriptions"),
+            discriminator=FieldName("status"),
+            variants=(
+                subscriptions(ViewName("Active"), (FieldName("status"), Status.ACTIVE)),
+                subscriptions(ViewName("Ended"), (FieldName("status"), Status.ENDED)),
+            ),
+        ),
+    ],
+    ids=["view", "payload", "union"],
+)
+def test_a_union_named_like_another_definition_is_one_diagnostic(
+    taken_by: View | Payload | Union,
+) -> None:
+    union = free_or_paid()
+    views = [taken_by] if isinstance(taken_by, View) else []
+    payloads = [taken_by] if isinstance(taken_by, Payload) else []
+    unions = [union, taken_by] if isinstance(taken_by, Union) else [union]
+
+    match compiler.compile_catalog(empty_graph(), views, payloads, unions):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            assert error.diagnostics == (diagnostics.SharedUnionName(view=union.name),)
+
+
 def test_a_union_needs_two_variants() -> None:
     with pytest.raises(pydantic.ValidationError):
         _ = Union(
@@ -4185,9 +4295,9 @@ def test_a_union_needs_two_variants() -> None:
                 annotation=Plan,
             ),
             (
-                "Subscriptions: the Variant Any types 'plan' <enum 'Plan'>, which is not "
-                "one Tag. Narrow it to one value with `where`, or declare it with `add`, "
-                "as a Literal of one enum member, string or integer."
+                "Subscriptions: the Variant Any types 'plan' <enum 'Plan'>, which is "
+                "not one Tag. Narrow it to one value with `where`, or declare it with "
+                "`add`, as a Literal of one enum member, string or integer."
             ),
         ),
         (
@@ -4213,9 +4323,9 @@ def test_a_union_needs_two_variants() -> None:
                 ),
             ),
             (
-                "Subscriptions: the Variants of the nested Union ByStatus have the Tags "
-                "<Plan.FREE: 'free'>, <Plan.PAID: 'paid'> for 'plan', but a nested "
-                "Union's Variants need one Tag."
+                "Subscriptions: the Variants of the nested Union ByStatus have the "
+                "Tags <Plan.FREE: 'free'>, <Plan.PAID: 'paid'> for 'plan', but a "
+                "nested Union's Variants need one Tag."
             ),
         ),
         (
@@ -4236,8 +4346,9 @@ def test_a_union_needs_two_variants() -> None:
                 payloads=(PayloadName("SubscriptionCreate"),),
             ),
             (
-                "Mixed: its Variants mix Views (Free) with Payloads (SubscriptionCreate). "
-                "A Union's Variants are all read models or all write models."
+                "Mixed: its Variants mix Views (Free) with Payloads "
+                "(SubscriptionCreate). A Union's Variants are all read models or all "
+                "write models."
             ),
         ),
         (
@@ -4251,6 +4362,25 @@ def test_a_union_needs_two_variants() -> None:
             model_names.InvalidUnionName(view=UnionName("not a class")),
             "not a class: the name is not a valid Python class name.",
         ),
+        (
+            diagnostics.UnreachableVariant(
+                view=UnionName("Subscriptions"),
+                variant=ViewName("PaidAgain"),
+                kept_by=ViewName("Paid"),
+            ),
+            (
+                "Subscriptions: the Variant PaidAgain is never a result, because Paid "
+                "before it keeps every row. Filter Paid with `where`, or move it last."
+            ),
+        ),
+        (
+            diagnostics.SharedUnionName(view=UnionName("Subscriptions")),
+            (
+                "Subscriptions: a Union shares the name 'Subscriptions' with a View, a "
+                "Payload or another Union. Model names must be unique across Views, "
+                "Payloads and Unions."
+            ),
+        ),
     ],
     ids=[
         "without-discriminator",
@@ -4261,6 +4391,8 @@ def test_a_union_needs_two_variants() -> None:
         "views-and-payloads",
         "payload-union",
         "invalid-name",
+        "unreachable",
+        "shared-name",
     ],
 )
 def test_a_union_diagnostic_message_names_the_offending_values(

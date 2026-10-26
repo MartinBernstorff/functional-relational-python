@@ -30,7 +30,7 @@ from functional_relational_python.outputs.python.plan import (
 )
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import ModulePath
-from functional_relational_python.pipeline import ir, steps
+from functional_relational_python.pipeline import conditions, ir, steps
 from functional_relational_python.pipeline.payloads import (
     DefinitionName,
     Payload,
@@ -733,6 +733,7 @@ def company_variant(name: ViewName, tag: Text) -> View:
         name=name,
         source=Company,
         step=steps.pipeline(
+            steps.where(conditions.eq(conditions.field(FieldName("name")), tag)),
             steps.project([FieldName("name")]),
             test_compiler.added_tag(FieldName("variant"), test_compiler.Tag(tag.root)),
         ),
@@ -756,6 +757,11 @@ def nested_company_union() -> Union:
                     name=ViewName("NamedBrand"),
                     source=Company,
                     step=steps.pipeline(
+                        steps.where(
+                            conditions.eq(
+                                conditions.field(FieldName("name")), Text("Named")
+                            )
+                        ),
                         steps.project([]),
                         steps.add(FieldName("variant"), Literal["brand"], "brand"),
                         steps.add(FieldName("name"), Literal["named"], "named"),
@@ -869,7 +875,10 @@ def union_module(union: Union) -> FileText:
         (
             8,
             2,
-            'type LongUnion = Annotated[V0xxxxxx | V1xxxxxx, Discriminator("variant")]\n',
+            (
+                "type LongUnion = Annotated[V0xxxxxx | V1xxxxxx, "
+                'Discriminator("variant")]\n'
+            ),
         ),
         (
             20,

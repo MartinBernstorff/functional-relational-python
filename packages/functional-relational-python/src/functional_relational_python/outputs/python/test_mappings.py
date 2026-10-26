@@ -1,5 +1,6 @@
 import contextlib
 import enum
+import os
 import re
 import subprocess
 import sys
@@ -251,6 +252,10 @@ class Generated:
         return PythonLayout(
             models=into(Generated.models), mappings=into(Generated.mappings)
         )
+
+    @staticmethod
+    def modules() -> tuple[ModulePath, ModulePath]:
+        return (Generated.models, Generated.mappings)
 
     @staticmethod
     def text(files: tuple[GeneratedFile, ...]) -> FileText:
@@ -847,8 +852,9 @@ def test_models_and_mappings_both_count_as_generated() -> None:
     ]
 
 
-def test_generated_models_and_mappings_pass_the_type_checker(tmp_path: Path) -> None:
-    plan = plan_of(
+def type_checked_plan() -> PythonPlan:
+    """Models and mapping functions with every kind of field and Union."""
+    return plan_of(
         compile_all(
             [
                 *golden_views(),
@@ -863,8 +869,13 @@ def test_generated_models_and_mappings_pass_the_type_checker(tmp_path: Path) -> 
         ),
         Generated.layout(),
     )
+
+
+def test_generated_models_and_mappings_pass_the_type_checker(tmp_path: Path) -> None:
     generated = tmp_path / "generated"
-    PythonRenderer.render(plan).write(LocalFileSystem(), Directory(generated)).unwrap()
+    PythonRenderer.render(type_checked_plan()).write(
+        LocalFileSystem(), Directory(generated)
+    ).unwrap()
     source_root = Path(__file__).parents[3]
     _ = (tmp_path / "pyrefly.toml").write_text(
         f'search-path = ["{generated}", "{source_root}"]\n'
@@ -877,6 +888,34 @@ def test_generated_models_and_mappings_pass_the_type_checker(tmp_path: Path) -> 
     result = subprocess.run(
         [sys.executable, "-m", "pyrefly", "check", "--config", "pyrefly.toml"],
         cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_generated_models_and_mappings_pass_mypy_strict(tmp_path: Path) -> None:
+    generated = Directory(tmp_path)
+    PythonRenderer.render(type_checked_plan()).write(
+        LocalFileSystem(), generated
+    ).unwrap()
+    source_root = Path(__file__).parents[3]
+
+    # Imported modules are checked only as far as the generated code uses them.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--strict",
+            "--follow-imports=silent",
+            "--no-incremental",
+            *(module.file_path().root.as_posix() for module in Generated.modules()),
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "MYPYPATH": str(source_root)},
         capture_output=True,
         text=True,
         check=False,
@@ -1942,6 +1981,7 @@ def unmentored_employee(
         functional_relational_python.outputs.python.test_mappings.Profile,
     ],
 ) -> frp_generated_models.UnmentoredEmployee | None:
+    found: frp_generated_models.UnmentoredEmployee | None
     found = unmentored_ann(source, profile_by_employee_id=profile_by_employee_id)
     if found is None:
         found = unmentored_other(source, profile_by_employee_id=profile_by_employee_id)
@@ -1960,6 +2000,7 @@ def employee_by_mentor(
         functional_relational_python.outputs.python.test_mappings.Profile,
     ],
 ) -> frp_generated_models.EmployeeByMentor | None:
+    found: frp_generated_models.EmployeeByMentor | None
     found = mentored_employee(source, employee_by_id=employee_by_id)
     if found is None:
         found = unmentored_employee(

@@ -365,10 +365,34 @@ class LookupParameter(pydantic.BaseModel, frozen=True):
         return Identifier(f"{snake.root}_by_{keyed_by.root}")
 
 
-class FunctionPlan(pydantic.BaseModel, frozen=True):
+class MappingFunctionPlan(pydantic.BaseModel, frozen=True):
+    """What every mapping function to generate has: its Symbol, the Source it
+    maps, and its keyword parameters, an ID mapping per Entity and field it looks
+    up."""
+
+    symbol: Symbol
+    source: Symbol
+    lookups: tuple[LookupParameter, ...]
+
+    def parameter_imports(self) -> frozenset[ModulePath]:
+        """The modules the function's parameters refer to, each imported whole."""
+        return frozenset(
+            {
+                self.source.module,
+                *(parameter.target.module for parameter in self.lookups),
+                *(parameter.id_type.module for parameter in self.lookups),
+                *((FunctionPlan.mapping,) if self.lookups else ()),
+            }
+        )
+
+    def scope(self) -> Scope:
+        return Scope(self.symbol.describe().root)
+
+
+class FunctionPlan(MappingFunctionPlan, frozen=True):
     """One mapping function to generate: from one instance of the View's Source,
-    and an ID mapping per Entity and field it looks up, to the View's model, or to `None`
-    for a row the View's Filters exclude.
+    and an ID mapping per Entity and field it looks up, to the View's model, or to
+    `None` for a row the View's Filters exclude.
 
     `literals` has the Symbol of every class the Filters' literals are instances
     of, e.g. an enum or a RootModel.
@@ -381,10 +405,7 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
     mapping: typing.ClassVar[ModulePath] = ModulePath("collections.abc")
 
     view: ViewName
-    symbol: Symbol
-    source: Symbol
     model: ModelPlan
-    lookups: tuple[LookupParameter, ...]
     filters: tuple[ir.Filter, ...]
     literals: Mapping[type, Symbol]
 
@@ -498,19 +519,10 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
 
     def imports(self) -> frozenset[ModulePath]:
         """The modules the function refers to, each imported whole."""
-        return frozenset(
-            {
-                self.model.symbol.module,
-                self.source.module,
-                *(parameter.target.module for parameter in self.lookups),
-                *(parameter.id_type.module for parameter in self.lookups),
-                *((FunctionPlan.mapping,) if self.lookups else ()),
-                *(symbol.module for symbol in self.literals.values()),
-            }
-        )
-
-    def scope(self) -> Scope:
-        return Scope(self.symbol.describe().root)
+        return self.parameter_imports() | {
+            self.model.symbol.module,
+            *(symbol.module for symbol in self.literals.values()),
+        }
 
 
 class VariantCall(pydantic.BaseModel, frozen=True):
@@ -521,7 +533,7 @@ class VariantCall(pydantic.BaseModel, frozen=True):
     lookups: tuple[Identifier, ...]
 
 
-class UnionFunctionPlan(pydantic.BaseModel, frozen=True):
+class UnionFunctionPlan(MappingFunctionPlan, frozen=True):
     """One Union's mapping function to generate: from one instance of the Source
     its Variants read, and the lookup parameters of every Variant's mapping
     function, to the model of the first Variant whose function maps it, or to
@@ -534,10 +546,7 @@ class UnionFunctionPlan(pydantic.BaseModel, frozen=True):
     """The variable holding what the Variants' functions have mapped so far."""
 
     union: UnionName
-    symbol: Symbol
-    source: Symbol
     model: Symbol
-    lookups: tuple[LookupParameter, ...]
     variants: tuple[VariantCall, ...]
 
     @staticmethod
@@ -579,23 +588,14 @@ class UnionFunctionPlan(pydantic.BaseModel, frozen=True):
 
     def imports(self) -> frozenset[ModulePath]:
         """The modules the function refers to, each imported whole."""
-        return frozenset(
-            {
-                self.model.module,
-                self.source.module,
-                *(parameter.target.module for parameter in self.lookups),
-                *(parameter.id_type.module for parameter in self.lookups),
-                *((FunctionPlan.mapping,) if self.lookups else ()),
-                *(
-                    called.module
-                    for call in self.variants
-                    if isinstance(called := self.called(call), Symbol)
-                ),
-            }
-        )
-
-    def scope(self) -> Scope:
-        return Scope(self.symbol.describe().root)
+        return self.parameter_imports() | {
+            self.model.module,
+            *(
+                called.module
+                for call in self.variants
+                if isinstance(called := self.called(call), Symbol)
+            ),
+        }
 
 
 class _AnnotationRenderer:
@@ -931,18 +931,11 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
 
     def model_modules(self) -> tuple[ModulePath, ...]:
         """Every module models go to, in module order."""
-        return tuple(
-            sorted(self.models.keys() | self.unions.keys(), key=lambda m: m.root)
-        )
+        return ModulePath.ordered(self.models.keys() | self.unions.keys())
 
     def function_modules(self) -> tuple[ModulePath, ...]:
         """Every module mapping functions go to, in module order."""
-        return tuple(
-            sorted(
-                self.functions.keys() | self.union_functions.keys(),
-                key=lambda m: m.root,
-            )
-        )
+        return ModulePath.ordered(self.functions.keys() | self.union_functions.keys())
 
     @staticmethod
     def of(
@@ -1013,9 +1006,8 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
             yield from self._function_clashes(module)
         yield from (
             ModelsAndMappingsInOneModule(module=module)
-            for module in sorted(
-                set(self.model_modules()) & set(self.function_modules()),
-                key=lambda module: module.root,
+            for module in ModulePath.ordered(
+                set(self.model_modules()) & set(self.function_modules())
             )
         )
 

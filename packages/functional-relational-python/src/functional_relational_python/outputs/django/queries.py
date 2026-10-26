@@ -299,9 +299,15 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         `layout` gives the module of each View's model. Views and Unions over a
         Source that is not an Entity get no query code. A View over an Entity that
         reverses a Reference, or that filters, is a diagnostic, and so is a Union
-        over an Entity. QuerySets are in Entity name order.
+        over an Entity: once, rather than once more per Variant View that reverses
+        or filters. QuerySets are in Entity name order.
         """
         views = tuple(views)
+        reported_unions = tuple(
+            union for union in unions if union.source in graph.entities
+        )
+        # A Variant's defects are the Union's, which is reported once instead.
+        in_unions = {leaf.name for union in reported_unions for leaf in union.leaves()}
         renderer = DjangoQueriesRenderer(
             graph=graph,
             config=config,
@@ -327,19 +333,16 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                         view=query.view.name, entity=lookup.target, via=lookup.via
                     )
                     for query in renderer.queries
+                    if query.view.name not in in_unions
                     for lookup in query.view.relation.lookups()
                     if isinstance(lookup, ir.ReverseLookup)
                 ),
                 *(
                     FilterInDjangoQueries(view=query.view.name)
                     for query in renderer.queries
-                    if query.view.relation.filters
+                    if query.view.relation.filters and query.view.name not in in_unions
                 ),
-                *(
-                    UnionInDjangoQueries(union=union.name)
-                    for union in unions
-                    if union.source in graph.entities
-                ),
+                *(UnionInDjangoQueries(union=union.name) for union in reported_unions),
                 *renderer._clashes(entities),
             ),
             lambda: GeneratedFiles(

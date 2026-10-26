@@ -671,6 +671,36 @@ class ViewsMixedWithPayloads(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class UnreachableVariant(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Union's Variant comes after `kept_by`, which keeps every row, so it is
+    the result of none."""
+
+    view: UnionName
+    variant: ViewName | UnionName
+    kept_by: ViewName | UnionName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: the Variant {self.variant.root} is never a result, "
+            f"because {self.kept_by.root} before it keeps every row. Filter "
+            f"{self.kept_by.root} with `where`, or move it last."
+        )
+
+
+class SharedUnionName(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Union has the name of a View, a Payload or another Union, so their
+    models would too. Reported once per name."""
+
+    view: UnionName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: a Union shares the name '{self.view.root}' with a "
+            "View, a Payload or another Union. Model names must be unique across "
+            "Views, Payloads and Unions."
+        )
+
+
 class PayloadUnion(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Union's Variants are Payloads, which Unions do not support yet."""
 
@@ -728,4 +758,6 @@ type CompileDiagnostic = (
     | VariantSourcesDiffer
     | ViewsMixedWithPayloads
     | PayloadUnion
+    | UnreachableVariant
+    | SharedUnionName
 )

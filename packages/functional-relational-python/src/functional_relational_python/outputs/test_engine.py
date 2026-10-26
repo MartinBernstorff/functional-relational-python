@@ -1366,8 +1366,9 @@ def test_reading_a_union_over_a_source_that_is_not_an_entity_is_an_error() -> No
         return View(
             name=name,
             source=Memo,
-            step=test_compiler.added_tag(
-                FieldName("kind"), test_compiler.Tag(tag.root)
+            step=steps.pipeline(
+                steps.where(conditions.eq(conditions.field(FieldName("body")), tag)),
+                test_compiler.added_tag(FieldName("kind"), test_compiler.Tag(tag.root)),
             ),
         )
 

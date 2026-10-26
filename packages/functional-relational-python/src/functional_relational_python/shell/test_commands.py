@@ -17,7 +17,7 @@ from functional_relational_python.outputs.python.plan import (
     WithoutMappings,
 )
 from functional_relational_python.outputs.python.symbols import ModulePath
-from functional_relational_python.pipeline import steps
+from functional_relational_python.pipeline import conditions, steps
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
@@ -299,7 +299,10 @@ def tagged_card(tag: Text) -> View:
     return View(
         name=ViewName(f"{tag.root.title()}Card"),
         source=Company,
-        step=test_compiler.added_tag(FieldName("kind"), test_compiler.Tag(tag.root)),
+        step=steps.pipeline(
+            steps.where(conditions.eq(conditions.field(FieldName("name")), tag)),
+            test_compiler.added_tag(FieldName("kind"), test_compiler.Tag(tag.root)),
+        ),
     )
 
 

@@ -1249,7 +1249,8 @@ def test_generated_queries_pass_the_type_checker(tmp_path: Path) -> None:
         "def overviews() -> list[frp_generated_models.EmployeeOverview]:\n"
         "    employees = frp_generated_django.Employee.objects\n"
         "    return [\n"
-        "        *employees.filter(name='a').order_by('pk')[:2].as_employee_overview(),\n"
+        "        *employees.filter(name='a')"
+        ".order_by('pk')[:2].as_employee_overview(),\n"
         "        *employees.exclude(name='a').as_employee_overview(),\n"
         "        *employees.order_by('-pk').as_employee_overview(),\n"
         "        *employees.all().as_employee_overview(),\n"
@@ -1353,13 +1354,14 @@ def test_the_filter_in_django_queries_message_names_the_view() -> None:
     )
 
 
-def test_a_union_over_an_entity_is_a_diagnostic() -> None:
+def test_a_union_over_an_entity_is_one_diagnostic_for_it_and_its_variants() -> None:
     def tagged(tag: Text) -> View:
         return View(
             name=ViewName(f"{tag.root.title()}Employee"),
             source=Employee,
-            step=test_compiler.added_tag(
-                FieldName("kind"), test_compiler.Tag(tag.root)
+            step=steps.pipeline(
+                steps.where(conditions.eq(conditions.field(FieldName("name")), tag)),
+                test_compiler.added_tag(FieldName("kind"), test_compiler.Tag(tag.root)),
             ),
         )
 

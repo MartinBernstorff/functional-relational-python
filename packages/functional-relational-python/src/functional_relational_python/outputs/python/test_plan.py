@@ -562,26 +562,22 @@ def test_a_models_only_layout_plans_no_union_functions() -> None:
     assert (len(plan.unions), plan.union_functions) == (1, {})
 
 
-def test_a_union_named_like_a_view_in_its_module_clashes() -> None:
-    union = employee_union()
-    view = company_view(ViewName(union.name.root))
+def test_a_union_named_like_a_class_its_module_imports_clashes() -> None:
+    union = employee_union().model_copy(update={"name": UnionName(Text.__name__)})
     module = ModulePath("app.views")
 
     assert diagnostics_of(
-        compile_all([view], [union]), PythonLayout.models_only(into(module))
+        compile_all([], [union]), PythonLayout.models_only(into(module))
     ) == (
         NameClash(
             scope=Scope(module.root),
-            name=Identifier(union.name.root),
+            name=Identifier(Text.__name__),
             origins=(
                 AnnotationText(
-                    f"{module.root}.{union.name.root} (the model of Union "
+                    f"{module.root}.{Text.__name__} (the model of Union "
                     f"{union.name.root})"
                 ),
-                AnnotationText(
-                    f"{module.root}.{union.name.root} (the model of View "
-                    f"{view.name.root})"
-                ),
+                symbol(Text).describe(),
             ),
         ),
     )
