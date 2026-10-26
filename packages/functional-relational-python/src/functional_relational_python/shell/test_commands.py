@@ -130,13 +130,14 @@ def test_generate_writes_files_that_check_accepts() -> None:
         root.file(ModulePath("app.cards").file_path()),
         root.file(ModulePath("app.payloads").file_path()),
         root.file(DjangoModels.fake().module.file_path()),
+        root.file(DjangoModels.fake().queries.file_path()),
     )
     assert commands.check(filesystem, root) == Ok(None)
 
 
 def test_check_reports_an_edited_file() -> None:
     filesystem, root = project(in_this_module(Text("catalog")))
-    (_, path, _) = commands.generate(filesystem, root).unwrap()
+    (_, path, *_) = commands.generate(filesystem, root).unwrap()
     filesystem.write(path, FileText(f"{filesystem.files[path].root}# edited\n"))
 
     match commands.check(filesystem, root):
