@@ -82,6 +82,14 @@ class Optionality(StrEnum):
             optionality=Optionality.REQUIRED, required=annotation, metadata=()
         )
 
+    @staticmethod
+    def of_aliased_annotation(annotation: RuntimeAnnotation) -> SplitAnnotation:
+        """As `of_annotation`, looking through `type` aliases of the whole
+        annotation, so `type MaybeText = Text | None` is an optional `Text`."""
+        while isinstance(annotation, typing.TypeAliasType):
+            annotation = annotation.__value__
+        return Optionality.of_annotation(annotation)
+
     @typing.overload
     def annotate[T](self, annotation: type[T]) -> type[T | None]: ...
 

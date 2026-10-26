@@ -163,6 +163,23 @@ def where(condition: ir.Condition) -> Step:
     return step
 
 
+def require(fields: FieldName | ir.Select) -> Step:
+    """Narrows the field named `fields`, or every field `fields` selects, from
+    `X | None` to `X`, e.g. a submitted campaign's `name`.
+
+    A required Reference, resolved or reversed, holds its Entity rather than
+    `None`. Requiring drops no row: a View result whose field is `None` is an
+    unmet requirement, which the InMemoryViewEngine reports and a mapping function
+    raises. Requiring a field that is not optional, or in a Payload, is a
+    diagnostic.
+    """
+
+    def step(node: ir.Node) -> ir.Node:
+        return ir.Require(input=node, fields=fields)
+
+    return step
+
+
 def select(predicate: ir.FieldPredicate) -> ir.Select:
     """The fields `predicate` accepts, for a step that acts on several fields."""
     return ir.Select(predicate=predicate)
@@ -252,7 +269,9 @@ def is_primary_key(field: ir.RelationField) -> bool:
     subject's `id` field. A Reference renamed to `id` is not the primary key.
     """
     match field:
-        case ir.Field(value=ir.SourceField(field=source)):
+        case ir.Field(
+            value=ir.SourceField(field=source) | ir.RequiredField(field=source)
+        ):
             return source == EntityNode.primary_key
         case ir.Field() | ir.NestedField():
             return False

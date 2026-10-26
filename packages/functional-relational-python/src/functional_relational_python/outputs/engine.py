@@ -15,6 +15,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     EntityNode,
     FieldName,
+    Optionality,
 )
 from functional_relational_python.entity_graph.id import IdValue
 from functional_relational_python.pipeline import ir
@@ -110,7 +111,44 @@ class SharedOneToOneReference(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-type ReadDiagnostic = DanglingReference | SharedOneToOneReference
+class UnmetRequirement(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A field a View requires is `None` in the stored Entities with `ids`."""
+
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+    ids: tuple[IdValue, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        ids = ", ".join(repr(id_value.root) for id_value in self.ids)
+        return DiagnosticMessage(
+            f"{self.entity.__name__}.{self.field.root} is required, but is None "
+            f"for IDs: {ids}"
+        )
+
+
+class UnmetReverseRequirement(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A View requires an `entity` whose one-to-one Reference `via` points to the
+    subject, but none points to the subjects with `ids`."""
+
+    entity: type[pydantic.BaseModel]
+    via: FieldName
+    ids: tuple[IdValue, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        ids = ", ".join(repr(id_value.root) for id_value in self.ids)
+        return DiagnosticMessage(
+            f"A {self.entity.__name__} referencing each subject by "
+            f"{self.entity.__name__}.{self.via.root} is required, but none "
+            f"references IDs: {ids}"
+        )
+
+
+type ReadDiagnostic = (
+    DanglingReference
+    | SharedOneToOneReference
+    | UnmetRequirement
+    | UnmetReverseRequirement
+)
 
 
 type FieldValue = object
@@ -118,7 +156,7 @@ type FieldValue = object
 
 
 class _IdsFound:
-    """IDs found while running a View, by Entity and Reference field, each once."""
+    """IDs found while running a View, by Entity and field, each once."""
 
     def __init__(self) -> None:
         self.ids: dict[tuple[type[pydantic.BaseModel], FieldName], list[IdValue]] = {}
@@ -141,12 +179,17 @@ class _Read:
 
     `missing` are IDs no stored Entity has, by the Entity and field holding them.
     `shared` are IDs several Entities hold in a one-to-one field, by that Entity
-    and field. Only IDs the View looks up are reported.
+    and field. Only IDs the View looks up are reported. `unmet` are the IDs of
+    Entities whose required field is `None`, by that Entity and field.
+    `unreferenced` are the IDs of subjects no Entity references by a one-to-one
+    field the View requires, by that Entity and field.
     """
 
     def __init__(self, stored: _Stored) -> None:
         self.missing = _IdsFound()
         self.shared = _IdsFound()
+        self.unmet = _IdsFound()
+        self.unreferenced = _IdsFound()
         self._stored = stored
         self._indexes: dict[
             tuple[type[pydantic.BaseModel], FieldName],
@@ -182,6 +225,14 @@ class _Read:
             *(
                 SharedOneToOneReference(entity=entity, field=field, shared=tuple(ids))
                 for (entity, field), ids in self.shared.ids.items()
+            ),
+            *(
+                UnmetRequirement(entity=entity, field=field, ids=tuple(ids))
+                for (entity, field), ids in self.unmet.ids.items()
+            ),
+            *(
+                UnmetReverseRequirement(entity=entity, via=via, ids=tuple(ids))
+                for (entity, via), ids in self.unreferenced.ids.items()
             ),
         )
 
@@ -230,13 +281,13 @@ class InMemoryViewEngine:
         tuple[ViewRow, ...],
         UnknownViewError | NonEntitySourceError | DiagnosticsError[ReadDiagnostic],
     ]:
-        """The View's results, or every Reference that points to a missing Entity
-        and every ID several Entities share in a one-to-one Reference the View
-        follows backwards.
+        """The View's results, or every Reference that points to a missing Entity,
+        every ID several Entities share in a one-to-one Reference the View follows
+        backwards, and every requirement of the View a row does not meet.
 
         Only Entities are stored, so a View over any other Source is an error. A
-        row the View's Filters exclude is not looked up, so its References are not
-        reported.
+        row the View's Filters exclude is not looked up, so its References and
+        requirements are not reported.
         """
         match self._views.get(view):
             case None:
@@ -273,13 +324,17 @@ class InMemoryViewEngine:
                 entity = self._follow(found.lookups(), subject, run)
                 return None if entity is None else self._row(relation, entity, run)
         match value:
-            case ir.SourceField():
+            case ir.SourceField() | ir.RequiredField():
+                InMemoryViewEngine._check_required(value, subject, run)
                 return getattr(subject, value.field.root)
             case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
                 return self._follow(value.lookups(), subject, run)
             case ir.Lifted(through=through, field=read):
                 entity = self._follow(through, subject, run)
-                return None if entity is None else getattr(entity, read.field.root)
+                if entity is None:
+                    return None
+                InMemoryViewEngine._check_required(read, entity, run)
+                return getattr(entity, read.field.root)
             case ir.Added():
                 return InMemoryViewEngine._default(field)
 
@@ -375,11 +430,13 @@ class InMemoryViewEngine:
         A Lookup gives `None` for an absent optional Reference, or when the Entity
         is missing, which `run` records. A ReverseLookup gives `None` when no
         Entity references the subject, and the first in insertion order when
-        several do, which `run` records.
+        several do, which `run` records. When the View requires the lookup, `run`
+        records finding nothing.
         """
         match lookup:
             case ir.Lookup():
                 reference = lookup.reference.field
+                InMemoryViewEngine._check_required(lookup.reference, subject, run)
                 id_value = getattr(subject, reference.root)
                 if id_value is None:
                     return None
@@ -390,6 +447,25 @@ class InMemoryViewEngine:
                     case entity:
                         return entity
             case ir.ReverseLookup():
-                return run.referencing(
-                    lookup, getattr(subject, EntityNode.primary_key.root)
+                subject_id = getattr(subject, EntityNode.primary_key.root)
+                found = run.referencing(lookup, subject_id)
+                match lookup.optionality, found:
+                    case Optionality.REQUIRED, None:
+                        run.unreferenced.add(lookup.target, lookup.via, subject_id)
+                    case ((Optionality.REQUIRED | Optionality.OPTIONAL), _):
+                        pass
+                return found
+
+    @staticmethod
+    def _check_required(
+        column: ir.SubjectColumn, subject: pydantic.BaseModel, run: _Read
+    ) -> None:
+        """Records in `run` that `subject`'s field `column` is `None`, if the View
+        requires it."""
+        match column:
+            case ir.RequiredField(field=field) if getattr(subject, field.root) is None:
+                run.unmet.add(
+                    type(subject), field, getattr(subject, EntityNode.primary_key.root)
                 )
+            case ir.SourceField() | ir.RequiredField():
+                pass

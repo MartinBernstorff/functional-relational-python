@@ -16,6 +16,7 @@ from functional_relational_python.compiler import (
     condition_checker,
     diagnostics,
     literals,
+    narrowing,
 )
 from functional_relational_python.compiler.model_names import (
     ModelNames,
@@ -291,6 +292,7 @@ def _check_node(
             | ir.Default()
             | ir.Add()
             | ir.Where()
+            | ir.Require()
         ):
             match _check_node(entity_graph, view, node.input):
                 case ir.Relation() as relation:
@@ -314,7 +316,8 @@ def _check_step(
     | ir.Reverse
     | ir.Default
     | ir.Add
-    | ir.Where,
+    | ir.Where
+    | ir.Require,
     relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
     """Checks one step against the relation its input has."""
@@ -341,7 +344,9 @@ def _check_step(
         case ir.Add():
             checked = _check_add(view, node, relation)
         case ir.Where():
-            checked = _check_where(view, node, relation)
+            checked = _check_where(entity_graph, view, node, relation)
+        case ir.Require():
+            checked = _check_require(view, node, relation)
     return checked
 
 
@@ -599,21 +604,82 @@ def _check_add(
 
 
 def _check_where(
-    view: DefinitionName, node: ir.Where, relation: ir.Relation
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    node: ir.Where,
+    relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
-    """Adds the checked Condition to the relation's Filters.
+    """Adds the checked Condition to the relation's Filters, and narrows the
+    fields it tests, as `narrowing.by_filter` does.
 
-    A defective Condition leaves the relation unchanged, so that is an exact
-    recovery: later steps never depend on a Filter. Where a Filter is not allowed,
-    in a nested pipeline or a Payload, is reported once the pipeline is checked.
+    A defective Condition leaves the relation unchanged. Where a Filter is not
+    allowed, in a nested pipeline or a Payload, is reported once the pipeline is
+    checked.
     """
-    match condition_checker.ConditionChecker(view=view, relation=relation).check(
-        node.condition
-    ):
+    match condition_checker.ConditionChecker(
+        view=view, relation=relation, subject=_subject(node).source
+    ).check(node.condition):
         case condition_checker.Defects(diagnostics=reported):
             return Poisoned(recovered=relation, diagnostics=reported)
         case checked:
-            return relation.filtered(checked)
+            return narrowing.by_filter(
+                relation.filtered(checked), checked, entity_graph
+            )
+
+
+def _subject(node: ir.Node) -> ir.FromSource:
+    """What the pipeline that `node` ends started from, however the relation has
+    changed since: the View's Source, or the Entity a nested pipeline runs on."""
+    while not isinstance(node, ir.FromSource):
+        node = node.input
+    return node
+
+
+def _check_require(
+    view: DefinitionName, node: ir.Require, relation: ir.Relation
+) -> ir.Relation | Poisoned:
+    """Narrows the named or selected fields from `X | None` to `X`.
+
+    Each field that cannot be required is a diagnostic, and is left as it is, so
+    later steps still find it. Requiring in a Payload is a diagnostic; its fields
+    are still narrowed, so later steps are checked against the types the pipeline
+    asks for, as for `retype` in a View.
+    """
+    reported: list[diagnostics.CompileDiagnostic] = []
+    match view:
+        case PayloadName():
+            reported.append(diagnostics.RequireInPayload(view=view))
+        case ViewName():
+            pass
+    match node.fields:
+        case ir.Select() as selected:
+            names = relation.selected(selected)
+        case FieldName() as field:
+            names = (field,)
+            if field not in relation.field_names():
+                reported.append(
+                    diagnostics.UnknownField(
+                        view=view,
+                        source=relation.source,
+                        field=field,
+                        valid=relation.field_names(),
+                    )
+                )
+    fields: list[ir.RelationField] = []
+    for field in relation.fields:
+        if field.name not in names:
+            fields.append(field)
+            continue
+        match narrowing.required(view, relation.source, field):
+            case ir.Field() | ir.NestedField() as narrowed:
+                fields.append(narrowed)
+            case diagnostic:
+                reported.append(diagnostic)
+                fields.append(field)
+    checked = relation.with_fields(tuple(fields))
+    if not reported:
+        return checked
+    return Poisoned(recovered=checked, diagnostics=tuple(reported))
 
 
 def _default_value(
@@ -746,6 +812,15 @@ def _lookup(
                 target=reference.target,
                 optionality=reference.optionality,
             )
+            match field.value:
+                case ir.RequiredField() | ir.Lifted(field=ir.RequiredField()):
+                    # The field's type is narrowed, but the Reference it reads is
+                    # optional, and the View requires it: `None` there is unmet.
+                    lookup = lookup.model_copy(
+                        update={"optionality": Optionality.OPTIONAL}
+                    ).required()
+                case _:
+                    pass
             # A lifted Reference is followed from the Entity it is read off.
             match field.value:
                 case ir.Lifted(through=through):
@@ -795,11 +870,7 @@ def _check_reverse(
             )
         )
     reported.extend(ViewModelNames.check_field(view, source, name))
-    # The subject is what the pipeline started from, however the relation has
-    # changed since.
-    subject = node.input
-    while not isinstance(subject, ir.FromSource):
-        subject = subject.input
+    subject = _subject(node)
     non_entities: list[diagnostics.CompileDiagnostic] = []
     if subject.source not in entity_graph.entities:
         non_entities.append(
@@ -865,7 +936,10 @@ def _check_reverse(
         if len(chosen) == 1:
             (reference,) = chosen
             lookup = ir.ReverseLookup(
-                target=node.entity, via=reference.field, id_type=reference.id_type
+                optionality=Optionality.OPTIONAL,
+                target=node.entity,
+                via=reference.field,
+                id_type=reference.id_type,
             )
             checked = _resolved(entity_graph, view, node.then, name, lookup)
             field = checked.field
@@ -961,7 +1035,7 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
         match value:
             case ir.Added():
                 return field
-            case ir.SourceField():
+            case ir.SourceField() | ir.RequiredField():
                 lifted_value = ir.Lifted(through=self.chain, field=value)
             case ir.Lifted(through=through, field=read):
                 lifted_value = ir.Lifted(through=(*self.chain, *through), field=read)

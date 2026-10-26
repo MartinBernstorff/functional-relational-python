@@ -496,6 +496,65 @@ class UnorderedFieldType(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class RequireInPayload(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Payload's pipeline requires a field. A Payload is a write model, so it
+    has no values to require."""
+
+    view: PayloadName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: a Payload cannot `require` a field, because it is "
+            "a write model with no values to require."
+        )
+
+
+class RequireOnRequiredField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`require` named or selected a field whose type does not admit `None`, so
+    there is nothing to narrow."""
+
+    view: DefinitionName
+    source: ir.SourceName
+    field: FieldName
+    annotation: RuntimeAnnotation
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot require {self.source.root}.{self.field.root}, "
+            f"because its type {self.annotation!r} is already required."
+        )
+
+
+class RequireOnAlwaysNoneField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`require` named or selected a field a `where` keeps only `None` in, so the
+    requirement is never met."""
+
+    view: DefinitionName
+    source: ir.SourceName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot require {self.source.root}.{self.field.root}, "
+            "because a `where` keeps only the rows where it is None, so the "
+            "requirement is never met."
+        )
+
+
+class RequireAddedField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`require` named or selected a field `add` declared, which has no value from
+    the subject to require."""
+
+    view: DefinitionName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot require '{self.field.root}', because `add` "
+            "declared it, so it has no value to require."
+        )
+
+
 type CompileDiagnostic = (
     UnknownField
     | RenameOntoExistingField
@@ -529,4 +588,8 @@ type CompileDiagnostic = (
     | ComparedTypesDiffer
     | OrderingOnOptionalField
     | UnorderedFieldType
+    | RequireInPayload
+    | RequireOnRequiredField
+    | RequireOnAlwaysNoneField
+    | RequireAddedField
 )

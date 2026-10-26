@@ -7,7 +7,6 @@ and the Value that computes it. Backends run the Relation, not the node tree.
 
 import copy
 import enum
-import typing
 from collections.abc import Callable, Collection, Iterable, Mapping
 from typing import Annotated
 
@@ -295,6 +294,17 @@ class Where(pydantic.BaseModel, frozen=True):
     condition: Condition
 
 
+class Require(pydantic.BaseModel, frozen=True):
+    """Narrows the named field, or every selected field, from `X | None` to `X`.
+
+    It drops no row: a `None` there is an unmet requirement when the View runs. A
+    View may require anywhere, a nested pipeline included; a Payload may not.
+    """
+
+    input: Node
+    fields: FieldName | Select
+
+
 type Node = (
     FromSource
     | Omit
@@ -308,6 +318,7 @@ type Node = (
     | Default
     | Add
     | Where
+    | Require
 )
 
 
@@ -355,6 +366,23 @@ class SourceField(pydantic.BaseModel, frozen=True):
         return ()
 
 
+class RequiredField(pydantic.BaseModel, frozen=True):
+    """The value of one of the subject's optional fields, which the View requires:
+    `None` there is an unmet requirement, not a value.
+
+    Like a SourceField, it reads the subject's field `field`.
+    """
+
+    field: FieldName
+
+    def lookups(self) -> tuple[EntityLookup, ...]:
+        return ()
+
+
+type SubjectColumn = SourceField | RequiredField
+"""A value read from one of the subject's own fields, required or not."""
+
+
 class _FindsEntity(pydantic.BaseModel, frozen=True):
     """What every lookup has: the Entity it finds, and whether it may find none."""
 
@@ -376,10 +404,28 @@ class _FindsEntity(pydantic.BaseModel, frozen=True):
 
 
 class Lookup(_FindsEntity, frozen=True):
-    """The Entity a Reference points to, or `None` for an absent optional one."""
+    """The Entity a Reference points to, or `None` for an absent optional one.
 
-    reference: SourceField
+    A RequiredField `reference` is an optional Reference the View requires, so
+    the lookup is required and an absent Reference an unmet requirement.
+    """
+
+    reference: SubjectColumn
     id_type: IdType
+
+    def required(self) -> Lookup:
+        """This lookup, required by the View: an optional Reference's ID is
+        required. A required Reference is left as it is."""
+        match self.optionality:
+            case Optionality.REQUIRED:
+                return self
+            case Optionality.OPTIONAL:
+                return self.model_copy(
+                    update={
+                        "reference": RequiredField(field=self.reference.field),
+                        "optionality": Optionality.REQUIRED,
+                    }
+                )
 
     def lookups(self) -> tuple[EntityLookup, ...]:
         return (self,)
@@ -395,13 +441,18 @@ class ReverseLookup(_FindsEntity, frozen=True):
     or `None` when no Entity's does.
 
     `id_type` is the subject's primary key type, which `via` is typed with.
+
+    Whether a referencing Entity exists is up to the data, so a ReverseLookup is
+    optional unless the View requires it; then finding none is an unmet
+    requirement.
     """
 
-    # Whether a referencing Entity exists is up to the data, so a ReverseLookup
-    # is always optional. Like a tag, the one value it can have is its default.
-    optionality: typing.Literal[Optionality.OPTIONAL] = Optionality.OPTIONAL
     via: FieldName
     id_type: IdType
+
+    def required(self) -> ReverseLookup:
+        """This lookup, required by the View."""
+        return self.model_copy(update={"optionality": Optionality.REQUIRED})
 
     def lookups(self) -> tuple[EntityLookup, ...]:
         return (self,)
@@ -425,6 +476,11 @@ class ChainedLookup(pydantic.BaseModel, frozen=True):
 
     def lookups(self) -> tuple[EntityLookup, ...]:
         return self.chain
+
+    def required(self) -> ChainedLookup:
+        """This lookup, required by the View: each lookup on the way must find an
+        Entity."""
+        return ChainedLookup(chain=tuple(lookup.required() for lookup in self.chain))
 
     def annotation(self) -> type[pydantic.BaseModel | None]:
         """The found value's type: the last target Entity, optional if any
@@ -452,13 +508,35 @@ class Lifted(pydantic.BaseModel, frozen=True):
     `None` when a Lookup on the way finds no Entity."""
 
     through: Annotated[tuple[EntityLookup, ...], pydantic.Field(min_length=1)]
-    field: SourceField
+    field: SubjectColumn
 
     def lookups(self) -> tuple[EntityLookup, ...]:
         return self.through
 
+    def required(self) -> Lifted:
+        """This value, required by the View: every Lookup on the way must find an
+        Entity, and its field must hold a value."""
+        read = self.field.field
+        declared = self.through[-1].target.model_fields.get(read.root)
+        # A field recovered from a defective step may name no field of the
+        # Entity; it is left as it is.
+        optionality = (
+            Optionality.REQUIRED
+            if declared is None
+            else Optionality.of_aliased_annotation(declared.annotation).optionality
+        )
+        match optionality:
+            case Optionality.OPTIONAL:
+                field: SubjectColumn = RequiredField(field=read)
+            case Optionality.REQUIRED:
+                field = self.field
+        return Lifted(
+            through=tuple(lookup.required() for lookup in self.through),
+            field=field,
+        )
 
-type SubjectValue = SourceField | EntityValue | Lifted
+
+type SubjectValue = SourceField | RequiredField | EntityValue | Lifted
 """A value computed from the subject's fields."""
 
 type Value = SubjectValue | Added
@@ -580,12 +658,20 @@ class Field(pydantic.BaseModel, frozen=True):
         optional one a lifted field may have.
         """
         match self.value:
-            case SourceField(field=source):
+            case SourceField(field=source) | RequiredField(field=source):
                 return (source, self.info)
             case Lifted(through=through, field=read):
-                return (read.field, through[-1].target.model_fields[read.field.root])
+                declared = through[-1].target.model_fields.get(read.field.root)
+                # A field recovered from a defective step may name no field of
+                # the Entity; it is no Reference then.
+                return self if declared is None else (read.field, declared)
             case Lookup() | ReverseLookup() | ChainedLookup() | Added():
                 return self
+
+    def narrowed(self, annotation: RuntimeAnnotation) -> Field:
+        """This field typed by `annotation`, a narrower type than its own, keeping
+        its default and its type's constraints, which still hold."""
+        return self._annotated(annotation)
 
     def admitting_none(self) -> Field:
         """This field typed to admit `None` too, keeping its default and its

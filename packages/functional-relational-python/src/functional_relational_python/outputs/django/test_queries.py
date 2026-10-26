@@ -42,6 +42,7 @@ from functional_relational_python.outputs.django.models import (
 from functional_relational_python.outputs.django.queries import (
     DjangoQueriesDiagnostic,
     DjangoQueriesRenderer,
+    FilterInDjangoQueries,
     QueriesIntoDjangoModelsModule,
     ReverseInDjangoQueries,
     ReverseInQueryError,
@@ -65,7 +66,7 @@ from functional_relational_python.outputs.python.test_mappings import (
     Generated,
     into,
 )
-from functional_relational_python.pipeline import ir, steps
+from functional_relational_python.pipeline import conditions, ir, steps
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.filesystem import (
     Directory,
@@ -1271,3 +1272,79 @@ def test_generated_queries_pass_the_type_checker(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# require.
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        steps.require(FieldName("nickname")),
+        steps.pipeline(
+            steps.resolve(named(FieldName("mentor_id"))),
+            steps.require(FieldName("mentor")),
+        ),
+        steps.resolve(
+            named(FieldName("mentor_id")), steps.require(FieldName("nickname"))
+        ),
+    ],
+    ids=["field", "reference", "nested"],
+)
+def test_an_unmet_requirement_fails_the_view_models_validation(
+    step: steps.Step,
+) -> None:
+    view = View(name=ViewName("RequiringEmployee"), source=Employee, step=step)
+    (compiled,) = compile_all([view]).views
+
+    with Database.of([view]) as django_models:
+        Database.put(django_models, organisation())
+        with pytest.raises(pydantic.ValidationError, match="RequiringEmployee"):
+            _ = Database.read(django_models, compiled, every_row)
+
+
+def test_a_met_requirement_reads_like_the_engine() -> None:
+    view = View(
+        name=ViewName("NicknamedEmployee"),
+        source=Employee,
+        step=steps.require(FieldName("nickname")),
+    )
+    entities = tuple(
+        entity.model_copy(update={"nickname": Text("nick")})
+        if isinstance(entity, Employee)
+        else entity
+        for entity in organisation()
+    )
+    (compiled,) = compile_all([view]).views
+
+    with Database.of([view]) as django_models:
+        Database.put(django_models, entities)
+        rows = Database.read(django_models, compiled, every_row)
+
+    assert rows == engine_rows([compiled], entities)[view.name]
+
+
+def test_a_view_that_filters_is_a_diagnostic() -> None:
+    view = View(
+        name=ViewName("LeadEmployee"),
+        source=Employee,
+        step=steps.where(conditions.eq(conditions.field(FieldName("role")), Role.LEAD)),
+    )
+
+    match DjangoQueriesRenderer.render(
+        entity_graph(),
+        Modules.config(),
+        compile_all([view]).views,
+        into(Generated.models),
+    ):
+        case Ok(files):
+            pytest.fail(f"expected diagnostics, got {files}")
+        case Err(error):
+            assert error.diagnostics == (FilterInDjangoQueries(view=view.name),)
+
+
+def test_the_filter_in_django_queries_message_names_the_view() -> None:
+    assert FilterInDjangoQueries(view=ViewName("LeadEmployee")).describe().root == (
+        "LeadEmployee: cannot generate Django queries for it, because it filters "
+        "with `where`, and Django queries cannot filter yet."
+    )
