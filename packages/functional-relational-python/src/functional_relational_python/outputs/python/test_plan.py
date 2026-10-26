@@ -45,7 +45,7 @@ from functional_relational_python.outputs.python.test_mappings import (
     named,
 )
 from functional_relational_python.outputs.python.test_models import WithUnsupported
-from functional_relational_python.pipeline import steps
+from functional_relational_python.pipeline import conditions, steps
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.identifier import Identifier
 
@@ -232,6 +232,25 @@ def test_a_default_whose_enum_cannot_be_imported_is_reported_for_its_field() -> 
     ) == (
         Unimportable(
             view=view.name, field=field, annotation=AnnotationText.of(LocalColour)
+        ),
+    )
+
+
+def test_a_filter_literal_whose_class_cannot_be_imported_is_reported() -> None:
+    class LocalText(Text, frozen=True):
+        pass
+
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.where(
+            conditions.eq(conditions.field(FieldName("name")), LocalText("Acme"))
+        ),
+    )
+
+    assert diagnostics_of(compile_all([view]), app_layout()) == (
+        Unimportable(
+            view=view.name, field=None, annotation=AnnotationText.of(LocalText)
         ),
     )
 

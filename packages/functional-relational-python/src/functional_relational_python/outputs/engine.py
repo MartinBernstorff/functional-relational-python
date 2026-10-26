@@ -5,6 +5,7 @@ stateful fake in their own tests, and every other backend is compared against it
 """
 
 from collections.abc import Mapping
+from typing import Protocol
 
 import pydantic
 from safe_result import Err, Ok, Result
@@ -156,11 +157,25 @@ class _Problems:
         )
 
 
+class _Comparable(Protocol):
+    """A field value a Filter compares. The compiler only lets through an
+    ordering of values whose type defines it."""
+
+    def __lt__(self, other: object, /) -> object: ...
+
+    def __le__(self, other: object, /) -> object: ...
+
+    def __gt__(self, other: object, /) -> object: ...
+
+    def __ge__(self, other: object, /) -> object: ...
+
+
 class InMemoryViewEngine:
     """Holds Entities by ID and runs compiled Views over them.
 
     `put` inserts an Entity, or replaces the one with the same ID. `read` returns
-    the View results, one per row of the View's Source, in insertion order.
+    the View results, one per row of the View's Source its Filters keep, in
+    insertion order.
     """
 
     def __init__(
@@ -190,7 +205,9 @@ class InMemoryViewEngine:
         and every ID several Entities share in a one-to-one Reference the View
         follows backwards.
 
-        Only Entities are stored, so a View over any other Source is an error.
+        Only Entities are stored, so a View over any other Source is an error. A
+        row the View's Filters exclude is not looked up, so its References are not
+        reported.
         """
         match self._views.get(view):
             case None:
@@ -203,6 +220,10 @@ class InMemoryViewEngine:
         rows = tuple(
             self._row(compiled.relation, entity, problems)
             for entity in self._entities.get(compiled.source, {}).values()
+            if all(
+                InMemoryViewEngine._holds(kept, entity)
+                for kept in compiled.relation.filters
+            )
         )
         return DiagnosticsError.or_ok(problems.diagnostics(), lambda: rows)
 
@@ -234,6 +255,53 @@ class InMemoryViewEngine:
                         return None
                     case entity:
                         return self._row(relation, entity, problems)
+
+    @staticmethod
+    def _holds(kept: ir.Filter, subject: pydantic.BaseModel) -> bool:
+        """Whether `kept` is true of `subject`, with Python's two-valued null
+        semantics: `None == x` is false and `None != x` is true."""
+        match kept:
+            case ir.FilterComparison(operator=operator, field=field, operand=operand):
+                match operand:
+                    case ir.SourceField():
+                        right = getattr(subject, operand.field.root)
+                    case ir.ScalarLiteral() | ir.EnumLiteral() | ir.RootModelLiteral():
+                        right = operand.value()
+                return InMemoryViewEngine._compare(operator, subject, field, right)
+            case ir.FilterIsNull(field=field):
+                return getattr(subject, field.field.root) is None
+            case ir.FilterAnd(terms=terms):
+                return all(InMemoryViewEngine._holds(term, subject) for term in terms)
+            case ir.FilterOr(terms=terms):
+                return any(InMemoryViewEngine._holds(term, subject) for term in terms)
+            case ir.FilterNot(term=term):
+                return not InMemoryViewEngine._holds(term, subject)
+
+    @staticmethod
+    def _compare(
+        operator: ir.ComparisonOperator,
+        subject: pydantic.BaseModel,
+        field: ir.SourceField,
+        right: FieldValue,
+    ) -> bool:
+        """`subject.<field> <operator> right` in Python. The compiler only lets
+        through an ordering of non-optional fields whose type defines it."""
+        left: _Comparable = getattr(subject, field.field.root)
+        compared: object
+        match operator:
+            case ir.ComparisonOperator.EQ:
+                compared = left == right
+            case ir.ComparisonOperator.NE:
+                compared = left != right
+            case ir.ComparisonOperator.LT:
+                compared = left < right
+            case ir.ComparisonOperator.LE:
+                compared = left <= right
+            case ir.ComparisonOperator.GT:
+                compared = left > right
+            case ir.ComparisonOperator.GE:
+                compared = left >= right
+        return bool(compared)
 
     @staticmethod
     def _default(field: ir.Field) -> FieldValue:

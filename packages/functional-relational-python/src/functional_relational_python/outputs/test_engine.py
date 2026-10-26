@@ -1,4 +1,5 @@
 import enum
+from collections.abc import Callable
 from typing import Annotated
 
 import pydantic
@@ -14,7 +15,7 @@ from functional_relational_python.entity_graph.entity_graph import (
 )
 from functional_relational_python.entity_graph.id import Id, IdBase, OneToOne
 from functional_relational_python.outputs import engine
-from functional_relational_python.pipeline import ir, steps
+from functional_relational_python.pipeline import conditions, ir, steps
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
@@ -677,3 +678,134 @@ def test_resolving_then_replacing_entities_by_their_ids_gives_the_original(
     assert [
         with_ids_again(case.source, compiled_view.relation, row) for row in rows
     ] == [entity for entity in case.stored if type(entity) is case.source]
+
+
+# where.
+
+
+def mentees() -> tuple[Employee, Employee, Employee]:
+    """A mentor-less employee, their mentee, and that mentee's mentee."""
+    department_id = DepartmentId(1)
+    first = Employee.fake(EmployeeId(1), department_id, None)
+    second = Employee.fake(EmployeeId(2), department_id, first.id)
+    third = Employee.fake(EmployeeId(3), department_id, second.id)
+    return first, second, third
+
+
+def mentor() -> ir.FieldRef:
+    return conditions.field(FieldName("mentor_id"))
+
+
+@pytest.mark.parametrize(
+    ("condition", "kept"),
+    [
+        (conditions.eq(mentor(), EmployeeId(1)), [1]),
+        (conditions.ne(mentor(), EmployeeId(1)), [0, 2]),
+        (conditions.eq(mentor(), None), [0]),
+        (conditions.ne(mentor(), None), [1, 2]),
+        (conditions.is_null(mentor()), [0]),
+        (conditions.not_(conditions.is_null(mentor())), [1, 2]),
+        (
+            conditions.or_(
+                conditions.eq(mentor(), EmployeeId(1)), conditions.is_null(mentor())
+            ),
+            [0, 1],
+        ),
+        (
+            conditions.and_(
+                conditions.ne(mentor(), EmployeeId(1)),
+                conditions.not_(conditions.is_null(mentor())),
+            ),
+            [2],
+        ),
+        (conditions.eq(conditions.field(FieldName("id")), mentor()), []),
+        (conditions.ne(conditions.field(FieldName("id")), mentor()), [0, 1, 2]),
+    ],
+    ids=[
+        "eq",
+        "ne-is-true-for-none",
+        "eq-none",
+        "ne-none",
+        "is-null",
+        "not",
+        "or",
+        "and",
+        "eq-field",
+        "ne-field",
+    ],
+)
+def test_a_filtered_view_returns_only_the_rows_its_condition_keeps(
+    condition: ir.Condition, kept: list[int]
+) -> None:
+    view = employee_view(steps.where(condition))
+    view_engine = hr_engine(view)
+    employees = mentees()
+    for employee in employees:
+        view_engine.put(employee).unwrap()
+
+    assert [row.root[FieldName("id")] for row in read(view_engine, view.name)] == [
+        employees[index].id for index in kept
+    ]
+
+
+class PlayerId(Id[int]):
+    pass
+
+
+class Player(pydantic.BaseModel, frozen=True):
+    id: PlayerId
+    score: test_compiler.Score
+
+
+@pytest.mark.parametrize(
+    ("condition", "kept"),
+    [
+        (conditions.lt, [0]),
+        (conditions.le, [0, 1]),
+        (conditions.gt, [2]),
+        (conditions.ge, [1, 2]),
+    ],
+    ids=["lt", "le", "gt", "ge"],
+)
+def test_an_ordering_condition_keeps_the_rows_on_its_side(
+    condition: Callable[[ir.FieldRef, conditions.Operand], ir.Comparison],
+    kept: list[int],
+) -> None:
+    view = View(
+        name=ViewName.fake(),
+        source=Player,
+        step=steps.where(
+            condition(conditions.field(FieldName("score")), test_compiler.Score(2))
+        ),
+    )
+    graph = EntityGraph.build([Player], IdBase.fake()).unwrap()
+    view_engine = engine.InMemoryViewEngine(
+        graph, compiler.compile_views(graph, [view]).unwrap()
+    )
+    players = [
+        Player(id=PlayerId(index), score=test_compiler.Score(index + 1))
+        for index in range(3)
+    ]
+    for player in players:
+        view_engine.put(player).unwrap()
+
+    assert [row.root[FieldName("id")] for row in read(view_engine, view.name)] == [
+        players[index].id for index in kept
+    ]
+
+
+def test_an_excluded_row_is_no_view_result_even_with_a_dangling_reference() -> None:
+    view = employee_view(
+        steps.pipeline(steps.where(conditions.is_null(mentor())), steps.hydrate())
+    )
+    view_engine = hr_engine(view)
+    company = Company.fake(CompanyId.fake())
+    department = Department.fake(DepartmentId(1), company.id)
+    kept = Employee.fake(EmployeeId(1), department.id, None)
+    excluded = Employee.fake(EmployeeId(2), DepartmentId(99), kept.id)
+    for entity in (company, department, kept, excluded):
+        view_engine.put(entity).unwrap()
+
+    assert [row.root[FieldName("id")] for row in read(view_engine, view.name)] == [
+        kept.id
+    ]

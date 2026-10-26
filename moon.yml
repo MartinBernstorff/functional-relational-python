@@ -51,6 +51,8 @@ tasks:
       - '@group(sources)'
       - '@group(manifests)'
       - 'pytest.toml'
+      # A test checks generated code is formatted as ruff formats it.
+      - 'ruff.toml'
     options:
       outputStyle: 'buffer-only-failure'
 

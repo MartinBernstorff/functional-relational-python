@@ -1,6 +1,6 @@
 import enum
 import types
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Annotated, Literal
 
 import pydantic
@@ -19,7 +19,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     RuntimeAnnotation,
 )
 from functional_relational_python.entity_graph.id import Id, IdBase, IdType, OneToOne
-from functional_relational_python.pipeline import ir, steps, test_ir
+from functional_relational_python.pipeline import conditions, ir, steps, test_ir
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticsError
@@ -2545,3 +2545,635 @@ def test_a_nested_field_the_base_declares_is_a_diagnostic() -> None:
                     view=view.name, base=DepartmentBase, field=FieldName("department")
                 ),
             )
+
+
+# where.
+
+
+class Stage(enum.Enum):
+    LEAD = "lead"
+    WON = "won"
+
+
+class Score(pydantic.RootModel[int], frozen=True):
+    """A RootModel with an order, so conditions can order it."""
+
+    def __lt__(self, other: Score) -> bool:
+        return self.root < other.root
+
+    def __le__(self, other: Score) -> bool:
+        return self.root <= other.root
+
+    def __gt__(self, other: Score) -> bool:
+        return self.root > other.root
+
+    def __ge__(self, other: Score) -> bool:
+        return self.root >= other.root
+
+
+class Deal(pydantic.BaseModel):
+    name: Text
+    nickname: Text | None
+    stage: Stage
+    score: Score
+    target: Score
+    bonus: Score | None
+
+
+def compile_deal(step: steps.Step) -> compiler.CompiledView:
+    match compiler.compile_views(
+        empty_graph(), [View(name=ViewName.fake(), source=Deal, step=step)]
+    ):
+        case Ok(compiled):
+            return compiled.views[0]
+        case Err(error):
+            pytest.fail(f"expected a compiled view, got {error}")
+
+
+def deal_diagnostics(step: steps.Step) -> tuple[diagnostics.CompileDiagnostic, ...]:
+    return diagnostics_of([View(name=ViewName.fake(), source=Deal, step=step)])
+
+
+def column(name: FieldName) -> ir.SourceField:
+    return ir.SourceField(field=name)
+
+
+def text_literal(value: Text) -> ir.RootModelLiteral:
+    return ir.RootModelLiteral(instance=value, root=ir.ScalarLiteral(value.root))
+
+
+def test_where_keeps_every_field_and_filters_by_the_sources_own_field() -> None:
+    acme = Text("Acme")
+    view = compile_deal(
+        steps.where(conditions.eq(conditions.field(FieldName("name")), acme))
+    )
+
+    assert view.relation.fields == ir.Relation.of(ir.FromSource(source=Deal)).fields
+    assert view.relation.filters == (
+        ir.FilterComparison(
+            operator=ir.ComparisonOperator.EQ,
+            field=column(FieldName("name")),
+            operand=text_literal(acme),
+        ),
+    )
+
+
+def test_a_condition_names_a_field_by_its_name_after_renames() -> None:
+    view = compile_deal(
+        steps.pipeline(
+            steps.rename(FieldName("score"), FieldName("points")),
+            steps.rename(FieldName("target"), FieldName("score")),
+            steps.where(
+                conditions.lt(
+                    conditions.field(FieldName("points")),
+                    conditions.field(FieldName("score")),
+                )
+            ),
+        )
+    )
+
+    assert view.relation.filters == (
+        ir.FilterComparison(
+            operator=ir.ComparisonOperator.LT,
+            field=column(FieldName("score")),
+            operand=column(FieldName("target")),
+        ),
+    )
+
+
+def test_a_filter_survives_omitting_the_field_it_uses() -> None:
+    view = compile_deal(
+        steps.pipeline(
+            steps.where(conditions.is_null(conditions.field(FieldName("nickname")))),
+            steps.omit(FieldName("nickname")),
+        )
+    )
+
+    assert view.relation.filters == (
+        ir.FilterIsNull(field=column(FieldName("nickname"))),
+    )
+
+
+@pytest.mark.parametrize(
+    ("condition", "checked"),
+    [
+        (
+            conditions.eq(conditions.field(FieldName("nickname")), None),
+            ir.FilterIsNull(field=column(FieldName("nickname"))),
+        ),
+        (
+            conditions.ne(conditions.field(FieldName("nickname")), None),
+            ir.FilterNot(term=ir.FilterIsNull(field=column(FieldName("nickname")))),
+        ),
+    ],
+    ids=["eq", "ne"],
+)
+def test_comparing_with_none_is_checked_into_is_null(
+    condition: ir.Condition, checked: ir.Filter
+) -> None:
+    view = compile_deal(steps.where(condition))
+
+    assert view.relation.filters == (checked,)
+
+
+def test_and_or_and_not_keep_their_structure() -> None:
+    view = compile_deal(
+        steps.where(
+            conditions.or_(
+                conditions.and_(
+                    conditions.eq(conditions.field(FieldName("stage")), Stage.WON),
+                    conditions.ge(conditions.field(FieldName("score")), Score(3)),
+                ),
+                conditions.not_(
+                    conditions.is_null(conditions.field(FieldName("bonus")))
+                ),
+            )
+        )
+    )
+
+    assert view.relation.filters == (
+        ir.FilterOr(
+            terms=(
+                ir.FilterAnd(
+                    terms=(
+                        ir.FilterComparison(
+                            operator=ir.ComparisonOperator.EQ,
+                            field=column(FieldName("stage")),
+                            operand=ir.EnumLiteral(member=Stage.WON),
+                        ),
+                        ir.FilterComparison(
+                            operator=ir.ComparisonOperator.GE,
+                            field=column(FieldName("score")),
+                            operand=ir.RootModelLiteral(
+                                instance=Score(3), root=ir.ScalarLiteral(3)
+                            ),
+                        ),
+                    )
+                ),
+                ir.FilterNot(term=ir.FilterIsNull(field=column(FieldName("bonus")))),
+            )
+        ),
+    )
+
+
+def test_each_where_adds_one_filter_in_order() -> None:
+    first = conditions.is_null(conditions.field(FieldName("nickname")))
+    second = conditions.is_null(conditions.field(FieldName("bonus")))
+
+    view = compile_deal(steps.pipeline(steps.where(first), steps.where(second)))
+
+    assert view.relation.filters == (
+        ir.FilterIsNull(field=column(FieldName("nickname"))),
+        ir.FilterIsNull(field=column(FieldName("bonus"))),
+    )
+
+
+def test_an_optional_field_equals_a_literal_of_its_type() -> None:
+    nickname = Text("Ace")
+    view = compile_deal(
+        steps.where(conditions.eq(conditions.field(FieldName("nickname")), nickname))
+    )
+
+    assert view.relation.filters == (
+        ir.FilterComparison(
+            operator=ir.ComparisonOperator.EQ,
+            field=column(FieldName("nickname")),
+            operand=text_literal(nickname),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("step", "expected"),
+    [
+        (
+            steps.where(conditions.is_null(conditions.field(FieldName("nicknme")))),
+            diagnostics.UnknownField(
+                view=ViewName.fake(),
+                source=ir.SourceName("Deal"),
+                field=FieldName("nicknme"),
+                valid=tuple(map(FieldName, Deal.model_fields)),
+            ),
+        ),
+        (
+            steps.pipeline(
+                steps.add(FieldName("kind"), Literal["deal"], default="deal"),
+                steps.where(conditions.eq(conditions.field(FieldName("kind")), "deal")),
+            ),
+            diagnostics.NotASourceColumn(
+                view=ViewName.fake(),
+                source=ir.SourceName("Deal"),
+                field=FieldName("kind"),
+            ),
+        ),
+        (
+            steps.where(
+                conditions.eq(conditions.field(FieldName("name")), [Text("Acme")])
+            ),
+            diagnostics.NonLiteralConditionValue(
+                view=ViewName.fake(),
+                value=diagnostics.LiteralText.of([Text("Acme")]),
+            ),
+        ),
+        (
+            steps.where(conditions.eq(conditions.field(FieldName("name")), "Acme")),
+            diagnostics.LiteralTypeMismatch(
+                view=ViewName.fake(),
+                source=ir.SourceName("Deal"),
+                field=FieldName("name"),
+                annotation=Text,
+                value=diagnostics.LiteralText.of("Acme"),
+            ),
+        ),
+        (
+            steps.where(conditions.eq(conditions.field(FieldName("name")), None)),
+            diagnostics.LiteralTypeMismatch(
+                view=ViewName.fake(),
+                source=ir.SourceName("Deal"),
+                field=FieldName("name"),
+                annotation=Text,
+                value=diagnostics.LiteralText.of(None),
+            ),
+        ),
+        (
+            steps.where(
+                conditions.eq(
+                    conditions.field(FieldName("name")),
+                    conditions.field(FieldName("score")),
+                )
+            ),
+            diagnostics.ComparedTypesDiffer(
+                view=ViewName.fake(),
+                source=ir.SourceName("Deal"),
+                field=FieldName("name"),
+                annotation=Text,
+                other=FieldName("score"),
+                other_annotation=Score,
+            ),
+        ),
+        (
+            steps.where(conditions.gt(conditions.field(FieldName("bonus")), Score(1))),
+            diagnostics.OrderingOnOptionalField(
+                view=ViewName.fake(),
+                source=ir.SourceName("Deal"),
+                field=FieldName("bonus"),
+                operator=ir.ComparisonOperator.GT,
+            ),
+        ),
+        (
+            steps.where(
+                conditions.le(
+                    conditions.field(FieldName("score")),
+                    conditions.field(FieldName("bonus")),
+                )
+            ),
+            diagnostics.OrderingOnOptionalField(
+                view=ViewName.fake(),
+                source=ir.SourceName("Deal"),
+                field=FieldName("bonus"),
+                operator=ir.ComparisonOperator.LE,
+            ),
+        ),
+        (
+            steps.where(conditions.lt(conditions.field(FieldName("name")), Text("M"))),
+            diagnostics.UnorderedFieldType(
+                view=ViewName.fake(),
+                source=ir.SourceName("Deal"),
+                field=FieldName("name"),
+                annotation=Text,
+                operator=ir.ComparisonOperator.LT,
+            ),
+        ),
+    ],
+    ids=[
+        "unknown-field",
+        "added-field",
+        "non-literal",
+        "unwrapped-root",
+        "none-for-required",
+        "types-differ",
+        "ordering-optional-field",
+        "ordering-optional-operand",
+        "unordered-type",
+    ],
+)
+def test_a_defective_condition_is_a_diagnostic(
+    step: steps.Step, expected: diagnostics.CompileDiagnostic
+) -> None:
+    assert deal_diagnostics(step) == (expected,)
+
+
+def test_a_condition_on_a_resolved_field_is_a_diagnostic() -> None:
+    reported = resolve_diagnostics(
+        Employee,
+        steps.pipeline(
+            steps.hydrate(),
+            steps.where(conditions.is_null(conditions.field(FieldName("mentor")))),
+        ),
+    )
+
+    assert reported == (
+        diagnostics.NotASourceColumn(
+            view=ViewName.fake(),
+            source=ir.SourceName("Employee"),
+            field=FieldName("mentor"),
+        ),
+    )
+
+
+def test_every_defective_term_of_a_condition_is_reported() -> None:
+    unknown = FieldName("nicknme")
+
+    reported = deal_diagnostics(
+        steps.where(
+            conditions.and_(
+                conditions.is_null(conditions.field(unknown)),
+                conditions.not_(
+                    conditions.lt(conditions.field(FieldName("name")), Text("M"))
+                ),
+            )
+        )
+    )
+
+    assert [type(diagnostic) for diagnostic in reported] == [
+        diagnostics.UnknownField,
+        diagnostics.UnorderedFieldType,
+    ]
+
+
+def test_steps_after_a_defective_where_are_still_checked() -> None:
+    reported = deal_diagnostics(
+        steps.pipeline(
+            steps.where(conditions.eq(conditions.field(FieldName("name")), "Acme")),
+            steps.omit(FieldName("secret")),
+        )
+    )
+
+    assert [type(diagnostic) for diagnostic in reported] == [
+        diagnostics.LiteralTypeMismatch,
+        diagnostics.UnknownField,
+    ]
+
+
+def test_each_where_in_a_payload_is_a_diagnostic() -> None:
+    where = steps.where(conditions.is_null(conditions.field(FieldName("nickname"))))
+    payload = Payload(
+        name=PayloadName.fake(), source=Deal, step=steps.pipeline(where, where)
+    )
+
+    match compile_catalog([], [payload]):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            assert (
+                error.diagnostics
+                == (diagnostics.WhereInPayload(view=payload.name),) * 2
+            )
+
+
+def test_each_where_in_a_nested_pipeline_is_a_diagnostic() -> None:
+    where = steps.where(conditions.is_null(conditions.field(FieldName("mentor_id"))))
+
+    reported = resolve_diagnostics(
+        Employee,
+        steps.resolve(named(FieldName("mentor_id")), where, where),
+    )
+
+    assert (
+        reported
+        == (
+            diagnostics.WhereInNestedPipeline(
+                view=ViewName.fake(), source=ir.SourceName("Employee")
+            ),
+        )
+        * 2
+    )
+
+
+type MaybeScore = Score | None
+
+
+class Rival(pydantic.BaseModel):
+    """A Source whose optional field is typed by a `type` alias."""
+
+    score: MaybeScore
+
+
+@pytest.mark.parametrize(
+    ("condition", "outcome"),
+    [
+        (
+            conditions.eq(conditions.field(FieldName("score")), None),
+            ir.FilterIsNull(field=ir.SourceField(field=FieldName("score"))),
+        ),
+        (
+            conditions.gt(conditions.field(FieldName("score")), Score(1)),
+            diagnostics.OrderingOnOptionalField(
+                view=ViewName.fake(),
+                source=ir.SourceName("Rival"),
+                field=FieldName("score"),
+                operator=ir.ComparisonOperator.GT,
+            ),
+        ),
+    ],
+    ids=["eq-none", "ordering"],
+)
+def test_a_field_typed_by_an_optional_alias_is_optional(
+    condition: ir.Condition, outcome: ir.Filter | diagnostics.CompileDiagnostic
+) -> None:
+    match compiler.compile_views(
+        empty_graph(),
+        [View(name=ViewName.fake(), source=Rival, step=steps.where(condition))],
+    ):
+        case Ok(compiled):
+            assert compiled.views[0].relation.filters == (outcome,)
+        case Err(error):
+            assert error.diagnostics == (outcome,)
+
+
+type Ratio = float
+type Tally = int
+
+
+class Measure(pydantic.BaseModel):
+    ratio: Ratio
+    count: Tally
+
+
+def measure_view(field: FieldName, value: ir.UncheckedLiteral) -> View:
+    return View(
+        name=ViewName.fake(),
+        source=Measure,
+        step=steps.where(conditions.eq(conditions.field(field), value)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [(FieldName("ratio"), 1), (FieldName("ratio"), 0.5), (FieldName("count"), 1)],
+    ids=["int-for-float", "float-for-float", "int-for-int"],
+)
+def test_a_number_of_the_fields_kind_is_a_literal_of_its_type(
+    field: FieldName, value: ir.UncheckedLiteral
+) -> None:
+    view = compile_view_of(measure_view(field, value))
+
+    assert len(view.relation.filters) == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [(FieldName("count"), True), (FieldName("ratio"), True), (FieldName("count"), 0.5)],
+    ids=["bool-for-int", "bool-for-float", "float-for-int"],
+)
+def test_a_bool_or_float_for_a_narrower_number_field_is_a_diagnostic(
+    field: FieldName, value: ir.UncheckedLiteral
+) -> None:
+    view = measure_view(field, value)
+
+    assert diagnostics_of([view]) == (
+        diagnostics.LiteralTypeMismatch(
+            view=view.name,
+            source=ir.SourceName("Measure"),
+            field=field,
+            annotation=Measure.model_fields[field.root].annotation,
+            value=diagnostics.LiteralText.of(value),
+        ),
+    )
+
+
+def compile_view_of(view: View) -> compiler.CompiledView:
+    match compiler.compile_views(empty_graph(), [view]):
+        case Ok(compiled):
+            return compiled.views[0]
+        case Err(error):
+            pytest.fail(f"expected a compiled view, got {error}")
+
+
+def test_building_a_where_checks_nothing() -> None:
+    root = ir.FromSource(source=Deal)
+    condition = conditions.eq(conditions.field(FieldName("missing")), object())
+
+    assert steps.where(condition)(root) == ir.Where(input=root, condition=condition)
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "message"),
+    [
+        (
+            diagnostics.WhereInPayload(view=PayloadName("DealCreate")),
+            (
+                "DealCreate: a Payload cannot filter with `where`, because it is a "
+                "write model with no rows to keep."
+            ),
+        ),
+        (
+            diagnostics.WhereInNestedPipeline(
+                view=ViewName("EmployeeView"), source=ir.SourceName("Employee")
+            ),
+            (
+                "EmployeeView: cannot filter the resolved Employee with `where`, "
+                "because only a View's own pipeline can filter its rows."
+            ),
+        ),
+        (
+            diagnostics.NotASourceColumn(
+                view=ViewName("DealView"),
+                source=ir.SourceName("Deal"),
+                field=FieldName("kind"),
+            ),
+            (
+                "DealView: a condition cannot use 'kind', because its value is not "
+                "one of Deal's own fields."
+            ),
+        ),
+        (
+            diagnostics.NonLiteralConditionValue(
+                view=ViewName("DealView"), value=diagnostics.LiteralText.of([1])
+            ),
+            (
+                "DealView: a condition cannot compare with [1]. A literal is None, a "
+                "boolean, a finite number, a string, an enum member, or a RootModel "
+                "of one of these."
+            ),
+        ),
+        (
+            diagnostics.LiteralTypeMismatch(
+                view=ViewName("DealView"),
+                source=ir.SourceName("Deal"),
+                field=FieldName("name"),
+                annotation=int,
+                value=diagnostics.LiteralText.of("Acme"),
+            ),
+            (
+                "DealView: a condition compares Deal.name, typed <class 'int'>, with "
+                "'Acme', which is not of that type."
+            ),
+        ),
+        (
+            diagnostics.ComparedTypesDiffer(
+                view=ViewName("DealView"),
+                source=ir.SourceName("Deal"),
+                field=FieldName("name"),
+                annotation=int,
+                other=FieldName("score"),
+                other_annotation=str,
+            ),
+            (
+                "DealView: a condition compares Deal.name, typed <class 'int'>, with "
+                "'score', typed <class 'str'>."
+            ),
+        ),
+        (
+            diagnostics.OrderingOnOptionalField(
+                view=ViewName("DealView"),
+                source=ir.SourceName("Deal"),
+                field=FieldName("bonus"),
+                operator=ir.ComparisonOperator.GT,
+            ),
+            "DealView: cannot compare Deal.bonus with '>', because it is optional.",
+        ),
+        (
+            diagnostics.UnorderedFieldType(
+                view=ViewName("DealView"),
+                source=ir.SourceName("Deal"),
+                field=FieldName("name"),
+                annotation=int,
+                operator=ir.ComparisonOperator.LT,
+            ),
+            (
+                "DealView: cannot compare Deal.name with '<', because its type "
+                "<class 'int'> does not define it."
+            ),
+        ),
+    ],
+    ids=[
+        "payload",
+        "nested",
+        "not-a-column",
+        "non-literal",
+        "literal-type",
+        "types-differ",
+        "ordering-optional",
+        "unordered",
+    ],
+)
+def test_a_where_diagnostic_message_names_the_offending_values(
+    diagnostic: diagnostics.CompileDiagnostic, message: str
+) -> None:
+    assert diagnostic.describe().root == message
+
+
+@pytest.mark.parametrize(
+    "combine", [conditions.and_, conditions.or_], ids=["and", "or"]
+)
+def test_an_and_or_an_or_of_one_term_is_that_term(
+    combine: Callable[[ir.Condition], ir.Condition],
+) -> None:
+    term = conditions.is_null(conditions.field(FieldName("nickname")))
+
+    view = compile_deal(steps.where(combine(term)))
+
+    assert view.relation.filters == (
+        ir.FilterIsNull(field=column(FieldName("nickname"))),
+    )
