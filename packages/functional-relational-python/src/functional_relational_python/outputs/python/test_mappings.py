@@ -1,4 +1,5 @@
 import contextlib
+import enum
 import subprocess
 import sys
 import types
@@ -34,7 +35,10 @@ from functional_relational_python.outputs.python.plan import (
     PythonPlan,
 )
 from functional_relational_python.outputs.python.render import PythonRenderer
-from functional_relational_python.outputs.python.symbols import ModulePath
+from functional_relational_python.outputs.python.symbols import (
+    ModulePath,
+    ValueExpression,
+)
 from functional_relational_python.pipeline import conditions, ir, steps
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.filesystem import (
@@ -922,13 +926,8 @@ def filtered_views_over_entities(draw: st.DrawFn) -> View:
     return View(name=ViewName.fake(), source=source, step=steps.where(condition))
 
 
-@settings(max_examples=25)
-@given(filtered_views_over_entities())
-def test_a_filtered_mapping_function_is_as_ruff_formats_it(view: View) -> None:
-    text = Generated.text(
-        MappingsRenderer.files(plan_of(compile_all([view]), Generated.layout()))
-    )
-
+def ruff_format_diff(text: FileText) -> FileText:
+    """How ruff would reformat `text`: empty when it is formatted already."""
     result = subprocess.run(
         [sys.executable, "-m", "ruff", "format", "--diff", "-"],
         input=text.root,
@@ -936,5 +935,71 @@ def test_a_filtered_mapping_function_is_as_ruff_formats_it(view: View) -> None:
         text=True,
         check=False,
     )
+    return FileText(result.stdout + result.stderr)
 
-    assert result.returncode == 0, result.stdout + result.stderr
+
+def generated_mappings(views: Iterable[View]) -> FileText:
+    return Generated.text(
+        MappingsRenderer.files(plan_of(compile_all(views), Generated.layout()))
+    )
+
+
+@settings(max_examples=25)
+@given(filtered_views_over_entities())
+def test_a_filtered_mapping_function_is_as_ruff_formats_it(view: View) -> None:
+    assert ruff_format_diff(generated_mappings([view])) == FileText("")
+
+
+class Mood(enum.Enum):
+    ok = "ok"
+    # A member named no identifier, which only the class namespace can define.
+    vars()["not ok"] = "not ok"
+
+
+class Feeling(pydantic.BaseModel, frozen=True):
+    """A Source with a field of an enum whose member is named no identifier."""
+
+    name: Text
+    mood: Mood
+
+
+@pytest.mark.parametrize(
+    ("name", "condition", "written"),
+    [
+        (
+            ViewName("FeelingNamed"),
+            conditions.eq(conditions.field(FieldName("name")), Text("it's")),
+            ValueExpression('Text("it\'s")'),
+        ),
+        (
+            ViewName("FeelingQuoted"),
+            conditions.eq(conditions.field(FieldName("name")), Text('say "hi"')),
+            ValueExpression("""Text('say "hi"')"""),
+        ),
+        (
+            ViewName("FeelingBothQuotes"),
+            conditions.eq(conditions.field(FieldName("name")), Text("""a'b"c""")),
+            ValueExpression("""Text("a'b\\"c")"""),
+        ),
+        (
+            ViewName("FeelingUnwell"),
+            conditions.eq(conditions.field(FieldName("mood")), Mood("not ok")),
+            ValueExpression('Mood["not ok"]'),
+        ),
+        (
+            ViewName("FeelingWithViewNameLongEnoughToSplitTheReturnAnnotation"),
+            conditions.eq(conditions.field(FieldName("mood")), Mood("ok")),
+            ValueExpression("Mood.ok"),
+        ),
+    ],
+    ids=["single-quote", "double-quotes", "both-quotes", "enum-name", "long-name"],
+)
+def test_a_filtered_mapping_function_writes_literals_as_ruff_does(
+    name: ViewName, condition: ir.Condition, written: ValueExpression
+) -> None:
+    text = generated_mappings(
+        [View(name=name, source=Feeling, step=steps.where(condition))]
+    )
+
+    assert written.root in text.root
+    assert ruff_format_diff(text) == FileText("")

@@ -11,7 +11,6 @@ defines what it would be overwritten with) is found here, once. The renderers in
 The compiler has already checked the names themselves (`model_names`).
 """
 
-import keyword
 import types
 import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -486,12 +485,7 @@ class _AnnotationRenderer:
             case ir.EmptyDictDefault():
                 written = "{}"
             case ir.EnumDefault(member=member):
-                enum_class = self._named(type(member)).root
-                name = member.name
-                if name.isidentifier() and not keyword.iskeyword(name):
-                    written = f"{enum_class}.{name}"
-                else:
-                    written = f"{enum_class}[{name!r}]"
+                return ValueExpression.of_enum_member(self._named(type(member)), member)
         return ValueExpression(written)
 
     def _parameterised(

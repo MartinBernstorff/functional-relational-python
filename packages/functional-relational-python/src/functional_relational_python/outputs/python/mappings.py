@@ -1,8 +1,9 @@
 """Renders the planned mapping functions: compiled Views as plain Python functions.
 
-Each View becomes a function from one instance of its Source to its View model,
-or to `None` for a row the View's Filters exclude.
-A View that resolves References also takes, per Entity it looks up, a keyword
+Each View becomes a function from one instance of its Source to its View model.
+A filtered View's function returns `None` for a row its Filters exclude: the
+ticket that introduced `where` specifies that it "returns nothing", so `None`
+carries that meaning rather than an enum variant. A View that resolves References also takes, per Entity it looks up, a keyword
 parameter mapping IDs to Entities; a dangling ID raises `KeyError` there. A
 module of mapping functions imports only the Source, Entity and View model
 modules, so it runs and type checks without this library installed.
@@ -12,7 +13,6 @@ compiled Relation, so the two agree (the differential test in `test_mappings.py`
 checks this).
 """
 
-import keyword
 import typing
 from collections.abc import Callable, Sequence
 
@@ -27,6 +27,8 @@ from functional_relational_python.outputs.python.plan import (
 from functional_relational_python.outputs.python.symbols import (
     LineLength,
     ModulePath,
+    PythonString,
+    ValueExpression,
 )
 from functional_relational_python.pipeline import ir
 from functional_relational_python.support.filesystem import FileText
@@ -109,10 +111,19 @@ class MappingsRenderer:
         keyword_only = f"    *,\n{lookups}" if lookups else ""
         model = function.model.symbol.qualified().root
         returned = f"{model} | None" if function.filters else model
+        if function.filters and len(f") -> {returned}:") > LineLength.default().root:
+            # As ruff splits a return annotation that does not fit: in parentheses,
+            # then at the `|` if it still does not fit.
+            inner = f"    {returned}"
+            returned = (
+                f"(\n{inner}\n)"
+                if len(inner) <= LineLength.default().root
+                else f"(\n    {model}\n    | None\n)"
+            )
         call = _Construction(function=function, indent=Indent(4)).call(
             function.model, Expression(FunctionPlan.source_parameter.root)
         )
-        writer = _FilterWriter(function)
+        writer = _FilterWriter(function=function)
         guards = "".join(writer.guard(kept).root for kept in function.filters)
         return FunctionText(
             f"def {function.symbol.bound_name().root}(\n"
@@ -210,55 +221,72 @@ class _Construction:
         )
 
 
-class _FilterWriter:
-    """Writes the guards that return `None` for a row a Filter excludes.
+class _RenderedFilter(pydantic.BaseModel, frozen=True):
+    """A Filter with its text on one line, and its terms rendered likewise.
 
-    Like the calls, a condition is split over lines, at its `and`s and `or`s, only
-    when it does not fit.
+    Each subtree's text is written once, however its lines are split later.
     """
 
-    def __init__(self, function: FunctionPlan) -> None:
-        self.function = function
+    kept: ir.Filter
+    inline: Expression
+    terms: tuple[_RenderedFilter, ...]
+
+    def as_term(self) -> Expression:
+        """The text as a term of an `and` or `or`: in parentheses if it is one."""
+        match self.kept:
+            case ir.FilterAnd() | ir.FilterOr():
+                return Expression(f"({self.inline.root})")
+            case ir.FilterComparison() | ir.FilterIsNull() | ir.FilterNot():
+                return self.inline
+
+
+class _FilterWriter(pydantic.BaseModel, frozen=True):
+    """Writes the guards that return `None` for a row a Filter excludes.
+
+    Like the calls, a condition is split over lines only when it does not fit, as
+    ruff splits it: at its `and`s and `or`s, inside its parentheses, before a
+    comparison's operator, and around a RootModel's root.
+    """
+
+    function: FunctionPlan
 
     def guard(self, kept: ir.Filter) -> Expression:
         """`if not (<kept>): return None`, at the function body's indentation."""
         body = Indent(4)
-        line = f"{body.pad().root}if not ({self.inline(kept).root}):"
+        rendered = self._rendered(kept)
+        line = f"{body.pad().root}if not ({rendered.inline.root}):"
         if len(line) <= LineLength.default().root:
             condition = line
         else:
             lines = "".join(
-                f"{text.root}\n" for text in self._block(kept, body.deeper())
+                f"{text.root}\n" for text in self._block(rendered, body.deeper())
             )
             condition = f"{body.pad().root}if not (\n{lines}{body.pad().root}):"
         return Expression(f"{condition}\n{body.deeper().pad().root}return None\n")
 
-    def inline(self, kept: ir.Filter) -> Expression:
-        """`kept` on one line. A nested `and` or `or` is in parentheses."""
+    def _rendered(self, kept: ir.Filter) -> _RenderedFilter:
+        terms: tuple[_RenderedFilter, ...]
         match kept:
             case ir.FilterComparison(operator=operator, field=field, operand=operand):
-                return Expression(
+                terms = ()
+                inline = (
                     f"{self._field(field).root} {operator.value} "
                     f"{self._operand(operand).root}"
                 )
             case ir.FilterIsNull(field=field):
-                return Expression(f"{self._field(field).root} is None")
+                terms = ()
+                inline = f"{self._field(field).root} is None"
             case ir.FilterNot(term=ir.FilterIsNull(field=field)):
-                return Expression(f"{self._field(field).root} is not None")
+                terms = ()
+                inline = f"{self._field(field).root} is not None"
             case ir.FilterNot(term=term):
-                return Expression(f"not ({self.inline(term).root})")
-            case ir.FilterAnd(terms=terms) | ir.FilterOr(terms=terms):
+                terms = (self._rendered(term),)
+                inline = f"not ({terms[0].inline.root})"
+            case ir.FilterAnd(terms=connected) | ir.FilterOr(terms=connected):
+                terms = tuple(self._rendered(term) for term in connected)
                 connective = f" {_FilterWriter._connective(kept).root} "
-                return Expression(
-                    connective.join(self._term(term).root for term in terms)
-                )
-
-    def _term(self, term: ir.Filter) -> Expression:
-        match term:
-            case ir.FilterAnd() | ir.FilterOr():
-                return Expression(f"({self.inline(term).root})")
-            case ir.FilterComparison() | ir.FilterIsNull() | ir.FilterNot():
-                return self.inline(term)
+                inline = connective.join(term.as_term().root for term in terms)
+        return _RenderedFilter(kept=kept, inline=Expression(inline), terms=terms)
 
     @staticmethod
     def _connective(kept: ir.FilterAnd | ir.FilterOr) -> Expression:
@@ -268,19 +296,20 @@ class _FilterWriter:
             case ir.FilterOr():
                 return Expression("or")
 
-    def _block(self, kept: ir.Filter, indent: Indent) -> tuple[Expression, ...]:
-        """`kept` as lines at `indent`, inside parentheses: one line if it fits,
-        else split at its `and`s or `or`s, or inside its `not`."""
-        pad = indent.pad().root
-        line = f"{pad}{self.inline(kept).root}"
+    def _block(
+        self, rendered: _RenderedFilter, indent: Indent
+    ) -> tuple[Expression, ...]:
+        """`rendered` as lines at `indent`, inside parentheses: one line if it
+        fits, else split at its `and`s or `or`s, or as a single term."""
+        line = f"{indent.pad().root}{rendered.inline.root}"
         if len(line) <= LineLength.default().root:
             return (Expression(line),)
-        match kept:
-            case ir.FilterAnd(terms=terms) | ir.FilterOr(terms=terms):
-                connective = _FilterWriter._connective(kept).root
+        match rendered.kept:
+            case ir.FilterAnd() | ir.FilterOr() as connected:
+                connective = _FilterWriter._connective(connected).root
                 return tuple(
                     text
-                    for index, term in enumerate(terms)
+                    for index, term in enumerate(rendered.terms)
                     for text in self._split_term(
                         term,
                         indent,
@@ -288,23 +317,24 @@ class _FilterWriter:
                     )
                 )
             case ir.FilterComparison() | ir.FilterIsNull() | ir.FilterNot():
-                return self._split_term(kept, indent, Expression(""))
+                return self._split_term(rendered, indent, Expression(""))
 
     def _split_term(
-        self, term: ir.Filter, indent: Indent, prefix: Expression
+        self, rendered: _RenderedFilter, indent: Indent, prefix: Expression
     ) -> tuple[Expression, ...]:
         """One term of a split condition, after `prefix`, e.g. `and `: on one line
         if it fits, else split."""
         start = f"{indent.pad().root}{prefix.root}"
-        line = f"{start}{self._term(term).root}"
-        match term:
+        line = f"{start}{rendered.as_term().root}"
+        match rendered.kept:
             case _ if len(line) <= LineLength.default().root:
                 return (Expression(line),)
-            case ir.FilterAnd() | ir.FilterOr():
-                return self._parenthesised(Expression(f"{start}("), term, indent)
             case ir.FilterNot(term=ir.FilterIsNull()) | ir.FilterIsNull():
                 return (Expression(line),)
-            case ir.FilterNot(term=negated):
+            case ir.FilterAnd() | ir.FilterOr():
+                return self._parenthesised(Expression(f"{start}("), rendered, indent)
+            case ir.FilterNot():
+                (negated,) = rendered.terms
                 return self._parenthesised(Expression(f"{start}not ("), negated, indent)
             case ir.FilterComparison(operator=operator, field=field, operand=operand):
                 return (
@@ -338,13 +368,13 @@ class _FilterWriter:
                 return (Expression(line),)
 
     def _parenthesised(
-        self, opening: Expression, term: ir.Filter, indent: Indent
+        self, opening: Expression, rendered: _RenderedFilter, indent: Indent
     ) -> tuple[Expression, ...]:
-        """`opening`, which ends in `(`, then `term` split one level deeper, then
-        `)`."""
+        """`opening`, which ends in `(`, then `rendered` split one level deeper,
+        then `)`."""
         return (
             opening,
-            *self._block(term, indent.deeper()),
+            *self._block(rendered, indent.deeper()),
             Expression(f"{indent.pad().root})"),
         )
 
@@ -355,17 +385,15 @@ class _FilterWriter:
         match operand:
             case ir.SourceField():
                 return self._field(operand)
-            case ir.ScalarLiteral(root=str() as text) if '"' not in text:
-                # Double quotes, as ruff writes them.
-                return Expression(f'"{repr(text)[1:-1]}"')
+            case ir.ScalarLiteral(root=str() as text):
+                return Expression(PythonString(text).literal().root)
             case ir.ScalarLiteral(root=value):
                 return Expression(repr(value))
             case ir.EnumLiteral(member=member):
                 enum_class = self.function.literal_symbol(type(member)).qualified()
-                name = member.name
-                if name.isidentifier() and not keyword.iskeyword(name):
-                    return Expression(f"{enum_class.root}.{name}")
-                return Expression(f"{enum_class.root}[{name!r}]")
+                return Expression(
+                    ValueExpression.of_enum_member(enum_class, member).root
+                )
             case ir.RootModelLiteral(instance=instance, root=root):
                 model = self.function.literal_symbol(type(instance)).qualified()
                 return Expression(f"{model.root}({self._operand(root).root})")
