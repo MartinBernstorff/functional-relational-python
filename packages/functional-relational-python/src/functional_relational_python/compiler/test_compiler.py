@@ -642,7 +642,7 @@ def test_add_appends_a_field_with_no_value_from_the_source() -> None:
     assert AddedField.of(view.relation.fields[-1]) == AddedField(
         name=kind,
         annotation=Literal["company"],
-        value=ir.Declared(),
+        value=ir.Added(),
         default=ir.ScalarDefault("company"),
     )
 
@@ -679,7 +679,7 @@ def test_a_payload_may_add_a_field_without_a_default() -> None:
     (compiled,) = compile_catalog([], [payload]).unwrap().payloads
 
     assert AddedField.of(compiled.relation.fields[-1]) == AddedField(
-        name=kind, annotation=Literal["a"], value=ir.Declared(), default=ir.NoDefault()
+        name=kind, annotation=Literal["a"], value=ir.Added(), default=ir.NoDefault()
     )
 
 
@@ -1357,7 +1357,10 @@ def pipelines(
     # An added field comes first, so later steps can omit, rename or project it.
     added = [FieldName("added") for _ in range(draw(st.integers(0, 1)))]
     fields.extend(added)
-    drawn: list[steps.Step] = [steps.add(name, str, default="tag") for name in added]
+    drawn: list[steps.Step] = [
+        steps.add(name, str, default=draw(st.sampled_from(["tag", pydantic.MISSING])))
+        for name in added
+    ]
     for index in range(draw(st.integers(min_value=0, max_value=len(fields)))):
         if not fields:
             break

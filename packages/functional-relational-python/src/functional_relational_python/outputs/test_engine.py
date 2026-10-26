@@ -529,7 +529,7 @@ def with_ids_again(
                 values[reference.field.root] = (
                     vars(value)["id"] if isinstance(value, pydantic.BaseModel) else None
                 )
-            case ir.Declared():
+            case ir.Added():
                 # An added field holds no value of the Source.
                 pass
     return source(**values)

@@ -4,7 +4,7 @@ import sys
 import types
 from collections.abc import Generator, Iterable
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import pydantic
 import pytest
@@ -395,13 +395,17 @@ def company_defaulted(
     )
 
 
-def test_a_mapping_function_leaves_an_added_field_to_its_default() -> None:
-    view = View(
+def tagged_company() -> View:
+    """A View with an added literal tag, as for a tagged union."""
+    return View(
         name=ViewName("CompanyTagged"),
         source=Company,
-        step=steps.add(FieldName("type"), str, default="company"),
+        step=steps.add(FieldName("type"), Literal["company"], default="company"),
     )
-    plan = plan_of(compile_all([view]), Generated.layout())
+
+
+def test_a_mapping_function_leaves_an_added_field_to_its_default() -> None:
+    plan = plan_of(compile_all([tagged_company()]), Generated.layout())
 
     assert Generated.text(MappingsRenderer.files(plan)) == FileText(
         """\
@@ -463,7 +467,7 @@ def test_models_and_mappings_both_count_as_generated() -> None:
 
 
 def test_generated_models_and_mappings_pass_the_type_checker(tmp_path: Path) -> None:
-    plan = plan_of(compile_all(golden_views()), Generated.layout())
+    plan = plan_of(compile_all([*golden_views(), tagged_company()]), Generated.layout())
     generated = tmp_path / "generated"
     PythonRenderer.render(plan).write(LocalFileSystem(), Directory(generated)).unwrap()
     source_root = Path(__file__).parents[3]

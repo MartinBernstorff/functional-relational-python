@@ -156,7 +156,7 @@ class _Construction:
                     case ir.Lookup():
                         entity = self._entity(value, subject)
                         return self._optional(field, value, subject, lambda _: entity)
-                    case ir.Declared():
+                    case ir.Added():
                         return LeftOut()
             case ir.NestedField(value=lookup):
                 nested = model.nested_in(field)

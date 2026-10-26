@@ -79,9 +79,19 @@ def default(fields: FieldName | ir.Select, value: ir.UncheckedDefault) -> Step:
     return step
 
 
+@overload
+def add(name: FieldName, annotation: ir.AddedType) -> Step: ...
+
+
+@overload
+def add(
+    name: FieldName, annotation: ir.AddedType, default: ir.UncheckedDefault
+) -> Step: ...
+
+
 def add(
     name: FieldName,
-    annotation: ir.DeclaredType,
+    annotation: ir.AddedType,
     default: ir.UncheckedDefault = ir.NoDefault,
 ) -> Step:
     """Declares a new field `name`, typed `annotation`, with no value from the
@@ -89,10 +99,10 @@ def add(
 
     `default` is a literal, as for `default`. A View's added field needs one: its
     mapping leaves the field out, so the model fills it with its default. In a
-    Payload it is optional. Leaving `default` out, or passing the `NoDefault` class,
-    gives the field none.
+    Payload it is optional.
     """
-    # The class, not an instance, so the signature's default calls nothing.
+    # The class stands for "no default given", which the overloads spell out;
+    # unlike an instance, it calls nothing in the signature.
     given = ir.NoDefault() if default is ir.NoDefault else default
 
     def step(node: ir.Node) -> ir.Node:

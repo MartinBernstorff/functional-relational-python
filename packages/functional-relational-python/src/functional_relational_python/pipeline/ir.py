@@ -108,7 +108,7 @@ class Default(pydantic.BaseModel, frozen=True):
     value: UncheckedDefault
 
 
-type DeclaredType = type[object]
+type AddedType = type[object]
 """The type `add` gives a field, e.g. `Literal["company"]` or `Text | None`."""
 
 
@@ -188,14 +188,14 @@ class Lookup(pydantic.BaseModel, frozen=True):
         return self.optionality.annotate(self.target)
 
 
-class Declared(pydantic.BaseModel, frozen=True):
+class Added(pydantic.BaseModel, frozen=True):
     """No value from the subject: a field `add` declared.
 
     A mapping leaves it out, so the model fills it with its default.
     """
 
 
-type Value = SourceField | Lookup | Declared
+type Value = SourceField | Lookup | Added
 """How a field of a View result is computed from the subject."""
 
 
@@ -283,7 +283,7 @@ class Relation(pydantic.BaseModel, frozen=True):
             match field:
                 case Field(value=value):
                     match value:
-                        case SourceField() | Declared():
+                        case SourceField() | Added():
                             pass
                         case Lookup():
                             used.append(value)
@@ -322,7 +322,7 @@ class Relation(pydantic.BaseModel, frozen=True):
                 Field(
                     name=name,
                     info=info,
-                    value=Declared(),
+                    value=Added(),
                     default=default,
                 ),
             ),

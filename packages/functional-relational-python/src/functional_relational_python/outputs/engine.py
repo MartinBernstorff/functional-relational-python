@@ -186,7 +186,7 @@ class InMemoryViewEngine:
                         return getattr(subject, value.field.root)
                     case ir.Lookup():
                         return self._lookup(value, subject, missing)
-                    case ir.Declared():
+                    case ir.Added():
                         return InMemoryViewEngine._default(field)
             case ir.NestedField(value=lookup, relation=relation):
                 match self._lookup(lookup, subject, missing):
