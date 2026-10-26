@@ -31,7 +31,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id, OneToOne
+from functional_relational_python.entity_graph.id import Id, IdBase, OneToOne
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.python.plan import PythonLayout, PythonPlan
 from functional_relational_python.outputs.python.render import PythonRenderer
@@ -210,7 +210,8 @@ def flowbase_views() -> list[View]:
 
 def entity_graph() -> EntityGraph:
     return EntityGraph.build(
-        [Company, User, CompanyRole, CompanyMembership, Department, ShopOrder]
+        [Company, User, CompanyRole, CompanyMembership, Department, ShopOrder],
+        IdBase.fake(),
     ).unwrap()
 
 
@@ -365,7 +366,7 @@ def campaign_view() -> View:
 
 def campaign_graph() -> EntityGraph:
     return EntityGraph.build(
-        [Company, ChannelCampaign, MetaCampaign, LinkedInCampaign]
+        [Company, ChannelCampaign, MetaCampaign, LinkedInCampaign], IdBase.fake()
     ).unwrap()
 
 

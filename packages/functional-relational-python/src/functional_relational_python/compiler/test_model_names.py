@@ -17,7 +17,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, IdBase
 from functional_relational_python.pipeline import ir, steps
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticMessage
@@ -52,7 +52,7 @@ Hyphenated = pydantic.create_model("Hyphenated", **{"head-office": (DepartmentId
 
 
 def graph() -> EntityGraph:
-    return EntityGraph.build([Department]).unwrap()
+    return EntityGraph.build([Department], IdBase.fake()).unwrap()
 
 
 def compiled_names(

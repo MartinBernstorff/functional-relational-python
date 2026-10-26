@@ -12,10 +12,14 @@ from collections.abc import Callable, Collection, Mapping
 
 import pydantic
 from pydantic.fields import FieldInfo
+from safe_result import Err, Ok
 
 from functional_relational_python.entity_graph.entity_graph import (
+    EntityGraph,
     EntityNode,
     FieldName,
+    NoEntityError,
+    NotAReferenceError,
     Optionality,
     RuntimeAnnotation,
 )
@@ -95,6 +99,36 @@ class Select(pydantic.BaseModel, frozen=True):
     predicate: FieldPredicate
 
 
+class References(pydantic.BaseModel, frozen=True):
+    """The References of a relation, in field order.
+
+    Which fields are References depends on the catalog's `IdBase`, so unlike a
+    Select, the compiler decides what this selects.
+    """
+
+    def selects(self, field: RelationField, entity_graph: EntityGraph) -> bool:
+        """Whether `field` is a Reference, as `EntityGraph.reference_of` decides.
+
+        A Reference to an ID type keying no Entity is selected, so that resolving
+        it reports why it cannot be resolved.
+        """
+        match field:
+            case Field(info=info, value=SourceField(field=source)):
+                pass
+            case Field() | NestedField():
+                return False
+        match entity_graph.reference_of(source, info):
+            case Ok():
+                return True
+            case Err(error):
+                pass
+        match error:
+            case NoEntityError():
+                return True
+            case NotAReferenceError():
+                return False
+
+
 class Resolve(pydantic.BaseModel, frozen=True):
     """Replaces each selected Reference with the Entity it points to.
 
@@ -102,7 +136,7 @@ class Resolve(pydantic.BaseModel, frozen=True):
     """
 
     input: Node
-    fields: Select
+    fields: Select | References
     then: Callable[[Node], Node]
 
 

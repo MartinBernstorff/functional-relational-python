@@ -47,7 +47,8 @@ class RenameOntoExistingField(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class NotAReference(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`resolve` selected a field that is not typed with an Id, optional or not."""
+    """`resolve` selected a field that is not typed with an ID type, optional or
+    not."""
 
     view: DefinitionName
     source: ir.SourceName

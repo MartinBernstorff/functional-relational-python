@@ -26,7 +26,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id, OneToOne
+from functional_relational_python.entity_graph.id import Id, IdBase, OneToOne
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.django.models import (
     AppLabel,
@@ -123,7 +123,7 @@ class Note(pydantic.BaseModel, frozen=True):
 
 
 def entity_graph() -> EntityGraph:
-    return EntityGraph.build([Company, Department, Employee]).unwrap()
+    return EntityGraph.build([Company, Department, Employee], IdBase.fake()).unwrap()
 
 
 class Modules:
@@ -988,7 +988,7 @@ class CompanyProfile(pydantic.BaseModel, frozen=True):
 def test_a_view_that_reverses_a_reference_is_a_diagnostic(
     then: tuple[steps.Step, ...],
 ) -> None:
-    graph = EntityGraph.build([Company, CompanyProfile]).unwrap()
+    graph = EntityGraph.build([Company, CompanyProfile], IdBase.fake()).unwrap()
     view = View(
         name=ViewName("CompanyWithProfile"),
         source=Company,
@@ -1028,7 +1028,7 @@ def test_the_reverse_in_django_queries_message_names_the_reference() -> None:
 
 
 def test_entities_with_one_name_are_left_to_the_django_models_to_report() -> None:
-    graph = EntityGraph.build([Company, another_company()]).unwrap()
+    graph = EntityGraph.build([Company, another_company()], IdBase.fake()).unwrap()
 
     rendered = DjangoQueriesRenderer.render(
         graph, Modules.config(), (), into(Generated.models)
