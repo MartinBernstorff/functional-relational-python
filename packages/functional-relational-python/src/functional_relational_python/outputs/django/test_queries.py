@@ -26,7 +26,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
 )
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, IdBase
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.django.models import (
     AppLabel,
@@ -122,7 +122,7 @@ class Note(pydantic.BaseModel, frozen=True):
 
 
 def entity_graph() -> EntityGraph:
-    return EntityGraph.build([Company, Department, Employee]).unwrap()
+    return EntityGraph.build([Company, Department, Employee], IdBase.fake()).unwrap()
 
 
 class Modules:
@@ -972,7 +972,7 @@ def another_company() -> type[pydantic.BaseModel]:
 
 
 def test_entities_with_one_name_are_left_to_the_django_models_to_report() -> None:
-    graph = EntityGraph.build([Company, another_company()]).unwrap()
+    graph = EntityGraph.build([Company, another_company()], IdBase.fake()).unwrap()
 
     rendered = DjangoQueriesRenderer.render(
         graph, Modules.config(), (), into(Generated.models)
