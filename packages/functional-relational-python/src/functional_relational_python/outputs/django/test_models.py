@@ -41,6 +41,7 @@ from functional_relational_python.outputs.django.models import (
     SetNullOnRequiredReference,
 )
 from functional_relational_python.outputs.django.queries import DjangoQueriesRenderer
+from functional_relational_python.outputs.python.plan import PlacedModels
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     ModulePath,
@@ -600,7 +601,7 @@ def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None
             DjangoModelsRenderer.render(graph, models).unwrap(),
             # No Views, so only the QuerySets the models' managers use.
             DjangoQueriesRenderer.render(
-                graph, models, (), lambda _: ModulePath("app.views")
+                graph, models, (), PlacedModels(modules={})
             ).unwrap(),
         ]
     ).unwrap()

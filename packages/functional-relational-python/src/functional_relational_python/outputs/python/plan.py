@@ -120,6 +120,49 @@ class NoModuleFromLayout(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class PlacedModels(pydantic.BaseModel, frozen=True):
+    """The module a models layout gives each View's, Payload's and Union's model,
+    checked once, so that every output places the models alike and a layout's
+    defects are reported once."""
+
+    modules: Mapping[DefinitionName | UnionName, ModulePath]
+
+    @staticmethod
+    def of(
+        layout: ModuleLayout, placed: Iterable[_Placed]
+    ) -> Result[PlacedModels, DiagnosticsError[NoModuleFromLayout]]:
+        """The module of each of `placed`, or every one `layout` gives none."""
+        modules: dict[DefinitionName | UnionName, ModulePath] = {}
+        unplaced: list[NoModuleFromLayout] = []
+        for compiled in placed:
+            match NoModuleFromLayout.check(layout, LayoutRole.MODELS, compiled):
+                case NoModuleFromLayout() as diagnostic:
+                    unplaced.append(diagnostic)
+                case module:
+                    modules[compiled.name] = module
+        return DiagnosticsError.or_ok(unplaced, lambda: PlacedModels(modules=modules))
+
+    @staticmethod
+    def of_catalog(
+        layout: ModuleLayout, catalog: compiler.CompiledCatalog
+    ) -> Result[PlacedModels, DiagnosticsError[NoModuleFromLayout]]:
+        """The module of every model of `catalog`."""
+        return PlacedModels.of(
+            layout,
+            (
+                *catalog.views,
+                *catalog.payloads,
+                *catalog.unions,
+                *catalog.payload_unions,
+            ),
+        )
+
+    def module_of(self, compiled: _Placed) -> ModulePath:
+        """The module of a placed definition's model: a layout that gives every
+        model the module it was placed in."""
+        return self.modules[compiled.name]
+
+
 class PythonLayout(pydantic.BaseModel, frozen=True):
     """Where each View's and Payload's model, and each View's mapping function,
     are generated."""

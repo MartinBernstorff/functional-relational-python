@@ -83,12 +83,10 @@ from functional_relational_python.outputs.python.mappings import (
 )
 from functional_relational_python.outputs.python.plan import (
     FunctionPlan,
-    LayoutRole,
     ModelPlan,
-    ModuleLayout,
     NameClash,
     Namespace,
-    NoModuleFromLayout,
+    PlacedModels,
     Scope,
     Unimportable,
 )
@@ -131,10 +129,10 @@ class QueriesIntoDjangoModelsModule(pydantic.BaseModel, Diagnostic, frozen=True)
 
 
 class ViewModelIntoQueriesModule(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View's model would be generated into the module of Django queries, so one
-    file would overwrite the other."""
+    """A View's or Union's model would be generated into the module of Django
+    queries, so one file would overwrite the other."""
 
-    view: ViewName
+    view: ViewName | UnionName
     module: ModulePath
 
     def describe(self) -> DiagnosticMessage:
@@ -146,10 +144,10 @@ class ViewModelIntoQueriesModule(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class ViewModelIntoDjangoModelsModule(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View's model would be generated into the module of Django models, which
-    imports the Django queries, which import the View's model."""
+    """A View's or Union's model would be generated into the module of Django
+    models, which imports the Django queries, which import that model."""
 
-    view: ViewName
+    view: ViewName | UnionName
     module: ModulePath
 
     def describe(self) -> DiagnosticMessage:
@@ -166,7 +164,6 @@ type DjangoQueriesDiagnostic = (
     | ViewModelIntoQueriesModule
     | ViewModelIntoDjangoModelsModule
     | Unimportable
-    | NoModuleFromLayout
     | NameClash
 )
 
@@ -268,18 +265,19 @@ class UnionQueries(pydantic.BaseModel, frozen=True):
     def of(
         union: compiler.CompiledUnion,
         config: DjangoModels,
-        placed: Mapping[ViewName | UnionName, ModulePath],
+        placed: PlacedModels,
     ) -> UnionQueries:
         """`placed` has the module of the Union's model, and of each of its
         leaves'."""
         return UnionQueries(
             union=union,
             model=Symbol(
-                module=placed[union.name], qualname=(union.names.model.identifier(),)
+                module=placed.module_of(union),
+                qualname=(union.names.model.identifier(),),
             ),
             source=config.model_of(union.source),
             leaves=tuple(
-                ViewQueries.of(leaf, config, placed[leaf.name])
+                ViewQueries.of(leaf, config, placed.module_of(leaf))
                 for leaf in union.leaves()
             ),
         )
@@ -438,30 +436,22 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         graph: EntityGraph,
         config: DjangoModels,
         views: Iterable[compiler.CompiledView],
-        layout: ModuleLayout,
+        placed: PlacedModels,
         unions: Iterable[compiler.CompiledUnion] = (),
     ) -> Result[GeneratedFiles, DiagnosticsError[DjangoQueriesDiagnostic]]:
         """The module of query code, or every diagnostic.
 
-        `layout` gives the module of each View's and Union's model, and `views`
+        `placed` has the module of each View's and Union's model, and `views`
         has every View a Union has as a Variant. Views and Unions over a Source
         that is not an Entity get no query code. QuerySets are in Entity name
         order.
         """
         views = tuple(views)
         unions = tuple(unions)
-        placed: dict[ViewName | UnionName, ModulePath] = {}
-        misplaced: list[DjangoQueriesDiagnostic] = []
-        for compiled in (*views, *unions):
-            match NoModuleFromLayout.check(layout, LayoutRole.MODELS, compiled):
-                case ModulePath() as module:
-                    placed[compiled.name] = module
-                case NoModuleFromLayout() as diagnostic:
-                    misplaced.append(diagnostic)
         queries = tuple(
-            ViewQueries.of(view, config, placed[view.name])
+            ViewQueries.of(view, config, placed.module_of(view))
             for view in views
-            if view.source in graph.entities and view.name in placed
+            if view.source in graph.entities
         )
         enums: dict[type[enum.Enum], Symbol] = {}
         unimportable: list[DjangoQueriesDiagnostic] = []
@@ -486,21 +476,13 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                 UnionQueries.of(union, config, placed)
                 for union in unions
                 if union.source in graph.entities
-                and all(
-                    placed_name in placed
-                    for placed_name in (
-                        union.name,
-                        *(leaf.name for leaf in union.leaves()),
-                    )
-                )
             ),
             enums=enums,
         )
         entities = sorted(graph.entities, key=lambda entity: entity.__name__)
         return DiagnosticsError.or_ok(
             (
-                *misplaced,
-                *DjangoQueriesRenderer._modules(config, views, placed),
+                *DjangoQueriesRenderer._modules(config, (*views, *unions), placed),
                 *unimportable,
                 *renderer._clashes(entities),
             ),
@@ -517,22 +499,19 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     @staticmethod
     def _modules(
         config: DjangoModels,
-        views: Iterable[compiler.CompiledView],
-        placed: Mapping[ViewName | UnionName, ModulePath],
+        defined: Iterable[compiler.CompiledView | compiler.CompiledUnion],
+        placed: PlacedModels,
     ) -> Iterator[DjangoQueriesDiagnostic]:
-        """The Django models, the Django queries and the View models each need
-        their own module. `placed` has the module of each View's model the
-        layout gives one."""
+        """The Django models, the Django queries and the View and Union models
+        each need their own module."""
         if config.queries == config.module:
             yield QueriesIntoDjangoModelsModule(module=config.module)
-        for view in views:
-            if view.name not in placed:
-                continue
-            module = placed[view.name]
+        for compiled in defined:
+            module = placed.module_of(compiled)
             if module == config.queries:
-                yield ViewModelIntoQueriesModule(view=view.name, module=module)
+                yield ViewModelIntoQueriesModule(view=compiled.name, module=module)
             if module == config.module:
-                yield ViewModelIntoDjangoModelsModule(view=view.name, module=module)
+                yield ViewModelIntoDjangoModelsModule(view=compiled.name, module=module)
 
     def _read(self) -> tuple[ReadQueries, ...]:
         return (*self.queries, *self.unions)

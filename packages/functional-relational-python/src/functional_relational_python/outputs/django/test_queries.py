@@ -48,15 +48,12 @@ from functional_relational_python.outputs.django.queries import (
     ViewModelIntoDjangoModelsModule,
     ViewModelIntoQueriesModule,
 )
-from functional_relational_python.outputs.python import test_plan
 from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import (
-    LayoutRole,
     NameClash,
-    NoModuleFromLayout,
+    PlacedModels,
     PythonLayout,
     PythonPlan,
-    ReturnedText,
     Scope,
 )
 from functional_relational_python.outputs.python.symbols import (
@@ -195,10 +192,18 @@ def compile_all(
             pytest.fail(f"expected compiled views, got {error}")
 
 
+def placed_into(module: ModulePath, compiled: compiler.CompiledViews) -> PlacedModels:
+    """Every model of `compiled` placed into `module`."""
+    return PlacedModels.of(into(module), (*compiled.views, *compiled.unions)).unwrap()
+
+
 def queries_of(views: Iterable[View]) -> FileText:
     compiled = compile_all(views)
     files = DjangoQueriesRenderer.render(
-        entity_graph(), Modules.config(), compiled.views, into(Generated.models)
+        entity_graph(),
+        Modules.config(),
+        compiled.views,
+        placed_into(Generated.models, compiled),
     ).unwrap()
     (file,) = files.files
     return file.text
@@ -713,35 +718,35 @@ def any_employee_queryset(
     )
 
 
-def test_a_layout_giving_a_union_no_module_is_a_diagnostic() -> None:
+@pytest.mark.parametrize(
+    ("module", "diagnostic"),
+    [
+        (Modules.queries, ViewModelIntoQueriesModule),
+        (Modules.django, ViewModelIntoDjangoModelsModule),
+    ],
+    ids=["queries", "django-models"],
+)
+def test_a_union_model_into_a_django_module_is_a_diagnostic(
+    module: ModulePath,
+    diagnostic: type[ViewModelIntoQueriesModule | ViewModelIntoDjangoModelsModule],
+) -> None:
+    """Only the Union's model goes there; its Variants' go elsewhere."""
     union = any_employee()
     compiled = compile_all([], [union])
-
-    def views_only(
-        placed: compiler.CompiledView
-        | compiler.CompiledPayload
-        | compiler.CompiledUnion
-        | compiler.CompiledPayloadUnion,
-    ) -> ModulePath:
-        match placed:
-            case compiler.CompiledUnion():
-                return test_plan.unplaced(placed)
-            case _:
-                return Generated.models
+    placed = PlacedModels(
+        modules={
+            **placed_into(Generated.models, compiled).modules,
+            union.name: module,
+        }
+    )
 
     match DjangoQueriesRenderer.render(
-        entity_graph(), Modules.config(), compiled.views, views_only, compiled.unions
+        entity_graph(), Modules.config(), compiled.views, placed, compiled.unions
     ):
         case Ok(files):
             pytest.fail(f"expected diagnostics, got {files}")
         case Err(error):
-            assert error.diagnostics == (
-                NoModuleFromLayout(
-                    definition=union.name,
-                    role=LayoutRole.MODELS,
-                    returned=ReturnedText.of(None),
-                ),
-            )
+            assert error.diagnostics == (diagnostic(view=union.name, module=module),)
 
 
 def test_golden_union_from_row() -> None:
@@ -817,7 +822,10 @@ def test_a_view_named_like_a_query_set_method_is_a_diagnostic() -> None:
     compiled = compile_all([view])
 
     match DjangoQueriesRenderer.render(
-        entity_graph(), Modules.config(), compiled.views, into(Generated.models)
+        entity_graph(),
+        Modules.config(),
+        compiled.views,
+        placed_into(Generated.models, compiled),
     ):
         case Ok(files):
             pytest.fail(f"expected diagnostics, got {files}")
@@ -905,7 +913,7 @@ class Database:
                     entity_graph(),
                     config,
                     compiled.views,
-                    into(Generated.models),
+                    placed_into(Generated.models, compiled),
                     compiled.unions,
                 ).unwrap(),
             ]
@@ -1515,7 +1523,11 @@ def test_generated_queries_are_ruff_formatted(
     compiled = compile_all(*every_definition())
     (file,) = (
         DjangoQueriesRenderer.render(
-            entity_graph(), config, compiled.views, into(views), compiled.unions
+            entity_graph(),
+            config,
+            compiled.views,
+            placed_into(views, compiled),
+            compiled.unions,
         )
         .unwrap()
         .files
@@ -1536,8 +1548,9 @@ def render_diagnostics(
     config: DjangoModels, views: ModulePath
 ) -> tuple[DjangoQueriesDiagnostic, ...]:
     view = View(name=ViewName("CompanyFull"), source=Company, step=steps.pipeline())
+    compiled = compile_all([view])
     match DjangoQueriesRenderer.render(
-        entity_graph(), config, compile_all([view]).views, into(views)
+        entity_graph(), config, compiled.views, placed_into(views, compiled)
     ):
         case Ok(files):
             pytest.fail(f"expected diagnostics, got {files}")
@@ -1587,7 +1600,7 @@ def test_entities_with_one_name_are_left_to_the_django_models_to_report() -> Non
     ).unwrap()
 
     rendered = DjangoQueriesRenderer.render(
-        graph, Modules.config(), (), into(Generated.models)
+        graph, Modules.config(), (), PlacedModels(modules={})
     )
 
     assert isinstance(rendered, Ok)

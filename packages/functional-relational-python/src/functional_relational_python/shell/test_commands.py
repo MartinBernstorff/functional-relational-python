@@ -11,8 +11,12 @@ from functional_relational_python.outputs.django.models import (
     NoDjangoFieldRule,
     WithoutDjangoModels,
 )
+from functional_relational_python.outputs.python import test_plan
 from functional_relational_python.outputs.python.plan import (
+    LayoutRole,
     ModelsAndMappingsInOneModule,
+    NoModuleFromLayout,
+    ReturnedText,
     WithoutMappings,
 )
 from functional_relational_python.outputs.python.symbols import ModulePath
@@ -347,3 +351,40 @@ def test_generate_writes_django_queries_for_a_union_over_an_entity() -> None:
     assert "def any_card_queryset(" in queries.root
     assert "def as_any_card(" in queries.root
     assert commands.check(filesystem, root) == Ok(None)
+
+
+def views_only(
+    compiled: compiler.CompiledView
+    | compiler.CompiledPayload
+    | compiler.CompiledUnion
+    | compiler.CompiledPayloadUnion,
+) -> ModulePath:
+    """Places no Union, as a layout written before Unions might."""
+    match compiled:
+        case compiler.CompiledUnion():
+            return test_plan.unplaced(compiled)
+        case _:
+            return ModulePath("app.cards")
+
+
+union_unplaced_catalog = union_with_django_catalog.model_copy(
+    update={"layout": views_only}
+)
+
+
+def test_generate_reports_a_model_the_layout_places_nowhere_once() -> None:
+    """The Python output and the Django queries both place the Union's model."""
+    filesystem, root = project(in_this_module(Text("union_unplaced_catalog")))
+
+    match commands.generate(filesystem, root):
+        case Ok(written):
+            pytest.fail(f"expected diagnostics, wrote {written}")
+        case Err(error):
+            assert isinstance(error, DiagnosticsError)
+            assert error.diagnostics == (
+                NoModuleFromLayout(
+                    definition=UnionName("AnyCard"),
+                    role=LayoutRole.MODELS,
+                    returned=ReturnedText.of(None),
+                ),
+            )
