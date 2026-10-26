@@ -1254,3 +1254,53 @@ def test_generated_queries_pass_the_type_checker(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# require.
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        steps.require(FieldName("nickname")),
+        steps.pipeline(
+            steps.resolve(named(FieldName("mentor_id"))),
+            steps.require(FieldName("mentor")),
+        ),
+        steps.resolve(
+            named(FieldName("mentor_id")), steps.require(FieldName("nickname"))
+        ),
+    ],
+    ids=["field", "reference", "nested"],
+)
+def test_an_unmet_requirement_fails_the_view_models_validation(
+    step: steps.Step,
+) -> None:
+    view = View(name=ViewName("RequiringEmployee"), source=Employee, step=step)
+    (compiled,) = compile_all([view]).views
+
+    with Database.of([view]) as django_models:
+        Database.put(django_models, organisation())
+        with pytest.raises(pydantic.ValidationError, match="RequiringEmployee"):
+            _ = Database.read(django_models, compiled, every_row)
+
+
+def test_a_met_requirement_reads_like_the_engine() -> None:
+    view = View(
+        name=ViewName("NicknamedEmployee"),
+        source=Employee,
+        step=steps.require(FieldName("nickname")),
+    )
+    entities = tuple(
+        entity.model_copy(update={"nickname": Text("nick")})
+        if isinstance(entity, Employee)
+        else entity
+        for entity in organisation()
+    )
+    (compiled,) = compile_all([view]).views
+
+    with Database.of([view]) as django_models:
+        Database.put(django_models, entities)
+        rows = Database.read(django_models, compiled, every_row)
+
+    assert rows == engine_rows([compiled], entities)[view.name]

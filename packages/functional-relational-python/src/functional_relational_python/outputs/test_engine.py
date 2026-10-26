@@ -849,7 +849,7 @@ def with_ids_again(
     for field in relation.fields:
         value = row.root[field.name]
         match field.value:
-            case ir.SourceField(field=name):
+            case ir.SourceField(field=name) | ir.RequiredField(field=name):
                 values[name.root] = value
             case ir.Lookup(reference=reference):
                 values[reference.field.root] = (
@@ -1023,3 +1023,185 @@ def test_an_excluded_row_is_no_view_result_even_with_a_dangling_reference() -> N
     assert [row.root[FieldName("id")] for row in read(view_engine, view.name)] == [
         kept.id
     ]
+
+
+# require.
+
+
+def unmet(
+    view_engine: engine.InMemoryViewEngine, view: ViewName
+) -> tuple[engine.ReadDiagnostic, ...]:
+    match view_engine.read(view):
+        case Err(DiagnosticsError() as error):
+            return error.diagnostics
+        case result:
+            pytest.fail(f"expected unmet requirements, got {result}")
+
+
+def test_every_unmet_requirement_is_reported_with_every_id() -> None:
+    view = employee_view(steps.require(FieldName("mentor_id")))
+    view_engine = hr_engine(view)
+    unmentored = (
+        Employee.fake(EmployeeId(1), DepartmentId(1), None),
+        Employee.fake(EmployeeId(2), DepartmentId(1), None),
+    )
+    mentored = Employee.fake(EmployeeId(3), DepartmentId(1), unmentored[0].id)
+    for entity in (*unmentored, mentored):
+        view_engine.put(entity).unwrap()
+
+    assert unmet(view_engine, view.name) == (
+        engine.UnmetRequirement(
+            entity=Employee,
+            field=FieldName("mentor_id"),
+            ids=tuple(employee.id for employee in unmentored),
+        ),
+    )
+
+
+def test_a_requirement_in_a_nested_pipeline_names_the_referenced_entity() -> None:
+    view = employee_view(
+        steps.resolve(
+            named(FieldName("mentor_id")), steps.require(FieldName("mentor_id"))
+        )
+    )
+    view_engine = hr_engine(view)
+    # Only `mentor` is looked up, and it has no mentor of its own.
+    mentor = Employee.fake(EmployeeId(1), DepartmentId(1), None)
+    mentee = Employee.fake(EmployeeId(2), DepartmentId(1), mentor.id)
+    for entity in (mentor, mentee):
+        view_engine.put(entity).unwrap()
+
+    assert unmet(view_engine, view.name) == (
+        engine.UnmetRequirement(
+            entity=Employee, field=FieldName("mentor_id"), ids=(mentor.id,)
+        ),
+    )
+
+
+def test_a_required_reference_that_is_absent_is_unmet() -> None:
+    view = employee_view(
+        steps.pipeline(
+            steps.resolve(named(FieldName("mentor_id"))),
+            steps.require(FieldName("mentor")),
+        )
+    )
+    view_engine = hr_engine(view)
+    unmentored = Employee.fake(EmployeeId(1), DepartmentId(1), None)
+    view_engine.put(unmentored).unwrap()
+
+    assert unmet(view_engine, view.name) == (
+        engine.UnmetRequirement(
+            entity=Employee, field=FieldName("mentor_id"), ids=(unmentored.id,)
+        ),
+    )
+
+
+def test_a_required_reverse_that_finds_nothing_is_unmet() -> None:
+    view = employee_view(
+        steps.pipeline(steps.reverse(Profile), steps.require(FieldName("profile")))
+    )
+    view_engine = profile_engine(view)
+    with_profile = Employee.fake(EmployeeId(1), DepartmentId(1), None)
+    without_profiles = (
+        Employee.fake(EmployeeId(2), DepartmentId(1), None),
+        Employee.fake(EmployeeId(3), DepartmentId(1), None),
+    )
+    profile = Profile.fake(ProfileId(1), with_profile.id)
+    for entity in (with_profile, *without_profiles, profile):
+        view_engine.put(entity).unwrap()
+
+    assert unmet(view_engine, view.name) == (
+        engine.UnmetReverseRequirement(
+            entity=Profile,
+            via=FieldName("employee_id"),
+            ids=tuple(employee.id for employee in without_profiles),
+        ),
+    )
+
+
+def test_a_met_requirement_gives_the_value() -> None:
+    view = employee_view(
+        steps.pipeline(
+            steps.project([FieldName("id"), FieldName("mentor_id")]),
+            steps.require(FieldName("mentor_id")),
+        )
+    )
+    view_engine = hr_engine(view)
+    mentor = EmployeeId(2)
+    employee = Employee.fake(EmployeeId(1), DepartmentId(1), mentor)
+    view_engine.put(employee).unwrap()
+
+    assert read(view_engine, view.name) == (
+        engine.ViewRow({FieldName("id"): employee.id, FieldName("mentor_id"): mentor}),
+    )
+
+
+def test_an_excluded_row_is_not_checked_for_requirements() -> None:
+    kept = EmployeeId(2)
+    view = employee_view(
+        steps.pipeline(
+            steps.where(conditions.eq(conditions.field(FieldName("id")), kept)),
+            steps.require(FieldName("mentor_id")),
+        )
+    )
+    view_engine = hr_engine(view)
+    for employee_id in (EmployeeId(1), kept):
+        view_engine.put(Employee.fake(employee_id, DepartmentId(1), None)).unwrap()
+
+    assert unmet(view_engine, view.name) == (
+        engine.UnmetRequirement(
+            entity=Employee, field=FieldName("mentor_id"), ids=(kept,)
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "message"),
+    [
+        (
+            engine.UnmetRequirement(
+                entity=Employee,
+                field=FieldName("mentor_id"),
+                ids=(EmployeeId(1), EmployeeId(2)),
+            ),
+            "Employee.mentor_id is required, but is None for IDs: 1, 2",
+        ),
+        (
+            engine.UnmetReverseRequirement(
+                entity=Profile, via=FieldName("employee_id"), ids=(EmployeeId(1),)
+            ),
+            (
+                "A Profile referencing each subject by Profile.employee_id is "
+                "required, but none references IDs: 1"
+            ),
+        ),
+    ],
+    ids=["field", "reverse"],
+)
+def test_an_unmet_requirement_names_the_entity_the_field_and_the_ids(
+    diagnostic: engine.ReadDiagnostic, message: str
+) -> None:
+    assert diagnostic.describe().root == message
+
+
+def test_a_required_field_lifted_through_a_missing_entity_is_unmet() -> None:
+    view = employee_view(
+        steps.pipeline(
+            steps.project([FieldName("id")]),
+            steps.reverse(Profile, steps.project([FieldName("bio")])),
+            steps.flatten(FieldName("profile")),
+            steps.require(FieldName("bio")),
+        )
+    )
+    view_engine = profile_engine(view)
+    with_profile = Employee.fake(EmployeeId(1), DepartmentId(1), None)
+    without_profile = Employee.fake(EmployeeId(2), DepartmentId(1), None)
+    profile = Profile.fake(ProfileId(1), with_profile.id)
+    for entity in (with_profile, without_profile, profile):
+        view_engine.put(entity).unwrap()
+
+    assert unmet(view_engine, view.name) == (
+        engine.UnmetReverseRequirement(
+            entity=Profile, via=FieldName("employee_id"), ids=(without_profile.id,)
+        ),
+    )

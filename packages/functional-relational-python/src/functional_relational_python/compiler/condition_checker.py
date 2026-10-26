@@ -7,7 +7,7 @@ from typing import Annotated
 
 import pydantic
 
-from functional_relational_python.compiler import diagnostics, literals
+from functional_relational_python.compiler import diagnostics, literals, narrowing
 from functional_relational_python.entity_graph.entity_graph import (
     Optionality,
     RuntimeAnnotation,
@@ -48,16 +48,7 @@ class _Column(pydantic.BaseModel, frozen=True):
     def split_annotation(self) -> SplitAnnotation:
         """The field's type, apart from `None`, with `type` aliases looked
         through."""
-        annotation = self.field.annotation()
-        while isinstance(annotation, typing.TypeAliasType):
-            annotation = annotation.__value__
-        split = Optionality.of_annotation(annotation)
-        required = split.required
-        while isinstance(required, typing.TypeAliasType):
-            required = required.__value__
-        return SplitAnnotation(
-            optionality=split.optionality, required=required, metadata=split.metadata
-        )
+        return narrowing.split(self.field.annotation())
 
 
 type Checked = (
@@ -125,8 +116,13 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
             field for field in self.relation.fields if field.name == reference.name
         ]
         match named:
-            case [ir.Field(value=ir.SourceField() as source) as field, *_]:
-                return _Column(field=field, source=source)
+            case [
+                ir.Field(
+                    value=ir.SourceField(field=column) | ir.RequiredField(field=column)
+                ) as field,
+                *_,
+            ]:
+                return _Column(field=field, source=ir.SourceField(field=column))
             case [_, *_]:
                 diagnostic = diagnostics.NotASourceColumn(
                     view=self.view, source=self.relation.source, field=reference.name

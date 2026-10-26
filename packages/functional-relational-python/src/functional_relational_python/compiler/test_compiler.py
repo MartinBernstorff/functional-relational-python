@@ -1340,6 +1340,7 @@ def reverse_diagnostics(
 def meta_campaign_lookup() -> ir.ReverseLookup:
     """How a ChannelCampaign's MetaCampaign is found."""
     return ir.ReverseLookup(
+        optionality=Optionality.OPTIONAL,
         target=MetaCampaign,
         via=FieldName("channel_campaign_id"),
         id_type=ChannelCampaignId,
@@ -1411,7 +1412,10 @@ def test_reverse_via_follows_the_chosen_one_to_one_reference() -> None:
     )
 
     assert values(view)[FieldName("relaunch")] == ir.ReverseLookup(
-        target=Relaunch, via=FieldName("new_campaign_id"), id_type=ChannelCampaignId
+        optionality=Optionality.OPTIONAL,
+        target=Relaunch,
+        via=FieldName("new_campaign_id"),
+        id_type=ChannelCampaignId,
     )
 
 
@@ -1427,6 +1431,7 @@ def test_reverse_in_a_nested_pipeline_starts_from_the_resolved_entity() -> None:
     match view.relation.fields[1]:
         case ir.NestedField(relation=relation):
             assert relation.fields[-1].value == ir.ReverseLookup(
+                optionality=Optionality.OPTIONAL,
                 target=Relaunch,
                 via=FieldName("old_campaign_id"),
                 id_type=ChannelCampaignId,

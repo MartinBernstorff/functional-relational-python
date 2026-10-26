@@ -20,7 +20,9 @@ The Manager overrides the Manager methods that return a QuerySet (`all`, `filter
 `as_<view>()` on `Model.objects.filter(...)`.
 
 A row is validated non-strictly, so a View model with a strict base accepts what
-Django returns, e.g. a `str` for an enum field.
+Django returns, e.g. a `str` for an enum field. A value the View requires that is
+`None`, or a required Entity the row does not have, fails that validation with a
+`pydantic.ValidationError` naming the View model and the field.
 
 Like the InMemoryViewEngine, it computes each field from the Values of the
 compiled Relation, so the two agree (the differential test in `test_queries.py`
@@ -39,6 +41,7 @@ from functional_relational_python.compiler import compiler
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
+    Optionality,
 )
 from functional_relational_python.outputs.django.models import (
     DjangoModels,
@@ -51,6 +54,7 @@ from functional_relational_python.outputs.python.mappings import (
     LeftOut,
 )
 from functional_relational_python.outputs.python.plan import (
+    ModelPlan,
     ModuleLayout,
     NameClash,
     Namespace,
@@ -664,7 +668,8 @@ class _RowReader(pydantic.BaseModel, frozen=True):
             case ir.Field(value=value):
                 pass
         match value:
-            case ir.SourceField():
+            case ir.SourceField() | ir.RequiredField():
+                # A required field that is `None` fails the View model's validation.
                 node = self.graph.entities[subject]
                 attribute = DjangoModelsRenderer.attribute_of(node, value.field)
                 return Expression(f"{row.root}.{attribute.root}")
@@ -691,14 +696,23 @@ class _RowReader(pydantic.BaseModel, frozen=True):
         lookups: Iterable[ir.EntityLookup], row: Expression, field: FieldName
     ) -> Followed:
         """`lookups` followed from `row` through the rows the QuerySet selected
-        related, each optional one absent when its row is `None`."""
+        related, each optional one absent when its row is `None`.
+
+        One the View requires is read like an optional one, so that finding
+        nothing fails the View model's validation.
+        """
 
         def related(lookup: ir.EntityLookup, found: Expression) -> Expression:
             foreign_key = DjangoQueriesRenderer.foreign_key(lookup, field)
             return Expression(f"{found.root}.{foreign_key.root}")
 
         return Followed.of(
-            lookups,
+            (
+                lookup.model_copy(update={"optionality": Optionality.OPTIONAL})
+                if ModelPlan.required_lookup(lookup)
+                else lookup
+                for lookup in lookups
+            ),
             row,
             related,
             lambda lookup, found: Expression(f"{related(lookup, found).root} is None"),

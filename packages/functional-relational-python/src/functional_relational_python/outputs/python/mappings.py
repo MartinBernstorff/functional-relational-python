@@ -7,9 +7,11 @@ carries that meaning rather than an enum variant. A View that resolves Reference
 also takes, per Entity it looks up, a keyword parameter mapping IDs to Entities; a
 dangling ID raises `KeyError` there. A View that reverses a one-to-one Reference
 takes a parameter mapping the IDs in that Reference to the Entities holding them;
-a missing ID gives `None`. A
-module of mapping functions imports only the Source, Entity and View model
-modules, so it runs and type checks without this library installed.
+a missing ID gives `None`. A value the View requires goes through a function
+`_required` the module defines, which raises `ValueError` naming the subject's
+field and ID when the value is `None`. A module of mapping functions imports only
+the Source, Entity and View model modules, so it runs and type checks without
+this library installed.
 
 Like the InMemoryViewEngine, it computes each field from the Values of the
 compiled Relation, so the two agree (the differential test in `test_mappings.py`
@@ -77,11 +79,41 @@ class Indent(pydantic.RootModel[int], frozen=True):
 
         The trailing comma keeps ruff format from joining the lines.
         """
-        pad = self.deeper().pad().root
-        lines = "".join(f"{pad}{entry.root},\n" for entry in entries)
+        inner = self.deeper()
+        pad = inner.pad().root
+        lines = "".join(
+            f"{pad}{inner.fitted(entry, Expression(',')).root},\n" for entry in entries
+        )
         if not lines:
             return Expression(f"{opening.root}{closing.root}")
         return Expression(f"{opening.root}\n{lines}{self.pad().root}{closing.root}")
+
+    def fitted(self, entry: Expression, suffix: Expression) -> Expression:
+        """`entry`, on a line at this indentation followed by `suffix`, split as
+        ruff format splits a line that does not fit: inside its last brackets,
+        their contents on one line one level deeper if they fit, else one item
+        per line with a trailing comma, each split likewise."""
+        text = entry.root
+        if (
+            "\n" in text
+            or len(f"{self.pad().root}{text}{suffix.root}") <= LineLength.default().root
+        ):
+            return entry
+        match _Bracketed.of(entry):
+            case _Unbracketed():
+                return entry
+            case _Bracketed(head=head, body=body, tail=tail):
+                pass
+        inner = self.deeper()
+        pad = inner.pad().root
+        items = _Bracketed.items(body)
+        if len(items) > 1 and len(f"{pad}{body.root}") > LineLength.default().root:
+            lines = "".join(
+                f"{pad}{inner.fitted(item, Expression(',')).root},\n" for item in items
+            )
+        else:
+            lines = f"{pad}{inner.fitted(body, Expression('')).root}\n"
+        return Expression(f"{head.root}\n{lines}{self.pad().root}{tail.root}")
 
     def looked_up(
         self,
@@ -117,10 +149,107 @@ class Indent(pydantic.RootModel[int], frozen=True):
             if len(f"{pad}{inline}") <= LineLength.default().root:
                 return Expression(f"(\n{pad}{inline}\n{self.pad().root})")
         branches = "".join(
-            f"{pad}{'None' if index == 0 else 'else None'}\n{pad}if {condition.root}\n"
+            f"{pad}{'None' if index == 0 else 'else None'}\n"
+            f"{pad}{inner.condition(condition).root}\n"
             for index, condition in enumerate(absent)
         )
-        return Expression(f"(\n{branches}{pad}else {written}\n{self.pad().root})")
+        otherwise = inner.fitted(Expression(f"else {written}"), Expression(""))
+        return Expression(f"(\n{branches}{pad}{otherwise.root}\n{self.pad().root})")
+
+    def condition(self, absent: Expression) -> Expression:
+        """`if <absent>` on a line at this indentation, split as ruff format
+        splits one that does not fit: before its comparison, then its left
+        operand as `fitted` splits it."""
+        line = Expression(f"if {absent.root}")
+        if len(f"{self.pad().root}{line.root}") <= LineLength.default().root:
+            return line
+        for operator in (" is None", " not in "):
+            left, found, right = absent.root.rpartition(operator)
+            if found:
+                operand = self.fitted(Expression(f"if {left}"), Expression(""))
+                compared = f"{operator.strip()} {right}".strip()
+                return Expression(f"{operand.root}\n{self.pad().root}{compared}")
+        return line
+
+
+class _Unbracketed(pydantic.BaseModel, frozen=True):
+    """A one-line expression without brackets outside its string literals."""
+
+
+class _Depth(pydantic.RootModel[int], frozen=True):
+    """How many brackets are open before a character of a one-line expression,
+    outside its string literals."""
+
+
+class _Bracketed(pydantic.BaseModel, frozen=True):
+    """A one-line expression around its last top-level brackets: `head` up to
+    and including the opening bracket, `body` inside them, and `tail` from the
+    closing bracket on."""
+
+    head: Expression
+    body: Expression
+    tail: Expression
+
+    @staticmethod
+    def of(text: Expression) -> _Bracketed | _Unbracketed:
+        depths = _Bracketed._depths(text)
+        closings = [
+            index
+            for index, character in enumerate(text.root)
+            if character in ")]}" and depths[index] == _Depth(1)
+        ]
+        if not closings:
+            return _Unbracketed()
+        closing = closings[-1]
+        opening = max(
+            index
+            for index in range(closing)
+            if text.root[index] in "([{" and depths[index] == _Depth(0)
+        )
+        return _Bracketed(
+            head=Expression(text.root[: opening + 1]),
+            body=Expression(text.root[opening + 1 : closing]),
+            tail=Expression(text.root[closing:]),
+        )
+
+    @staticmethod
+    def items(body: Expression) -> tuple[Expression, ...]:
+        """`body` split at its top-level commas."""
+        depths = _Bracketed._depths(body)
+        items: list[Expression] = []
+        start = 0
+        for index, character in enumerate(body.root):
+            if character == "," and depths[index] == _Depth(0):
+                items.append(Expression(body.root[start:index].strip()))
+                start = index + 1
+        items.append(Expression(body.root[start:].strip()))
+        return tuple(item for item in items if item.root)
+
+    @staticmethod
+    def _depths(text: Expression) -> tuple[_Depth, ...]:
+        """The depth before each character; -1 inside a string literal."""
+        depths: list[_Depth] = []
+        depth = 0
+        quote = ""
+        escaped = False
+        for character in text.root:
+            if quote:
+                depths.append(_Depth(-1))
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == quote:
+                    quote = ""
+                continue
+            depths.append(_Depth(depth))
+            if character in "\"'":
+                quote = character
+            elif character in "([{":
+                depth += 1
+            elif character in ")]}":
+                depth -= 1
+        return tuple(depths)
 
 
 class Followed(pydantic.BaseModel, frozen=True):
@@ -183,10 +312,31 @@ class MappingsRenderer:
                 module for function in functions for module in function.imports()
             )
         )
+        helper = (
+            f"\n\n{MappingsRenderer._required_helper().root}"
+            if any(function.model.requires() for function in functions)
+            else ""
+        )
         rendered = "".join(
             f"\n\n{MappingsRenderer._function(function).root}" for function in functions
         )
-        return FileText(f"{MappingsRenderer.header.root}\n{imports}{rendered}")
+        return FileText(f"{MappingsRenderer.header.root}\n{imports}{helper}{rendered}")
+
+    @staticmethod
+    def _required_helper() -> FunctionText:
+        """The function giving a value a View requires, or raising when it is
+        `None`. `of` is the subject holding it, named by its ID if it has one."""
+        return FunctionText(
+            f"def {FunctionPlan.required_helper.root}"
+            "[T](value: T | None, of: object, what: str) -> T:\n"
+            '    """`value`, which a View requires: `what` of `of`."""\n'
+            "    if value is None:\n"
+            f'        key = getattr(of, "{EntityNode.primary_key.root}", of)\n'
+            '        msg = f"{what} is required, but there is none for '
+            '{type(of).__name__} {key!r}"\n'
+            "        raise ValueError(msg)\n"
+            "    return value\n"
+        )
 
     @staticmethod
     def _function(function: FunctionPlan) -> FunctionText:
@@ -263,18 +413,15 @@ class _Construction(pydantic.BaseModel, frozen=True):
                 return self.indent.looked_up(
                     prefix,
                     followed.absent,
-                    lambda indent: self.model_copy(update={"indent": indent}).call(
-                        nested, followed.entity
-                    ),
+                    lambda indent: self._nested(indent, nested, found, followed),
                 )
             case ir.Field(value=value):
                 pass
         match value:
-            case ir.SourceField():
-                return Expression(f"{subject.root}.{value.field.root}")
+            case ir.SourceField() | ir.RequiredField():
+                return self.column(value, subject)
             case ir.ReverseLookup():
-                access = self._access(value, subject)
-                return Expression(f"{access.parameter.root}.get({access.key.root})")
+                return self._reverse(value, subject)
             case ir.Lookup() | ir.ChainedLookup():
                 followed = self._followed(value.lookups(), subject)
                 return self.indent.looked_up(
@@ -282,8 +429,13 @@ class _Construction(pydantic.BaseModel, frozen=True):
                 )
             case ir.Lifted(through=through, field=read):
                 followed = self._followed(through, subject)
-                lifted = Expression(f"{followed.entity.root}.{read.field.root}")
-                return self.indent.looked_up(prefix, followed.absent, lambda _: lifted)
+                return self.indent.looked_up(
+                    prefix,
+                    followed.absent,
+                    lambda indent: self.model_copy(update={"indent": indent}).column(
+                        read, followed.entity
+                    ),
+                )
             case ir.Added():
                 return LeftOut()
 
@@ -291,11 +443,8 @@ class _Construction(pydantic.BaseModel, frozen=True):
         self, lookups: Iterable[ir.EntityLookup], subject: Expression
     ) -> Followed:
         """`lookups` followed from `subject`: an optional Reference finds nothing
-        when its ID is `None`, a reversed one when no Entity holds the ID."""
-
-        def entity(lookup: ir.EntityLookup, found: Expression) -> Expression:
-            access = self._access(lookup, found)
-            return Expression(f"{access.parameter.root}[{access.key.root}]")
+        when its ID is `None`, a reversed one when no Entity holds the ID. One the
+        View requires finds something, or raises through `_required`."""
 
         def absent(lookup: ir.EntityLookup, found: Expression) -> Expression:
             access = self._access(lookup, found)
@@ -307,7 +456,99 @@ class _Construction(pydantic.BaseModel, frozen=True):
                         f"{access.key.root} not in {access.parameter.root}"
                     )
 
-        return Followed.of(lookups, subject, entity, absent)
+        return Followed.of(lookups, subject, self._entity, absent)
+
+    def _entity(self, lookup: ir.EntityLookup, subject: Expression) -> Expression:
+        """The Entity `lookup` finds from `subject`, on one line. One the View
+        requires goes through `_required`."""
+        access = self._access(lookup, subject)
+        helper = FunctionPlan.required_helper.root
+        match lookup:
+            case ir.Lookup(reference=ir.RequiredField() as reference):
+                what = _Construction._what(reference).root
+                key = f"{helper}({access.key.root}, {subject.root}, {what})"
+                return Expression(f"{access.parameter.root}[{key}]")
+            case ir.ReverseLookup(optionality=Optionality.REQUIRED):
+                what = _Construction._what(lookup).root
+                found = self._reversed(lookup, subject).root
+                return Expression(f"{helper}({found}, {subject.root}, {what})")
+            case ir.Lookup() | ir.ReverseLookup():
+                return Expression(f"{access.parameter.root}[{access.key.root}]")
+
+    def column(self, column: ir.SubjectColumn, subject: Expression) -> Expression:
+        """The value of `subject`'s field `column`, through `_required` if the View
+        requires it."""
+        value = Expression(f"{subject.root}.{column.field.root}")
+        match column:
+            case ir.SourceField():
+                return value
+            case ir.RequiredField():
+                return self.required(value, subject, _Construction._what(column))
+
+    def _reverse(self, lookup: ir.ReverseLookup, subject: Expression) -> Expression:
+        """The Entity referencing `subject` by `lookup.via`: through `_required` if
+        the View requires it, else `None` if there is none."""
+        found = self._reversed(lookup, subject)
+        match lookup.optionality:
+            case Optionality.OPTIONAL:
+                return found
+            case Optionality.REQUIRED:
+                return self.required(found, subject, _Construction._what(lookup))
+
+    def _nested(
+        self,
+        indent: Indent,
+        nested: ModelPlan,
+        found: ir.EntityValue,
+        followed: Followed,
+    ) -> Expression:
+        """The call building `nested` from the Entity `found`, at `indent`.
+
+        A model reading nothing from an Entity the View requires still looks it
+        up, so that a missing one raises: the call is the second of a pair with it.
+        """
+        reads = any(
+            not isinstance(field.field, ir.Field)
+            or not isinstance(field.field.value, ir.Added)
+            for field in nested.fields
+        )
+        required = any(ModelPlan.required_lookup(lookup) for lookup in found.lookups())
+        if reads or not required:
+            return self.model_copy(update={"indent": indent}).call(
+                nested, followed.entity
+            )
+        inner = self.model_copy(update={"indent": indent.deeper()})
+        return indent.exploded(
+            Expression("("),
+            (followed.entity, inner.call(nested, followed.entity)),
+            Expression(")[1]"),
+        )
+
+    def required(
+        self, value: Expression, subject: Expression, what: Expression
+    ) -> Expression:
+        """`value`, a value of `subject` the View requires, through the module's
+        `_required`, on a line at this indentation."""
+        return self.indent.exploded(
+            Expression(f"{FunctionPlan.required_helper.root}("),
+            (value, subject, what),
+            Expression(")"),
+        )
+
+    @staticmethod
+    def _what(required: ir.RequiredField | ir.ReverseLookup) -> Expression:
+        """What `_required` names a value the View requires, as a string."""
+        match required:
+            case ir.RequiredField(field=field):
+                text = field.root
+            case ir.ReverseLookup(target=target, via=via):
+                text = f"a {target.__name__} by {via.root}"
+        return Expression(PythonString(text).literal().root)
+
+    def _reversed(self, lookup: ir.ReverseLookup, subject: Expression) -> Expression:
+        """The Entity referencing `subject` by `lookup.via`, or `None`."""
+        access = self._access(lookup, subject)
+        return Expression(f"{access.parameter.root}.get({access.key.root})")
 
     def _access(self, lookup: ir.EntityLookup, subject: Expression) -> _Access:
         """The parameter `lookup` finds its Entity in, and the subject's value it

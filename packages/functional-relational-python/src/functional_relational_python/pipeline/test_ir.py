@@ -136,27 +136,32 @@ def test_a_nested_field_is_as_optional_as_its_lookup() -> None:
     assert field.optionality() == Optionality.OPTIONAL
 
 
+def department_by_company() -> ir.ReverseLookup:
+    return ir.ReverseLookup(
+        optionality=Optionality.OPTIONAL,
+        target=Department,
+        via=FieldName("company_id"),
+        id_type=CompanyId,
+    )
+
+
 def test_a_reverse_lookup_is_typed_by_the_entity_or_none() -> None:
-    reverse = ir.ReverseLookup(
-        target=Department, via=FieldName("company_id"), id_type=CompanyId
+    assert department_by_company().annotation() == Department | None
+
+
+def test_a_required_reverse_lookup_is_typed_by_the_entity() -> None:
+    assert department_by_company().required().annotation() == Department
+
+
+def test_a_required_lookup_reads_its_reference_as_required() -> None:
+    mentor = lookup(FieldName("mentor_id"), Employee, Optionality.OPTIONAL)
+
+    assert mentor.required() == ir.Lookup(
+        reference=ir.RequiredField(field=FieldName("mentor_id")),
+        id_type=mentor.id_type,
+        target=Employee,
+        optionality=Optionality.REQUIRED,
     )
-
-    assert (reverse.optionality, reverse.annotation()) == (
-        Optionality.OPTIONAL,
-        Department | None,
-    )
-
-
-def test_a_reverse_lookup_cannot_be_required() -> None:
-    with pytest.raises(pydantic.ValidationError):
-        _ = ir.ReverseLookup.model_validate(
-            {
-                "target": Department,
-                "via": FieldName("company_id"),
-                "id_type": CompanyId,
-                "optionality": Optionality.REQUIRED,
-            }
-        )
 
 
 def test_lookups_are_one_per_entity_nested_included_in_first_use_order() -> None:

@@ -12,6 +12,8 @@ is found here, once. The renderers in
 The compiler has already checked the names themselves (`model_names`).
 """
 
+import enum
+import keyword
 import types
 import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -21,7 +23,10 @@ from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
 from functional_relational_python.compiler.model_names import ModelNames, PascalCase
-from functional_relational_python.entity_graph.entity_graph import FieldName
+from functional_relational_python.entity_graph.entity_graph import (
+    FieldName,
+    Optionality,
+)
 from functional_relational_python.entity_graph.id import OneToOne
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
@@ -249,6 +254,44 @@ class ModelPlan(pydantic.BaseModel, frozen=True):
     def nested_in(self, field: ir.NestedField) -> ModelPlan:
         return self.nested[field.name]
 
+    def requires(self) -> bool:
+        """Whether building this model, or a model nested in it, reads a value the
+        View requires."""
+        return any(ModelPlan._required(field.field) for field in self.fields) or any(
+            nested.requires() for nested in self.nested.values()
+        )
+
+    @staticmethod
+    def _required(field: ir.RelationField) -> bool:
+        match field:
+            case ir.Field(value=value):
+                pass
+            case ir.NestedField(value=found):
+                value = found
+        required = any(ModelPlan.required_lookup(lookup) for lookup in value.lookups())
+        match value:
+            case ir.RequiredField() | ir.Lifted(field=ir.RequiredField()):
+                return True
+            case (
+                ir.SourceField()
+                | ir.Added()
+                | ir.Lifted()
+                | ir.Lookup()
+                | ir.ReverseLookup()
+                | ir.ChainedLookup()
+            ):
+                return required
+
+    @staticmethod
+    def required_lookup(lookup: ir.EntityLookup) -> bool:
+        """Whether the View requires `lookup` to find an Entity, which it might
+        not."""
+        match lookup:
+            case ir.Lookup(reference=reference):
+                return isinstance(reference, ir.RequiredField)
+            case ir.ReverseLookup(optionality=optionality):
+                return optionality is Optionality.REQUIRED
+
     def with_nested(self) -> tuple[ModelPlan, ...]:
         """This model and every model nested in it, each after those it refers to."""
         return (
@@ -290,6 +333,9 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
     """
 
     source_parameter: typing.ClassVar[Identifier] = Identifier("source")
+    required_helper: typing.ClassVar[Identifier] = Identifier("_required")
+    """The function a mapping module defines when a View requires a value. It
+    gives the value, or raises `ValueError` when it is `None`."""
     mapping: typing.ClassVar[ModulePath] = ModulePath("collections.abc")
 
     view: ViewName
@@ -507,10 +553,10 @@ class _AnnotationRenderer:
             ordered = sorted(args, key=lambda arg: arg is types.NoneType)
             return TypeExpression(" | ".join(self.render(arg).root for arg in ordered))
         if origin is typing.Literal and all(
-            type(arg) in (str, int, bool) for arg in args
+            _AnnotationRenderer._writable_in_literal(arg) for arg in args
         ):
             self.symbols.add(_AnnotationRenderer.literal)
-            values = ", ".join(repr(arg) for arg in args)
+            values = ", ".join(self._literal_value(arg).root for arg in args)
             return TypeExpression(
                 f"{_AnnotationRenderer.literal.reference().root}[{values}]"
             )
@@ -524,6 +570,26 @@ class _AnnotationRenderer:
             return self._unsupported(annotation)
         rendered = ", ".join(self.render(arg).root for arg in args)
         return TypeExpression(f"{self.render(origin).root}[{rendered}]")
+
+    @staticmethod
+    def _writable_in_literal(arg: ir.RuntimeAnnotation) -> bool:
+        """Whether `arg` can be written in a `Literal`: a string, an integer, a
+        boolean, `None`, or an enum member named by an identifier, as a narrowing
+        Filter gives."""
+        match arg:
+            case enum.Enum(name=name):
+                return name.isidentifier() and not keyword.iskeyword(name)
+            case None:
+                return True
+            case _:
+                return type(arg) in (str, int, bool)
+
+    def _literal_value(self, arg: ir.RuntimeAnnotation) -> ValueExpression:
+        match arg:
+            case enum.Enum():
+                return ValueExpression.of_enum_member(self._named(type(arg)), arg)
+            case _:
+                return ValueExpression(repr(arg))
 
     def _named(self, annotation: ir.RuntimeAnnotation) -> TypeExpression:
         match Symbol.of(annotation):
@@ -738,6 +804,14 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                 )
                 for imported in function.imports():
                     namespace.refer_to_module(imported)
+            if any(function.model.requires() for function in functions):
+                namespace.define(
+                    FunctionPlan.required_helper,
+                    AnnotationText(
+                        f"{module.root}.{FunctionPlan.required_helper.root} (the "
+                        "function giving each value a View requires)"
+                    ),
+                )
             yield from namespace.clashes()
             for function in functions:
                 yield from Namespace.of_function(function).clashes()
