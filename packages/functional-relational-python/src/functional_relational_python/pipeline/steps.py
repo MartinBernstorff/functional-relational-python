@@ -6,25 +6,59 @@ ones.
 
 import functools
 from collections.abc import Callable, Iterable
+from typing import overload
 
 from safe_result import Ok
 
-from functional_relational_python.entity_graph.entity_graph import IdAnnotation
+from functional_relational_python.entity_graph.entity_graph import (
+    EntityNode,
+    FieldName,
+    IdAnnotation,
+)
 from functional_relational_python.pipeline import ir
 
 type Step = Callable[[ir.Node], ir.Node]
 
 
-def omit(field: ir.FieldName) -> Step:
+def omit(fields: FieldName | ir.Select) -> Step:
+    """Removes the field named `fields`, or every field `fields` selects."""
+
     def step(node: ir.Node) -> ir.Node:
-        return ir.Omit(input=node, field=field)
+        return ir.Omit(input=node, fields=fields)
 
     return step
 
 
-def rename(field: ir.FieldName, new: ir.FieldName) -> Step:
+@overload
+def rename(fields: FieldName, new: FieldName) -> Step: ...
+
+
+@overload
+def rename(fields: ir.Select, new: ir.FieldRenaming) -> Step: ...
+
+
+def rename(fields: FieldName | ir.Select, new: FieldName | ir.FieldRenaming) -> Step:
+    """Renames the field named `fields` to `new`.
+
+    With a Select, renames every selected field to `new` of its old name.
+    """
+    # The overloads keep a Select with a name, and a name with a function, out;
+    # this is what they would mean.
+    match new:
+        case FieldName() as name:
+
+            def renaming(_old: FieldName) -> FieldName:
+                return name
+
+        case _:
+            renaming = new
+
     def step(node: ir.Node) -> ir.Node:
-        return ir.Rename(input=node, field=field, new=new)
+        match fields:
+            case FieldName():
+                return ir.Rename(input=node, field=fields, new=renaming(fields))
+            case ir.Select():
+                return ir.RenameSelected(input=node, fields=fields, new=renaming)
 
     return step
 
@@ -70,6 +104,19 @@ def resolve(fields: ir.Select, *then: Step) -> Step:
         return ir.Resolve(input=node, fields=fields, then=nested)
 
     return step
+
+
+def is_primary_key(field: ir.RelationField) -> bool:
+    """Whether `field` is the primary key, under whatever name it has been renamed to.
+
+    Like `is_reference`, it is told apart by where its value comes from: the
+    subject's `id` field. A Reference renamed to `id` is not the primary key.
+    """
+    match field:
+        case ir.Field(value=ir.SourceField(field=source)):
+            return source == EntityNode.primary_key
+        case ir.Field() | ir.NestedField():
+            return False
 
 
 def hydrate(*then: Step) -> Step:

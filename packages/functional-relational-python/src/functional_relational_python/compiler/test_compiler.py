@@ -7,7 +7,7 @@ from hypothesis import event, given
 from hypothesis import strategies as st
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.compiler import compiler, diagnostics
+from functional_relational_python.compiler import compiler, diagnostics, model_names
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
@@ -211,7 +211,7 @@ def test_building_a_pipeline_checks_nothing() -> None:
     node = steps.pipeline(steps.omit(unknown), steps.rename(unknown, unknown))(root)
 
     assert node == ir.Rename(
-        input=ir.Omit(input=root, field=unknown), field=unknown, new=unknown
+        input=ir.Omit(input=root, fields=unknown), field=unknown, new=unknown
     )
 
 
@@ -324,6 +324,137 @@ def test_the_rename_onto_existing_field_message_contains_the_offending_values() 
     assert message.root == (
         "CompanySummary: cannot rename 'secret' to 'name', because it "
         "already has a field 'name'."
+    )
+
+
+def prefixed(prefix: Text) -> ir.FieldRenaming:
+    return lambda field: FieldName(f"{prefix.root}_{field.root}")
+
+
+def test_omit_with_a_select_removes_every_selected_field() -> None:
+    view = compile_one(steps.omit(named(FieldName("secret"), FieldName("revenue"))))
+
+    assert field_names(view) == names(Text("name"))
+
+
+def test_omit_with_a_select_that_selects_nothing_changes_nothing() -> None:
+    view = compile_one(steps.omit(named(FieldName("does_not_exist"))))
+
+    assert field_names(view) == names(*map(Text, Company.model_fields))
+
+
+def test_rename_with_a_select_renames_each_selected_field_in_place() -> None:
+    view = compile_one(
+        steps.rename(
+            named(FieldName("name"), FieldName("revenue")), prefixed(Text("public"))
+        )
+    )
+
+    assert values(view) == {
+        FieldName("public_name"): ir.SourceField(field=FieldName("name")),
+        FieldName("secret"): ir.SourceField(field=FieldName("secret")),
+        FieldName("public_revenue"): ir.SourceField(field=FieldName("revenue")),
+    }
+    assert field_names(view) == names(
+        Text("public_name"), Text("secret"), Text("public_revenue")
+    )
+
+
+def test_rename_with_a_select_renames_all_fields_at_once_so_they_can_swap() -> None:
+    first, second = FieldName("name"), FieldName("secret")
+
+    view = compile_one(
+        steps.rename(
+            named(first, second), lambda field: second if field == first else first
+        )
+    )
+
+    assert values(view) == {
+        second: ir.SourceField(field=first),
+        first: ir.SourceField(field=second),
+        FieldName("revenue"): ir.SourceField(field=FieldName("revenue")),
+    }
+
+
+def test_rename_with_a_select_onto_an_unselected_field_is_a_diagnostic() -> None:
+    existing = FieldName("name")
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.rename(named(FieldName("secret")), lambda _field: existing),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.RenameOntoExistingField(
+            view=view.name, renamed=FieldName("secret"), field=existing
+        ),
+    )
+
+
+def test_a_selected_field_renamed_to_its_own_name_keeps_it() -> None:
+    kept, renamed = FieldName("secret"), FieldName("name")
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.rename(named(renamed, kept), lambda _field: kept),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.RenameOntoExistingField(
+            view=view.name, renamed=renamed, field=kept
+        ),
+    )
+
+
+def test_renaming_two_selected_fields_onto_one_name_reports_the_second() -> None:
+    new = FieldName("code")
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.pipeline(
+            steps.rename(
+                named(FieldName("secret"), FieldName("revenue")), lambda _field: new
+            ),
+            # The first renamed field keeps the name, so a later step finds it.
+            steps.omit(new),
+        ),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.RenameOntoExistingField(
+            view=view.name, renamed=FieldName("revenue"), field=new
+        ),
+    )
+
+
+def test_rename_with_a_select_reports_each_invalid_new_name() -> None:
+    selected = (FieldName("name"), FieldName("secret"))
+    private = prefixed(Text("_"))
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.rename(named(*selected), private),
+    )
+
+    assert diagnostics_of([view]) == tuple(
+        model_names.InvalidFieldName(
+            view=view.name, source=ir.SourceName("Company"), field=private(field)
+        )
+        for field in selected
+    )
+
+
+def test_building_steps_with_a_select_checks_nothing() -> None:
+    root = ir.FromSource(source=Company)
+    selection = named(FieldName("does_not_exist"))
+    renaming = prefixed(Text("public"))
+
+    node = steps.pipeline(steps.omit(selection), steps.rename(selection, renaming))(
+        root
+    )
+
+    assert node == ir.RenameSelected(
+        input=ir.Omit(input=root, fields=selection), fields=selection, new=renaming
     )
 
 
@@ -914,6 +1045,8 @@ def pipelines(
 ) -> steps.Step:
     """A valid pipeline of omits, renames, projects and resolves over `source`.
 
+    Omits and renames name one field or select several.
+
     Each step names only fields the earlier steps kept, and each rename gets a name
     no field has, so it never collides. A resolve selects Reference fields only,
     and its nested pipeline is drawn the same way over the referenced Entity.
@@ -928,16 +1061,45 @@ def pipelines(
         if not fields:
             break
         field = draw(st.sampled_from(fields))
-        match draw(st.sampled_from(["omit", "rename", "project", "resolve"])):
+        match draw(
+            st.sampled_from(
+                [
+                    "omit",
+                    "rename",
+                    "rename_selected",
+                    "project",
+                    "resolve",
+                ]
+            )
+        ):
             case "omit":
-                fields.remove(field)
-                drawn.append(steps.omit(field))
+                omitted = draw(st.lists(st.sampled_from(fields), unique=True))
+                fields = [kept for kept in fields if kept not in omitted]
+                # Each by name, or all at once by a Select.
+                drawn.extend(
+                    draw(
+                        st.sampled_from(
+                            [
+                                tuple(map(steps.omit, omitted)),
+                                (steps.omit(named(*omitted)),),
+                            ]
+                        )
+                    )
+                )
             case "rename":
                 new = FieldName(f"renamed_{index}")
                 fields[fields.index(field)] = new
                 if field in references:
                     references[new] = references.pop(field)
                 drawn.append(steps.rename(field, new))
+            case "rename_selected":
+                renamed = draw(st.lists(st.sampled_from(fields), unique=True))
+                renaming = prefixed(Text(f"renamed_{index}"))
+                for old in renamed:
+                    fields[fields.index(old)] = renaming(old)
+                    if old in references:
+                        references[renaming(old)] = references.pop(old)
+                drawn.append(steps.rename(named(*renamed), renaming))
             case "project":
                 projected = draw(st.lists(st.sampled_from(fields), unique=True))
                 fields = [kept for kept in fields if kept in projected]
@@ -962,15 +1124,27 @@ def pipelines(
 def any_steps(draw: st.DrawFn, pool: Sequence[FieldName], depth: Depth) -> steps.Step:
     """Any step, naming fields from `pool` whether or not they exist.
 
-    Unlike `pipelines`, it may omit unknown fields, rename onto existing ones,
-    resolve fields that are not References, or resolve onto an existing name.
+    Unlike `pipelines`, it may omit unknown fields, rename onto existing ones or
+    several fields onto one, resolve fields that are not References, or resolve
+    onto an existing name.
     """
     names = st.sampled_from(pool)
-    match draw(st.sampled_from(["omit", "rename", "project", "resolve"])):
+    match draw(
+        st.sampled_from(
+            ["omit", "omit_selected", "rename", "rename_selected", "project", "resolve"]
+        )
+    ):
         case "omit":
             return steps.omit(draw(names))
+        case "omit_selected":
+            return steps.omit(named(*draw(st.lists(names))))
         case "rename":
             return steps.rename(draw(names), draw(names))
+        case "rename_selected":
+            renames = draw(st.dictionaries(names, names))
+            return steps.rename(
+                named(*renames), lambda field: renames.get(field, field)
+            )
         case "project":
             return steps.project(draw(st.lists(names, unique=True)))
         case _:

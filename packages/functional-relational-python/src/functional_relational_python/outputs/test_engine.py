@@ -110,6 +110,35 @@ def test_a_renamed_field_keeps_its_value_and_position_under_the_new_name() -> No
     ]
 
 
+def test_omitting_the_selected_primary_key_drops_it_from_each_row() -> None:
+    view = view_of(steps.omit(steps.select(steps.is_primary_key)))
+    view_engine = make_engine(view)
+    company = Company.fake(CompanyId.fake())
+    view_engine.put(company).unwrap()
+
+    assert read(view_engine, view.name) == (row_of(company, FieldName("id")),)
+
+
+def test_selected_renamed_fields_keep_their_values_and_positions() -> None:
+    view = view_of(
+        steps.rename(
+            named(FieldName("id"), FieldName("secret")),
+            lambda field: FieldName(f"company_{field.root}"),
+        )
+    )
+    view_engine = make_engine(view)
+    company = Company.fake(CompanyId.fake())
+    view_engine.put(company).unwrap()
+
+    assert [list(row.root.items()) for row in read(view_engine, view.name)] == [
+        [
+            (FieldName("company_id"), company.id),
+            (FieldName("name"), company.name),
+            (FieldName("company_secret"), company.secret),
+        ]
+    ]
+
+
 def test_a_projected_view_returns_each_entity_with_only_the_listed_fields() -> None:
     view = view_of(steps.project([FieldName("name")]))
     view_engine = make_engine(view)
