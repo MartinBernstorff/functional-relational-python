@@ -1,4 +1,4 @@
-"""A ViewCatalog: everything `frp generate` needs, defined in the user's code."""
+"""A Catalog: everything `frp generate` needs, defined in the user's code."""
 
 import importlib
 import sys
@@ -26,10 +26,10 @@ from functional_relational_python.support.generated_files import GeneratedFiles
 from functional_relational_python.support.identifier import Identifier
 
 
-class ViewCatalog(pydantic.BaseModel, frozen=True):
+class Catalog(pydantic.BaseModel, frozen=True):
     """The Entities, the Views over them, and the module each View model goes to.
 
-    >>> catalog = ViewCatalog(
+    >>> catalog = Catalog(
     ...     entities=[Company],
     ...     views=[View(name=ViewName("CompanySummary"), source=Company, step=...)],
     ...     layout=lambda view: ModulePath("myapp.views"),
@@ -61,7 +61,7 @@ class ViewCatalog(pydantic.BaseModel, frozen=True):
 
 
 class ImportPath(pydantic.RootModel[str], frozen=True):
-    """Where a ViewCatalog is defined, as `module:attribute`, e.g. `myapp.frp:catalog`."""
+    """Where a Catalog is defined, as `module:attribute`, e.g. `myapp.frp:catalog`."""
 
     @pydantic.field_validator("root")
     @classmethod
@@ -83,7 +83,7 @@ class ImportPath(pydantic.RootModel[str], frozen=True):
     def attribute(self) -> Identifier:
         return Identifier(self.root.partition(":")[2])
 
-    def load(self, search: Directory) -> Result[ViewCatalog, CatalogLoadError]:
+    def load(self, search: Directory) -> Result[Catalog, CatalogLoadError]:
         """Imports the catalog. `search` is added to the module search path first,
         so a catalog next to the project config is found without installing it."""
         if str(search.root) not in sys.path:
@@ -96,7 +96,7 @@ class ImportPath(pydantic.RootModel[str], frozen=True):
                 return Err(CatalogModuleNotFoundError(self))
             raise
         match getattr(imported, self.attribute().root, None):
-            case ViewCatalog() as catalog:
+            case Catalog() as catalog:
                 return Ok(catalog)
             case None:
                 return Err(CatalogAttributeMissingError(self))
@@ -123,7 +123,7 @@ class CatalogAttributeMissingError(Exception):
 class NotACatalogError(Exception):
     def __init__(self, path: ImportPath, found: type) -> None:
         self.path = path
-        super().__init__(f"'{path.root}' is a {found.__name__}, not a ViewCatalog.")
+        super().__init__(f"'{path.root}' is a {found.__name__}, not a Catalog.")
 
 
 type CatalogLoadError = (
