@@ -7,17 +7,31 @@ Everything here is pure: it builds file contents and touches no filesystem.
 import typing
 from collections.abc import Sequence
 
-from functional_relational_python.outputs.python.plan import ModelPlan, PythonPlan
+import pydantic
+
+from functional_relational_python.outputs.python.plan import (
+    Inherited,
+    ModelField,
+    ModelPlan,
+    PythonPlan,
+)
 from functional_relational_python.outputs.python.symbols import (
     LineLength,
     ModulePath,
+    TypeExpression,
+    ValueExpression,
 )
+from functional_relational_python.pipeline import ir
 from functional_relational_python.support.filesystem import FileText
 from functional_relational_python.support.generated_files import (
     GeneratedFile,
     GeneratedFiles,
 )
 from functional_relational_python.support.identifier import Identifier
+
+
+class FieldDeclaration(pydantic.RootModel[str], frozen=True):
+    """One field of a model's class body, e.g. `name: Text | None = None`."""
 
 
 class ModelsRenderer:
@@ -70,16 +84,30 @@ class ModelsRenderer:
             sections.append(lines)
         imports = "\n\n".join("\n".join(lines) for lines in sections)
 
-        base = ModelPlan.base.reference().root
         classes = "\n\n".join(
-            f"class {model.symbol.bound_name().root}({base}, frozen=True):\n"
+            f"class {model.symbol.bound_name().root}({model.base.root}, frozen=True):\n"
             + (
                 "".join(
-                    f"    {field.field.name.root}: {field.type.root}\n"
+                    f"    {declaration.root}\n"
                     for field in model.fields
+                    for declaration in ModelsRenderer._declarations(field)
                 )
                 or "    pass\n"
             )
             for model in models
         )
         return FileText(f"{ModelsRenderer.header.root}\n{imports}\n\n\n{classes}")
+
+    @staticmethod
+    def _declarations(field: ModelField) -> tuple[FieldDeclaration, ...]:
+        """The line declaring `field`, or none when the model inherits it."""
+        match field.type:
+            case TypeExpression() as type_expression:
+                annotated = f"{field.field.name.root}: {type_expression.root}"
+            case Inherited():
+                return ()
+        match field.default:
+            case ValueExpression() as default:
+                return (FieldDeclaration(f"{annotated} = {default.root}"),)
+            case ir.NoDefault():
+                return (FieldDeclaration(annotated),)

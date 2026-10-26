@@ -66,6 +66,18 @@ class NonEntitySourceError(Exception):
         )
 
 
+class UndefaultedFieldError(Exception):
+    """An added field has no default to fill it with. The compiler rejects such a
+    View, so this means the compiler let one through."""
+
+    def __init__(self, field: FieldName) -> None:
+        self.field = field
+        super().__init__(
+            f"Added field '{field.root}' has no default; the compiler should have "
+            "rejected its View."
+        )
+
+
 class DanglingReference(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Reference field whose IDs key no stored Entity."""
 
@@ -174,12 +186,31 @@ class InMemoryViewEngine:
                         return getattr(subject, value.field.root)
                     case ir.Lookup():
                         return self._lookup(value, subject, missing)
+                    case ir.Added():
+                        return InMemoryViewEngine._default(field)
             case ir.NestedField(value=lookup, relation=relation):
                 match self._lookup(lookup, subject, missing):
                     case None:
                         return None
                     case entity:
                         return self._row(relation, entity, missing)
+
+    @staticmethod
+    def _default(field: ir.Field) -> FieldValue:
+        """The default an added field's model fills it with."""
+        match field.default:
+            case ir.ScalarDefault(root=value):
+                return value
+            case ir.MissingDefault():
+                return pydantic.MISSING
+            case ir.EmptyListDefault():
+                return list[FieldValue]()
+            case ir.EmptyDictDefault():
+                return dict[FieldValue, FieldValue]()
+            case ir.EnumDefault(member=member):
+                return member
+            case ir.NoDefault():
+                raise UndefaultedFieldError(field.name)
 
     def _lookup(
         self, lookup: ir.Lookup, subject: pydantic.BaseModel, missing: _Missing

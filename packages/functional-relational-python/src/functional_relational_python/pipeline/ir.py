@@ -5,7 +5,9 @@ and derives its Relation: the fields a View result will have, each with its type
 and the Value that computes it. Backends run the Relation, not the node tree.
 """
 
-from collections.abc import Callable, Collection
+import copy
+import enum
+from collections.abc import Callable, Collection, Mapping
 
 import pydantic
 from pydantic.fields import FieldInfo
@@ -37,14 +39,45 @@ class FromSource(pydantic.BaseModel, frozen=True):
 
 
 class Omit(pydantic.BaseModel, frozen=True):
+    """Removes one named field, or every selected field."""
+
     input: Node
-    field: FieldName
+    fields: FieldName | Select
 
 
 class Rename(pydantic.BaseModel, frozen=True):
     input: Node
     field: FieldName
     new: FieldName
+
+
+type FieldRenaming = Callable[[FieldName], FieldName]
+"""Gives a field its new name from its old one."""
+
+
+class RenameSelected(pydantic.BaseModel, frozen=True):
+    """Renames every selected field to `new` of its name, all at once.
+
+    Because the renames happen together, selected fields can swap names.
+    """
+
+    input: Node
+    fields: Select
+    new: FieldRenaming
+
+
+type TypeTransform = Callable[[RuntimeAnnotation], RuntimeAnnotation]
+"""Gives a field its new type from its old one."""
+
+
+class Retype(pydantic.BaseModel, frozen=True):
+    """Gives the named field, or every selected field, the type `transform` maps
+    its type to. Only a Payload may retype; a View's mapping copies each value
+    unchanged."""
+
+    input: Node
+    fields: FieldName | Select
+    transform: TypeTransform
 
 
 class Project(pydantic.BaseModel, frozen=True):
@@ -71,7 +104,87 @@ class Resolve(pydantic.BaseModel, frozen=True):
     then: Callable[[Node], Node]
 
 
-type Node = FromSource | Omit | Rename | Project | Resolve
+type UncheckedDefault = object
+"""A value given to `default`, before the compiler checks that it is a literal."""
+
+
+class Default(pydantic.BaseModel, frozen=True):
+    """Sets the default of one named field, or of every selected field, in the
+    generated model.
+
+    `value` is unchecked: the compiler checks that it is a literal a generated
+    model can write out.
+    """
+
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
+    input: Node
+    fields: FieldName | Select
+    value: UncheckedDefault
+
+
+type AddedType = type[object]
+"""The type `add` gives a field, e.g. `Literal["company"]` or `Text | None`."""
+
+
+class Add(pydantic.BaseModel, frozen=True):
+    """Declares a new field, typed by `info.annotation`, that has no value from the
+    subject.
+
+    `default` is unchecked, or `NoDefault` when none was given: the compiler checks
+    that it is a literal, and that a View's added field has one.
+    """
+
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
+    input: Node
+    name: FieldName
+    info: FieldInfo
+    default: UncheckedDefault | NoDefault
+
+
+type Node = (
+    FromSource
+    | Omit
+    | Rename
+    | RenameSelected
+    | Retype
+    | Project
+    | Resolve
+    | Default
+    | Add
+)
+
+
+class NoDefault(pydantic.BaseModel, frozen=True):
+    """The field is required: its generated model gives it no default."""
+
+
+class ScalarDefault(pydantic.RootModel[None | bool | int | float | str], frozen=True):
+    """A default written as its `repr`: `None`, a boolean, a finite number or a
+    string."""
+
+
+class MissingDefault(pydantic.BaseModel, frozen=True):
+    """Pydantic's `MISSING` sentinel: the field is left out when unset."""
+
+
+class EmptyListDefault(pydantic.BaseModel, frozen=True):
+    pass
+
+
+class EmptyDictDefault(pydantic.BaseModel, frozen=True):
+    pass
+
+
+class EnumDefault(pydantic.BaseModel, frozen=True):
+    member: enum.Enum
+
+
+type DefaultValue = (
+    ScalarDefault | MissingDefault | EmptyListDefault | EmptyDictDefault | EnumDefault
+)
+"""A literal a generated model can write out as a field's default."""
 
 
 class SourceField(pydantic.BaseModel, frozen=True):
@@ -98,7 +211,14 @@ class Lookup(pydantic.BaseModel, frozen=True):
         return self.optionality.annotate(self.target)
 
 
-type Value = SourceField | Lookup
+class Added(pydantic.BaseModel, frozen=True):
+    """No value from the subject: a field `add` declared.
+
+    A mapping leaves it out, so the model fills it with its default.
+    """
+
+
+type Value = SourceField | Lookup | Added
 """How a field of a View result is computed from the subject."""
 
 
@@ -110,16 +230,32 @@ class Field(pydantic.BaseModel, frozen=True):
     name: FieldName
     info: FieldInfo
     value: Value
+    default: DefaultValue | NoDefault
 
     @staticmethod
-    def looked_up(name: FieldName, lookup: Lookup) -> Field:
+    def looked_up(
+        name: FieldName, lookup: Lookup, default: DefaultValue | NoDefault
+    ) -> Field:
         """The field holding the Entity `lookup` finds, typed by `lookup.annotation()`."""
         return Field(
-            name=name, info=FieldInfo.from_annotation(lookup.annotation()), value=lookup
+            name=name,
+            info=FieldInfo.from_annotation(lookup.annotation()),
+            value=lookup,
+            default=default,
         )
 
     def annotation(self) -> RuntimeAnnotation:
         return self.info.annotation
+
+    def retyped(self, annotation: RuntimeAnnotation) -> Field:
+        """This field typed by `annotation`, keeping its default but not the old
+        type's constraints."""
+        info = copy.copy(self.info)
+        # `FieldInfo.annotation` is typed narrower than the annotations a Source
+        # can have, e.g. `int | None`, so set it untyped.
+        object.__setattr__(info, "annotation", annotation)
+        object.__setattr__(info, "metadata", [])
+        return self.model_copy(update={"info": info})
 
     def optionality(self) -> Optionality:
         return Optionality.of_annotation(self.annotation()).optionality
@@ -135,6 +271,7 @@ class NestedField(pydantic.BaseModel, frozen=True):
     name: FieldName
     value: Lookup
     relation: Relation
+    default: DefaultValue | NoDefault
 
     def optionality(self) -> Optionality:
         return self.value.optionality
@@ -160,6 +297,7 @@ class Relation(pydantic.BaseModel, frozen=True):
                     name=FieldName(name),
                     info=info,
                     value=SourceField(field=FieldName(name)),
+                    default=NoDefault(),
                 )
                 for name, info in node.source.model_fields.items()
             ),
@@ -178,7 +316,7 @@ class Relation(pydantic.BaseModel, frozen=True):
             match field:
                 case Field(value=value):
                     match value:
-                        case SourceField():
+                        case SourceField() | Added():
                             pass
                         case Lookup():
                             used.append(value)
@@ -190,20 +328,57 @@ class Relation(pydantic.BaseModel, frozen=True):
                 first[lookup.target] = lookup
         return tuple(first.values())
 
-    def renamed(self, old: FieldName, new: FieldName) -> Relation:
-        """Renames `old` to `new` in place, keeping its type."""
+    def selected(self, fields: Select) -> tuple[FieldName, ...]:
+        """The names of the fields `fields` selects, in field order."""
+        return tuple(field.name for field in self.fields if fields.predicate(field))
+
+    def renamed(self, names: Mapping[FieldName, FieldName]) -> Relation:
+        """Renames each key of `names` to its value in place, keeping its type."""
         return Relation(
             source=self.source,
             fields=tuple(
-                field.model_copy(update={"name": new}) if field.name == old else field
+                field.model_copy(update={"name": names[field.name]})
+                if field.name in names
+                else field
                 for field in self.fields
             ),
         )
 
-    def without(self, name: FieldName) -> Relation:
+    def added(
+        self, name: FieldName, info: FieldInfo, default: DefaultValue | NoDefault
+    ) -> Relation:
+        """Appends a field `add` declared, named `name` and typed by `info`."""
         return Relation(
             source=self.source,
-            fields=tuple(field for field in self.fields if field.name != name),
+            fields=(
+                *self.fields,
+                Field(
+                    name=name,
+                    info=info,
+                    value=Added(),
+                    default=default,
+                ),
+            ),
+        )
+
+    def defaulted(
+        self, names: Collection[FieldName], default: DefaultValue
+    ) -> Relation:
+        """Gives each field in `names` the default `default`, replacing any other."""
+        return Relation(
+            source=self.source,
+            fields=tuple(
+                field.model_copy(update={"default": default})
+                if field.name in names
+                else field
+                for field in self.fields
+            ),
+        )
+
+    def without(self, names: Collection[FieldName]) -> Relation:
+        return Relation(
+            source=self.source,
+            fields=tuple(field for field in self.fields if field.name not in names),
         )
 
     def keeping(self, names: Collection[FieldName]) -> Relation:

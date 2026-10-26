@@ -117,6 +117,7 @@ def test_a_looked_up_field_is_typed_by_the_entity_or_none(
     field = ir.Field.looked_up(
         FieldName("department"),
         lookup(FieldName("department_id"), Department, optionality),
+        ir.NoDefault(),
     )
 
     assert (field.annotation(), field.optionality()) == (annotation, optionality)
@@ -127,6 +128,7 @@ def test_a_nested_field_is_as_optional_as_its_lookup() -> None:
         name=FieldName("mentor"),
         value=lookup(FieldName("mentor_id"), Employee, Optionality.OPTIONAL),
         relation=ir.Relation(source=ir.SourceName("Employee"), fields=()),
+        default=ir.NoDefault(),
     )
 
     assert field.optionality() == Optionality.OPTIONAL
@@ -152,14 +154,18 @@ def test_lookups_are_one_per_entity_nested_included_in_first_use_order() -> None
                             relation=ir.Relation(
                                 source=ir.SourceName("Department"),
                                 fields=(
-                                    ir.Field.looked_up(FieldName("company"), company),
+                                    ir.Field.looked_up(
+                                        FieldName("company"), company, ir.NoDefault()
+                                    ),
                                 ),
                             ),
+                            default=ir.NoDefault(),
                         ),
                     ),
                 ),
+                default=ir.NoDefault(),
             ),
-            ir.Field.looked_up(FieldName("department"), department),
+            ir.Field.looked_up(FieldName("department"), department, ir.NoDefault()),
         ),
     )
 

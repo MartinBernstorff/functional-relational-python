@@ -1,3 +1,4 @@
+import enum
 from collections.abc import Iterable
 
 import pydantic
@@ -57,7 +58,9 @@ def app_layout() -> PythonLayout:
 
 
 def plan_of(compiled: compiler.CompiledViews, python: PythonLayout) -> PythonPlan:
-    match PythonPlan.of(compiled, python):
+    match PythonPlan.of(
+        compiler.CompiledCatalog(views=compiled.views, payloads=()), python
+    ):
         case Ok(plan):
             return plan
         case Err(error):
@@ -67,7 +70,9 @@ def plan_of(compiled: compiler.CompiledViews, python: PythonLayout) -> PythonPla
 def diagnostics_of(
     compiled: compiler.CompiledViews, python: PythonLayout
 ) -> tuple[PlanDiagnostic, ...]:
-    match PythonPlan.of(compiled, python):
+    match PythonPlan.of(
+        compiler.CompiledCatalog(views=compiled.views, payloads=()), python
+    ):
         case Ok(plan):
             pytest.fail(f"expected diagnostics, got {plan}")
         case Err(error):
@@ -176,6 +181,41 @@ def test_a_models_only_layout_reports_only_what_the_models_cannot_import() -> No
             view=view.name,
             field=FieldName("team"),
             annotation=AnnotationText.of(team),
+        ),
+    )
+
+
+def test_a_base_that_cannot_be_imported_is_reported() -> None:
+    class LocalBase(pydantic.BaseModel):
+        pass
+
+    view = View(
+        name=ViewName.fake(), source=Company, step=steps.pipeline(), base=LocalBase
+    )
+
+    assert diagnostics_of(compile_all([view]), app_layout()) == (
+        Unimportable(
+            view=view.name, field=None, annotation=AnnotationText.of(LocalBase)
+        ),
+    )
+
+
+def test_a_default_whose_enum_cannot_be_imported_is_reported_for_its_field() -> None:
+    class LocalColour(enum.Enum):
+        RED = "red"
+
+    field = FieldName("name")
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.default(field, LocalColour.RED),
+    )
+
+    assert diagnostics_of(
+        compile_all([view]), PythonLayout.models_only(into(ModulePath.fake()))
+    ) == (
+        Unimportable(
+            view=view.name, field=field, annotation=AnnotationText.of(LocalColour)
         ),
     )
 

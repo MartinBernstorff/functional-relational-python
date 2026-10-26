@@ -34,7 +34,7 @@ class Generated(pydantic.BaseModel, frozen=True):
 def _generated(
     filesystem: FileSystem, start: Directory
 ) -> Result[Generated, GenerateError]:
-    """The files the project's ViewCatalog generates, and where they belong."""
+    """The files the project's Catalog generates, and where they belong."""
     match ConfigFile.find(filesystem, start):
         case Err(config_error):
             return Err(config_error)

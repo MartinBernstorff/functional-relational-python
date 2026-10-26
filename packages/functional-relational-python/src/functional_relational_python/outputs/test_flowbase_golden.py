@@ -218,7 +218,7 @@ def compiled_views() -> compiler.CompiledViews:
 
 def test_golden_flowbase_view_models() -> None:
     match PythonPlan.of(
-        compiled_views(),
+        compiler.CompiledCatalog(views=compiled_views().views, payloads=()),
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
     ):
         case Ok(plan):

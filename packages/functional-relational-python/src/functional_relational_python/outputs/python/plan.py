@@ -1,8 +1,9 @@
-"""Plans the Python output of compiled Views: what each generated name refers to.
+"""Plans the Python output of compiled Views and Payloads: what each generated
+name refers to.
 
-For each View the plan decides its model's Symbol, the Symbols of the models
-nested in it, and, when the layout asks for them, its mapping function's Symbol
-and lookup parameters. Every problem that depends on where things are generated
+For each View and Payload the plan decides its model's Symbol and the Symbols of
+the models nested in it. For each View, when the layout asks for them, it also
+decides its mapping function's Symbol and lookup parameters. Every problem that depends on where things are generated
 (a name bound twice in one module, a type that cannot be imported, a module that
 defines what it would be overwritten with) is found here, once. The renderers in
 `models` and `mappings` read the plan and cannot fail.
@@ -10,6 +11,7 @@ defines what it would be overwritten with) is found here, once. The renderers in
 The compiler has already checked the names themselves (`model_names`).
 """
 
+import keyword
 import types
 import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -25,8 +27,13 @@ from functional_relational_python.outputs.python.symbols import (
     ModulePath,
     Symbol,
     TypeExpression,
+    ValueExpression,
 )
 from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline.payloads import (
+    DefinitionName,
+    PayloadName,
+)
 from functional_relational_python.pipeline.views import ViewName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
@@ -35,16 +42,21 @@ from functional_relational_python.support.diagnostic import (
 )
 from functional_relational_python.support.identifier import Identifier
 
-type ModuleLayout = Callable[[compiler.CompiledView], ModulePath]
-"""Maps each compiled View to the module something of it is generated into."""
+type ModuleLayout = Callable[
+    [compiler.CompiledView | compiler.CompiledPayload], ModulePath
+]
+"""Maps each compiled View or Payload to the module something of it is generated
+into. Only Views have mapping functions, so a layout for mappings receives only
+Views."""
 
 
 class WithoutMappings(pydantic.BaseModel, frozen=True):
-    """Plan View models only, without mapping functions."""
+    """Plan models only, without mapping functions."""
 
 
 class PythonLayout(pydantic.BaseModel, frozen=True):
-    """Where each View's model, and its mapping function, are generated."""
+    """Where each View's and Payload's model, and each View's mapping function,
+    are generated."""
 
     models: ModuleLayout
     mappings: ModuleLayout | WithoutMappings
@@ -60,10 +72,11 @@ class Scope(pydantic.RootModel[str], frozen=True):
 
 
 class GeneratedIntoDefiningModule(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View's model or mapping function would be generated into a module that
-    defines classes the View uses, overwriting their definitions."""
+    """A View's or Payload's model, or a View's mapping function, would be
+    generated into a module that defines classes it uses, overwriting their
+    definitions."""
 
-    view: ViewName
+    view: DefinitionName
     module: ModulePath
     defined: tuple[AnnotationText, ...]
 
@@ -76,10 +89,11 @@ class GeneratedIntoDefiningModule(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class _DefinitionsUsed:
-    """The classes a View's model or mapping function uses that the module it is
-    generated into defines. Generating would overwrite their definitions."""
+    """The classes a View's or Payload's model, or a View's mapping function, uses
+    that the module it is generated into defines. Generating would overwrite their
+    definitions."""
 
-    def __init__(self, view: ViewName, module: ModulePath) -> None:
+    def __init__(self, view: DefinitionName, module: ModulePath) -> None:
         self.view = view
         self.module = module
         self.defined: set[AnnotationText] = set()
@@ -106,29 +120,37 @@ class _DefinitionsUsed:
 
 
 class UnsupportedAnnotation(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A field's type has a form the generator cannot write out."""
+    """A field's type, or a type argument of the base, has a form the generator
+    cannot write out.
 
-    view: ViewName
-    field: FieldName
+    `field` is the field typed by it, or `None` for the base.
+    """
+
+    view: DefinitionName
+    field: FieldName | None
     annotation: AnnotationText
 
     def describe(self) -> DiagnosticMessage:
+        where = (
+            self.view.root
+            if self.field is None
+            else f"{self.view.root}.{self.field.root}"
+        )
         return DiagnosticMessage(
-            f"{self.view.root}.{self.field.root}: cannot generate the type "
-            f"'{self.annotation.root}'."
+            f"{where}: cannot generate the type '{self.annotation.root}'."
         )
 
 
 class Unimportable(pydantic.BaseModel, Diagnostic, frozen=True):
     """Generated source would import something it cannot import by its module and
-    name, e.g. a class defined in a function: a field's type, the Source, or an
-    Entity the View looks up or its ID type.
+    name, e.g. a class defined in a function: a field's type, the base, the Source,
+    or an Entity the View looks up or its ID type.
 
-    `field` is the field typed by it, or `None` when no model field is: the Source,
-    or what only a mapping function's parameters refer to.
+    `field` is the field typed by it, or `None` when no model field is: the base,
+    the Source, or what only a mapping function's parameters refer to.
     """
 
-    view: ViewName
+    view: DefinitionName
     field: FieldName | None
     annotation: AnnotationText
 
@@ -182,27 +204,34 @@ type PlanDiagnostic = (
 )
 
 
+class Inherited(pydantic.BaseModel, frozen=True):
+    """A field the model's base declares with the same type, so the model does not
+    declare it again."""
+
+
 class ModelField(pydantic.BaseModel, frozen=True):
-    """A field of a planned model: the Relation field it holds, and its type as
-    source."""
+    """A field of a planned model: the Relation field it holds, and its type and
+    default as source, or that the model inherits it from its base."""
 
     field: ir.RelationField
-    type: TypeExpression
+    type: TypeExpression | Inherited
+    default: ValueExpression | ir.NoDefault
 
 
 class ModelPlan(pydantic.BaseModel, frozen=True):
     """One model to generate, and the models nested in it.
 
-    `uses` is every Symbol its class statement refers to: the base class, the
-    fields' types and the nested models.
+    `base` is the class it subclasses, as source. `uses` is every Symbol its class
+    statement refers to: the base, the fields' types and the nested models.
     """
 
-    base: typing.ClassVar[Symbol] = Symbol(
+    default_base: typing.ClassVar[Symbol] = Symbol(
         module=ModulePath("pydantic"), qualname=(Identifier("BaseModel"),)
     )
 
-    view: ViewName
+    view: DefinitionName
     symbol: Symbol
+    base: TypeExpression
     fields: tuple[ModelField, ...]
     uses: frozenset[Symbol]
     nested: Mapping[FieldName, ModelPlan]
@@ -326,7 +355,8 @@ class FunctionPlan(pydantic.BaseModel, frozen=True):
 
 
 class _AnnotationRenderer:
-    """Writes one field's annotation as source, collecting what it refers to.
+    """Writes one field's annotation and default as source, collecting what they
+    refer to.
 
     Problems are collected rather than returned early, so every unsupported part
     of an annotation is reported.
@@ -335,12 +365,28 @@ class _AnnotationRenderer:
     literal: typing.ClassVar[Symbol] = Symbol(
         module=ModulePath("typing"), qualname=(Identifier("Literal"),)
     )
+    missing: typing.ClassVar[Symbol] = Symbol(
+        module=ModulePath("pydantic"), qualname=(Identifier("MISSING"),)
+    )
 
-    def __init__(self, view: ViewName, field: FieldName) -> None:
+    def __init__(self, view: DefinitionName, field: FieldName | None) -> None:
         self.view = view
         self.field = field
         self.symbols: set[Symbol] = set()
         self.diagnostics: list[PlanDiagnostic] = []
+
+    def render_base(self, base: type[pydantic.BaseModel]) -> TypeExpression:
+        """`base` as source: `pydantic.BaseModel` as imported from `pydantic`, a
+        parameterised generic model as its generic class and type arguments."""
+        if base is pydantic.BaseModel:
+            self.symbols.add(ModelPlan.default_base)
+            return ModelPlan.default_base.reference()
+        generic = base.__pydantic_generic_metadata__
+        origin = generic["origin"]
+        if origin is None:
+            return self._named(base)
+        arguments = ", ".join(self.render(arg).root for arg in generic["args"])
+        return TypeExpression(f"{self._named(origin).root}[{arguments}]")
 
     def render(self, annotation: ir.RuntimeAnnotation) -> TypeExpression:
         origin = typing.get_origin(annotation)
@@ -353,9 +399,36 @@ class _AnnotationRenderer:
             return TypeExpression("None")
         if annotation is Ellipsis:
             return TypeExpression("...")
+        if annotation is pydantic.MISSING:
+            self.symbols.add(_AnnotationRenderer.missing)
+            return _AnnotationRenderer.missing.reference()
         if isinstance(annotation, (type, typing.TypeAliasType)):
             return self._named(annotation)
         return self._unsupported(annotation)
+
+    def render_default(
+        self, default: ir.DefaultValue | ir.NoDefault
+    ) -> ValueExpression | ir.NoDefault:
+        match default:
+            case ir.NoDefault():
+                return default
+            case ir.ScalarDefault(root=value):
+                written = repr(value)
+            case ir.MissingDefault():
+                self.symbols.add(_AnnotationRenderer.missing)
+                written = _AnnotationRenderer.missing.reference().root
+            case ir.EmptyListDefault():
+                written = "[]"
+            case ir.EmptyDictDefault():
+                written = "{}"
+            case ir.EnumDefault(member=member):
+                enum_class = self._named(type(member)).root
+                name = member.name
+                if name.isidentifier() and not keyword.iskeyword(name):
+                    written = f"{enum_class}.{name}"
+                else:
+                    written = f"{enum_class}[{name!r}]"
+        return ValueExpression(written)
 
     def _parameterised(
         self,
@@ -364,7 +437,9 @@ class _AnnotationRenderer:
         args: Sequence[ir.RuntimeAnnotation],
     ) -> TypeExpression:
         if origin is typing.Union:
-            return TypeExpression(" | ".join(self.render(arg).root for arg in args))
+            # `None` last, so a field widened with `MISSING` reads `X | MISSING | None`.
+            ordered = sorted(args, key=lambda arg: arg is types.NoneType)
+            return TypeExpression(" | ".join(self.render(arg).root for arg in ordered))
         if origin is typing.Literal and all(
             type(arg) in (str, int, bool) for arg in args
         ):
@@ -405,66 +480,106 @@ class _AnnotationRenderer:
 
 
 class _PlannedModel(pydantic.BaseModel, frozen=True):
-    """A View's model, planned even when that found problems."""
+    """A View's or Payload's model, planned even when that found problems."""
 
     plan: ModelPlan
     diagnostics: tuple[PlanDiagnostic, ...]
 
 
 class _ModelPlanner:
-    """Plans the model of one View, and one per nested resolved field."""
+    """Plans the model of one View or Payload, and one per nested resolved field."""
 
-    def __init__(self, view: ViewName, module: ModulePath) -> None:
+    def __init__(self, view: DefinitionName, module: ModulePath) -> None:
         self.view = view
         self.module = module
         self.diagnostics: list[PlanDiagnostic] = []
         self.used = _DefinitionsUsed(view, module)
 
     @staticmethod
-    def view_model(view: compiler.CompiledView, module: ModulePath) -> _PlannedModel:
-        planner = _ModelPlanner(view.name, module)
-        planner.used.use(view.source)
-        plan = planner.plan(view.names.model, view.relation)
+    def definition_model(
+        compiled: compiler.CompiledView | compiler.CompiledPayload, module: ModulePath
+    ) -> _PlannedModel:
+        planner = _ModelPlanner(compiled.name, module)
+        planner.used.use(compiled.source)
+        match compiled:
+            case compiler.CompiledView(names=names):
+                plan = planner.plan(names.model, compiled.relation, compiled.base)
+            case compiler.CompiledPayload(names=names):
+                plan = planner.plan(names, compiled.relation, compiled.base)
         return _PlannedModel(
             plan=plan,
             diagnostics=(*planner.diagnostics, *planner.used.diagnostics()),
         )
 
-    def plan(self, names: ModelNames, relation: ir.Relation) -> ModelPlan:
+    def plan(
+        self,
+        names: ModelNames,
+        relation: ir.Relation,
+        base: type[pydantic.BaseModel],
+    ) -> ModelPlan:
+        """The model of `relation`, subclassing `base`.
+
+        The compiler has checked that each kept field `base` declares has the type
+        it declares, so the model inherits it, unless a step gave it a default,
+        which only a declaration can set. Nested models subclass the default base.
+        """
         fields: list[ModelField] = []
-        uses: set[Symbol] = {ModelPlan.base}
+        uses: set[Symbol] = set()
+        base_renderer = _AnnotationRenderer(self.view, None)
+        rendered_base = base_renderer.render_base(base)
+        self._record(base_renderer, uses)
         nested: dict[FieldName, ModelPlan] = {}
         for field in relation.fields:
             renderer = _AnnotationRenderer(self.view, field.name)
             match field:
+                case _ if (
+                    field.name.root in base.model_fields
+                    and field.default == ir.NoDefault()
+                ):
+                    rendered = Inherited()
                 case ir.Field():
                     rendered = renderer.render(field.annotation())
                 case ir.NestedField(value=lookup, relation=nested_relation):
                     self.used.use(lookup.target)
-                    model = self.plan(names.nested_in(field), nested_relation)
+                    model = self.plan(
+                        names.nested_in(field), nested_relation, pydantic.BaseModel
+                    )
                     nested[field.name] = model
                     uses.add(model.symbol)
                     rendered = field.optionality().annotate_text(
                         model.symbol.reference()
                     )
-            fields.append(ModelField(field=field, type=rendered))
-            uses |= renderer.symbols
-            for symbol in renderer.symbols:
-                self.used.use_symbol(symbol)
-            self.diagnostics.extend(renderer.diagnostics)
+            fields.append(
+                ModelField(
+                    field=field,
+                    type=rendered,
+                    default=renderer.render_default(field.default),
+                )
+            )
+            self._record(renderer, uses)
         return ModelPlan(
             view=self.view,
             symbol=Symbol(module=self.module, qualname=(names.name.identifier(),)),
+            base=rendered_base,
             fields=tuple(fields),
             uses=frozenset(uses),
             nested=nested,
         )
 
+    def _record(self, renderer: _AnnotationRenderer, uses: set[Symbol]) -> None:
+        """Adds what `renderer` referred to to `uses`, and keeps its diagnostics."""
+        uses |= renderer.symbols
+        for symbol in renderer.symbols:
+            self.used.use_symbol(symbol)
+        self.diagnostics.extend(renderer.diagnostics)
+
 
 class PythonPlan(pydantic.BaseModel, frozen=True):
-    """Every model and mapping function to generate, by module, in View order.
+    """Every model and mapping function to generate, by module: View models in
+    View order, then Payload models in Payload order.
 
-    `models` holds each View's own model; its nested models are in it.
+    `models` holds each View's and Payload's own model; its nested models are in
+    it.
     """
 
     models: Mapping[ModulePath, tuple[ModelPlan, ...]]
@@ -472,7 +587,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def of(
-        compiled: compiler.CompiledViews, layout: PythonLayout
+        compiled: compiler.CompiledCatalog, layout: PythonLayout
     ) -> Result[PythonPlan, DiagnosticsError[PlanDiagnostic]]:
         """The plan, or every diagnostic. Each diagnostic is reported once, even
         when both a model and a mapping function run into it. A type a model field
@@ -482,7 +597,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         models: dict[ModulePath, list[ModelPlan]] = {}
         functions: dict[ModulePath, list[FunctionPlan]] = {}
         for view in compiled.views:
-            model = _ModelPlanner.view_model(view, layout.models(view))
+            model = _ModelPlanner.definition_model(view, layout.models(view))
             diagnostics.update(dict.fromkeys(model.diagnostics))
             models.setdefault(model.plan.symbol.module, []).append(model.plan)
             match layout.mappings:
@@ -507,6 +622,10 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                             or diagnostic.annotation not in unimportable_fields
                         )
                     )
+        for payload in compiled.payloads:
+            model = _ModelPlanner.definition_model(payload, layout.models(payload))
+            diagnostics.update(dict.fromkeys(model.diagnostics))
+            models.setdefault(model.plan.symbol.module, []).append(model.plan)
         plan = PythonPlan(
             models={module: tuple(planned) for module, planned in models.items()},
             functions={module: tuple(planned) for module, planned in functions.items()},
@@ -517,12 +636,16 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
     def _layout_diagnostics(self) -> Iterable[PlanDiagnostic]:
         for module, models in self.models.items():
             namespace = _Namespace(Scope(module.root))
-            for model in (m for view in models for m in view.with_nested()):
+            for model in (m for own in models for m in own.with_nested()):
+                match model.view:
+                    case ViewName():
+                        definition = f"View {model.view.root}"
+                    case PayloadName():
+                        definition = f"Payload {model.view.root}"
                 namespace.define(
                     model.symbol.bound_name(),
                     AnnotationText(
-                        f"{model.symbol.describe().root} "
-                        f"(the model of View {model.view.root})"
+                        f"{model.symbol.describe().root} (the model of {definition})"
                     ),
                 )
                 for symbol in model.uses:

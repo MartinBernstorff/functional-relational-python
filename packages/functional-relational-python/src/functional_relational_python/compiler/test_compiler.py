@@ -1,21 +1,27 @@
+import enum
 import types
 from collections.abc import Iterable, Sequence
+from typing import Annotated, Literal
 
 import pydantic
 import pytest
 from hypothesis import event, given
 from hypothesis import strategies as st
-from safe_result import Err, Ok
+from pydantic import MISSING
+from safe_result import Err, Ok, Result
 
-from functional_relational_python.compiler import compiler, diagnostics
+from functional_relational_python.compiler import compiler, diagnostics, model_names
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
     Optionality,
+    RuntimeAnnotation,
 )
 from functional_relational_python.entity_graph.id import Id, IdType
 from functional_relational_python.pipeline import ir, steps, test_ir
+from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.views import View, ViewName
+from functional_relational_python.support.diagnostic import DiagnosticsError
 
 
 class Text(pydantic.RootModel[str], frozen=True):
@@ -209,7 +215,7 @@ def test_building_a_pipeline_checks_nothing() -> None:
     node = steps.pipeline(steps.omit(unknown), steps.rename(unknown, unknown))(root)
 
     assert node == ir.Rename(
-        input=ir.Omit(input=root, field=unknown), field=unknown, new=unknown
+        input=ir.Omit(input=root, fields=unknown), field=unknown, new=unknown
     )
 
 
@@ -221,6 +227,7 @@ def test_rename_keeps_the_field_in_place_with_its_type() -> None:
             name=FieldName("code") if name == "secret" else FieldName(name),
             info=info,
             value=ir.SourceField(field=FieldName(name)),
+            default=ir.NoDefault(),
         )
         for name, info in Company.model_fields.items()
     )
@@ -320,9 +327,418 @@ def test_the_rename_onto_existing_field_message_contains_the_offending_values() 
     ).describe()
 
     assert message.root == (
-        "CompanySummary: cannot rename 'secret' to 'name', because the View "
+        "CompanySummary: cannot rename 'secret' to 'name', because it "
         "already has a field 'name'."
     )
+
+
+def prefixed(prefix: Text) -> ir.FieldRenaming:
+    return lambda field: FieldName(f"{prefix.root}_{field.root}")
+
+
+def test_omit_with_a_select_removes_every_selected_field() -> None:
+    view = compile_one(steps.omit(named(FieldName("secret"), FieldName("revenue"))))
+
+    assert field_names(view) == names(Text("name"))
+
+
+def test_omit_with_a_select_that_selects_nothing_changes_nothing() -> None:
+    view = compile_one(steps.omit(named(FieldName("does_not_exist"))))
+
+    assert field_names(view) == names(*map(Text, Company.model_fields))
+
+
+def test_rename_with_a_select_renames_each_selected_field_in_place() -> None:
+    view = compile_one(
+        steps.rename(
+            named(FieldName("name"), FieldName("revenue")), prefixed(Text("public"))
+        )
+    )
+
+    assert values(view) == {
+        FieldName("public_name"): ir.SourceField(field=FieldName("name")),
+        FieldName("secret"): ir.SourceField(field=FieldName("secret")),
+        FieldName("public_revenue"): ir.SourceField(field=FieldName("revenue")),
+    }
+    assert field_names(view) == names(
+        Text("public_name"), Text("secret"), Text("public_revenue")
+    )
+
+
+def test_rename_with_a_select_renames_all_fields_at_once_so_they_can_swap() -> None:
+    first, second = FieldName("name"), FieldName("secret")
+
+    view = compile_one(
+        steps.rename(
+            named(first, second), lambda field: second if field == first else first
+        )
+    )
+
+    assert values(view) == {
+        second: ir.SourceField(field=first),
+        first: ir.SourceField(field=second),
+        FieldName("revenue"): ir.SourceField(field=FieldName("revenue")),
+    }
+
+
+def test_rename_with_a_select_onto_an_unselected_field_is_a_diagnostic() -> None:
+    existing = FieldName("name")
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.rename(named(FieldName("secret")), lambda _field: existing),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.RenameOntoExistingField(
+            view=view.name, renamed=FieldName("secret"), field=existing
+        ),
+    )
+
+
+def test_a_selected_field_renamed_to_its_own_name_keeps_it() -> None:
+    kept, renamed = FieldName("secret"), FieldName("name")
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.rename(named(renamed, kept), lambda _field: kept),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.RenameOntoExistingField(
+            view=view.name, renamed=renamed, field=kept
+        ),
+    )
+
+
+def test_renaming_two_selected_fields_onto_one_name_reports_the_second() -> None:
+    new = FieldName("code")
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.pipeline(
+            steps.rename(
+                named(FieldName("secret"), FieldName("revenue")), lambda _field: new
+            ),
+            # The first renamed field keeps the name, so a later step finds it.
+            steps.omit(new),
+        ),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.RenameOntoExistingField(
+            view=view.name, renamed=FieldName("revenue"), field=new
+        ),
+    )
+
+
+def test_rename_with_a_select_reports_each_invalid_new_name() -> None:
+    selected = (FieldName("name"), FieldName("secret"))
+    private = prefixed(Text("_"))
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.rename(named(*selected), private),
+    )
+
+    assert diagnostics_of([view]) == tuple(
+        model_names.InvalidFieldName(
+            view=view.name, source=ir.SourceName("Company"), field=private(field)
+        )
+        for field in selected
+    )
+
+
+def test_building_steps_with_a_select_checks_nothing() -> None:
+    root = ir.FromSource(source=Company)
+    selection = named(FieldName("does_not_exist"))
+    renaming = prefixed(Text("public"))
+
+    node = steps.pipeline(steps.omit(selection), steps.rename(selection, renaming))(
+        root
+    )
+
+    assert node == ir.RenameSelected(
+        input=ir.Omit(input=root, fields=selection), fields=selection, new=renaming
+    )
+
+
+class Colour(enum.Enum):
+    RED = "red"
+
+
+def defaults(view: compiler.CompiledView) -> dict[FieldName, ir.DefaultValue]:
+    """The defaults the View's fields have, by name; required fields are left out."""
+    return {
+        field.name: field.default
+        for field in view.relation.fields
+        if not isinstance(field.default, ir.NoDefault)
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "default"),
+    [
+        (None, ir.ScalarDefault(None)),
+        (pydantic.MISSING, ir.MissingDefault()),
+        (3, ir.ScalarDefault(3)),
+        (0.5, ir.ScalarDefault(0.5)),
+        ("shop", ir.ScalarDefault("shop")),
+        (True, ir.ScalarDefault(root=True)),
+        ([], ir.EmptyListDefault()),
+        ({}, ir.EmptyDictDefault()),
+        (Colour.RED, ir.EnumDefault(member=Colour.RED)),
+    ],
+    ids=["none", "missing", "int", "float", "str", "bool", "list", "dict", "enum"],
+)
+def test_default_sets_a_literal_as_the_named_fields_default(
+    value: ir.UncheckedDefault, default: ir.DefaultValue
+) -> None:
+    field = FieldName("secret")
+
+    view = compile_one(steps.default(field, value))
+
+    assert defaults(view) == {field: default}
+
+
+def test_default_with_a_select_sets_each_selected_fields_default() -> None:
+    selected = (FieldName("name"), FieldName("revenue"))
+
+    view = compile_one(steps.default(named(*selected), None))
+
+    assert defaults(view) == dict.fromkeys(selected, ir.ScalarDefault(None))
+
+
+def test_a_later_default_replaces_an_earlier_one_and_a_rename_keeps_it() -> None:
+    old, new = FieldName("secret"), FieldName("hidden")
+
+    view = compile_one(
+        steps.pipeline(
+            steps.default(old, None),
+            steps.default(old, "redacted"),
+            steps.rename(old, new),
+        )
+    )
+
+    assert defaults(view) == {new: ir.ScalarDefault("redacted")}
+
+
+class Count(int):
+    pass
+
+
+class Permission(enum.Flag):
+    READ = enum.auto()
+    WRITE = enum.auto()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        object(),
+        (),
+        [None],
+        {"key": None},
+        float("nan"),
+        Count(1),
+        Text("shop"),
+        Permission.READ | Permission.WRITE,
+        Permission(0),
+    ],
+    ids=[
+        "object",
+        "tuple",
+        "non-empty list",
+        "non-empty dict",
+        "nan",
+        "int subclass",
+        "root model",
+        "combined flag",
+        "empty flag",
+    ],
+)
+def test_a_default_that_is_not_a_literal_is_a_diagnostic(
+    value: ir.UncheckedDefault,
+) -> None:
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.default(FieldName("secret"), value),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.NonLiteralDefault(
+            view=view.name, value=diagnostics.DefaultText.of(value)
+        ),
+    )
+
+
+def test_a_default_for_an_unknown_field_that_is_not_a_literal_reports_both() -> None:
+    unknown, value = FieldName("revnue"), object()
+    view = View(
+        name=ViewName.fake(), source=Company, step=steps.default(unknown, value)
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.UnknownField(
+            view=view.name,
+            source=ir.SourceName("Company"),
+            field=unknown,
+            valid=tuple(map(FieldName, Company.model_fields)),
+        ),
+        diagnostics.NonLiteralDefault(
+            view=view.name, value=diagnostics.DefaultText.of(value)
+        ),
+    )
+
+
+def test_the_non_literal_default_message_contains_the_value() -> None:
+    value = (Text("shop"),)
+    message = diagnostics.NonLiteralDefault(
+        view=ViewName.fake(), value=diagnostics.DefaultText.of(value)
+    ).describe()
+
+    assert repr(value) in message.root
+
+
+def test_building_a_default_checks_nothing() -> None:
+    root = ir.FromSource(source=Company)
+    unknown, value = FieldName("does_not_exist"), object()
+
+    node = steps.default(unknown, value)(root)
+
+    assert node == ir.Default(input=root, fields=unknown, value=value)
+
+
+class AddedField(pydantic.BaseModel, frozen=True):
+    """An added field as the compiler sees it: name, type, value and default."""
+
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
+    name: FieldName
+    annotation: RuntimeAnnotation
+    value: ir.Value
+    default: ir.DefaultValue | ir.NoDefault
+
+    @staticmethod
+    def of(field: ir.RelationField) -> AddedField:
+        match field:
+            case ir.Field():
+                return AddedField(
+                    name=field.name,
+                    annotation=field.annotation(),
+                    value=field.value,
+                    default=field.default,
+                )
+            case ir.NestedField():
+                pytest.fail(f"expected an added field, got {field}")
+
+
+def test_add_appends_a_field_with_no_value_from_the_source() -> None:
+    kind = FieldName("kind")
+
+    view = compile_one(steps.add(kind, Literal["company"], default="company"))
+
+    assert field_names(view) == [*map(FieldName, Company.model_fields), kind]
+    assert AddedField.of(view.relation.fields[-1]) == AddedField(
+        name=kind,
+        annotation=Literal["company"],
+        value=ir.Added(),
+        default=ir.ScalarDefault("company"),
+    )
+
+
+def test_a_later_default_replaces_an_added_fields_default() -> None:
+    kind = FieldName("kind")
+
+    view = compile_one(
+        steps.pipeline(
+            steps.add(kind, str | None, default="company"), steps.default(kind, None)
+        )
+    )
+
+    assert defaults(view) == {kind: ir.ScalarDefault(None)}
+
+
+def test_a_view_that_adds_a_field_without_a_default_is_a_diagnostic() -> None:
+    kind = FieldName("kind")
+    view = View(
+        name=ViewName.fake(), source=Company, step=steps.add(kind, Literal["company"])
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.AddWithoutDefault(view=view.name, field=kind),
+    )
+
+
+def test_a_payload_may_add_a_field_without_a_default() -> None:
+    kind = FieldName("kind")
+    payload = Payload(
+        name=PayloadName.fake(), source=Company, step=steps.add(kind, Literal["a"])
+    )
+
+    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+
+    assert AddedField.of(compiled.relation.fields[-1]) == AddedField(
+        name=kind, annotation=Literal["a"], value=ir.Added(), default=ir.NoDefault()
+    )
+
+
+def test_adding_a_field_the_relation_already_has_is_a_diagnostic() -> None:
+    existing = FieldName("name")
+    view = View(
+        name=ViewName.fake(), source=Company, step=steps.add(existing, str, default="")
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.AddOntoExistingField(view=view.name, field=existing),
+    )
+
+
+def test_steps_after_a_defective_add_find_the_added_field() -> None:
+    kind, value = FieldName("kind"), object()
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.pipeline(
+            steps.add(kind, str, default=value), steps.rename(kind, FieldName("tag"))
+        ),
+    )
+
+    assert diagnostics_of([view]) == (
+        diagnostics.NonLiteralDefault(
+            view=view.name, value=diagnostics.DefaultText.of(value)
+        ),
+    )
+
+
+def test_the_add_diagnostic_messages_contain_the_field() -> None:
+    field = FieldName("kind")
+
+    messages = [
+        diagnostics.AddOntoExistingField(view=ViewName.fake(), field=field).describe(),
+        diagnostics.AddWithoutDefault(view=ViewName.fake(), field=field).describe(),
+    ]
+
+    assert all(field.root in message.root for message in messages)
+
+
+def test_building_an_add_checks_nothing() -> None:
+    root = ir.FromSource(source=Company)
+    existing, value = FieldName("name"), object()
+
+    node = steps.add(existing, str, default=value)(root)
+
+    match node:
+        case ir.Add(input=input_node, name=name, info=info, default=default):
+            assert (input_node, name, info.annotation, default) == (
+                root,
+                existing,
+                str,
+                value,
+            )
+        case _:
+            pytest.fail(f"expected an Add, got {node}")
 
 
 # The prefix keeps these from ever being a field of `Company` or `Wide`.
@@ -555,6 +971,21 @@ def test_resolve_leaves_unselected_references_alone() -> None:
     assert field_names(view) == names(
         Text("id"), Text("name"), Text("department_id"), Text("mentor")
     )
+
+
+@pytest.mark.parametrize(
+    "then", [(), (steps.project([FieldName("name")]),)], ids=["entity", "nested"]
+)
+def test_a_resolved_reference_loses_its_default(then: tuple[steps.Step, ...]) -> None:
+    view = compile_resolving(
+        Employee,
+        steps.pipeline(
+            steps.default(FieldName("mentor_id"), None),
+            steps.resolve(named(FieldName("mentor_id")), *then),
+        ),
+    )
+
+    assert defaults(view) == {}
 
 
 def department_lookup() -> ir.Lookup:
@@ -910,7 +1341,10 @@ def pipelines(
     source: type[pydantic.BaseModel],
     depth: Depth,
 ) -> steps.Step:
-    """A valid pipeline of omits, renames, projects and resolves over `source`.
+    """A valid pipeline of omits, renames, projects, adds and resolves over `source`.
+
+    Omits and renames name one field or select several. It may start by adding a
+    field.
 
     Each step names only fields the earlier steps kept, and each rename gets a name
     no field has, so it never collides. A resolve selects Reference fields only,
@@ -921,21 +1355,56 @@ def pipelines(
         reference.field: reference.target
         for reference in graph.entities[source].references
     }
-    drawn: list[steps.Step] = []
+    # An added field comes first, so later steps can omit, rename or project it.
+    added = [FieldName("added") for _ in range(draw(st.integers(0, 1)))]
+    fields.extend(added)
+    drawn: list[steps.Step] = [
+        steps.add(name, str, default=draw(st.sampled_from(["tag", pydantic.MISSING])))
+        for name in added
+    ]
     for index in range(draw(st.integers(min_value=0, max_value=len(fields)))):
         if not fields:
             break
         field = draw(st.sampled_from(fields))
-        match draw(st.sampled_from(["omit", "rename", "project", "resolve"])):
+        match draw(
+            st.sampled_from(
+                [
+                    "omit",
+                    "rename",
+                    "rename_selected",
+                    "project",
+                    "resolve",
+                ]
+            )
+        ):
             case "omit":
-                fields.remove(field)
-                drawn.append(steps.omit(field))
+                omitted = draw(st.lists(st.sampled_from(fields), unique=True))
+                fields = [kept for kept in fields if kept not in omitted]
+                # Each by name, or all at once by a Select.
+                drawn.extend(
+                    draw(
+                        st.sampled_from(
+                            [
+                                tuple(map(steps.omit, omitted)),
+                                (steps.omit(named(*omitted)),),
+                            ]
+                        )
+                    )
+                )
             case "rename":
                 new = FieldName(f"renamed_{index}")
                 fields[fields.index(field)] = new
                 if field in references:
                     references[new] = references.pop(field)
                 drawn.append(steps.rename(field, new))
+            case "rename_selected":
+                renamed = draw(st.lists(st.sampled_from(fields), unique=True))
+                renaming = prefixed(Text(f"renamed_{index}"))
+                for old in renamed:
+                    fields[fields.index(old)] = renaming(old)
+                    if old in references:
+                        references[renaming(old)] = references.pop(old)
+                drawn.append(steps.rename(named(*renamed), renaming))
             case "project":
                 projected = draw(st.lists(st.sampled_from(fields), unique=True))
                 fields = [kept for kept in fields if kept in projected]
@@ -960,15 +1429,27 @@ def pipelines(
 def any_steps(draw: st.DrawFn, pool: Sequence[FieldName], depth: Depth) -> steps.Step:
     """Any step, naming fields from `pool` whether or not they exist.
 
-    Unlike `pipelines`, it may omit unknown fields, rename onto existing ones,
-    resolve fields that are not References, or resolve onto an existing name.
+    Unlike `pipelines`, it may omit unknown fields, rename onto existing ones or
+    several fields onto one, resolve fields that are not References, or resolve
+    onto an existing name.
     """
     names = st.sampled_from(pool)
-    match draw(st.sampled_from(["omit", "rename", "project", "resolve"])):
+    match draw(
+        st.sampled_from(
+            ["omit", "omit_selected", "rename", "rename_selected", "project", "resolve"]
+        )
+    ):
         case "omit":
             return steps.omit(draw(names))
+        case "omit_selected":
+            return steps.omit(named(*draw(st.lists(names))))
         case "rename":
             return steps.rename(draw(names), draw(names))
+        case "rename_selected":
+            renames = draw(st.dictionaries(names, names))
+            return steps.rename(
+                named(*renames), lambda field: renames.get(field, field)
+            )
         case "project":
             return steps.project(draw(st.lists(names, unique=True)))
         case _:
@@ -1211,3 +1692,336 @@ def test_lookups_name_each_looked_up_entity_once(
         {value.target for _, value in resolved_fields(view.relation)},
         key=lambda target: target.__name__,
     )
+
+
+# Payloads.
+
+
+def compile_catalog(
+    views: Sequence[View], payloads: Sequence[Payload]
+) -> Result[compiler.CompiledCatalog, DiagnosticsError[diagnostics.CompileDiagnostic]]:
+    return compiler.compile_catalog(empty_graph(), views, payloads)
+
+
+def test_a_payload_compiles_to_the_relation_its_pipeline_builds() -> None:
+    payload = Payload(
+        name=PayloadName.fake(),
+        source=Company,
+        step=steps.omit(FieldName("secret")),
+    )
+
+    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+
+    assert compiled.name == payload.name
+    assert [field.name for field in compiled.relation.fields] == names(
+        Text("name"), Text("revenue")
+    )
+
+
+def test_a_payload_step_defect_is_reported_under_the_payload_name() -> None:
+    payload = Payload(
+        name=PayloadName.fake(),
+        source=Company,
+        step=steps.omit(FieldName("missing")),
+    )
+
+    match compile_catalog([], [payload]):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            assert [d.view for d in error.diagnostics] == [payload.name]
+
+
+def test_a_name_shared_by_a_view_and_a_payload_is_one_diagnostic() -> None:
+    name = Text("Company")
+    view = View(name=ViewName(name.root), source=Company, step=steps.pipeline())
+    payload = Payload(
+        name=PayloadName(name.root), source=Company, step=steps.pipeline()
+    )
+
+    match compile_catalog([view, view], [payload]):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            assert error.diagnostics == (diagnostics.SharedModelName(view=view.name),)
+
+
+def test_an_update_payload_composes_the_create_pipeline_with_more_steps() -> None:
+    create = steps.omit(FieldName("secret"))
+    update = Payload(
+        name=PayloadName.fake(),
+        source=Company,
+        step=steps.pipeline(create, steps.omit(FieldName("revenue"))),
+    )
+
+    (compiled,) = compile_catalog([], [update]).unwrap().payloads
+
+    assert [field.name for field in compiled.relation.fields] == names(Text("name"))
+
+
+def test_views_and_payloads_of_distinct_names_compile() -> None:
+    view = View(name=ViewName.fake(), source=Company, step=steps.pipeline())
+    payload = Payload(name=PayloadName.fake(), source=Company, step=steps.pipeline())
+
+    compiled = compile_catalog([view], [payload]).unwrap()
+
+    assert [v.name for v in compiled.views] == [view.name]
+    assert [p.name for p in compiled.payloads] == [payload.name]
+
+
+# retype.
+
+
+def compile_employee_payload(
+    step: steps.Step,
+) -> Result[compiler.CompiledCatalog, DiagnosticsError[diagnostics.CompileDiagnostic]]:
+    payload = Payload(name=PayloadName.fake(), source=Employee, step=step)
+    return compiler.compile_catalog(hr_graph(), [], [payload])
+
+
+def employee_payload_diagnostics(
+    step: steps.Step,
+) -> tuple[diagnostics.CompileDiagnostic, ...]:
+    match compile_employee_payload(step):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            return error.diagnostics
+
+
+def annotations(relation: ir.Relation) -> dict[FieldName, ir.RuntimeAnnotation]:
+    return {
+        field.name: field.annotation()
+        for field in relation.fields
+        if isinstance(field, ir.Field)
+    }
+
+
+def test_retype_maps_each_selected_fields_type_with_the_transform() -> None:
+    (compiled,) = (
+        compile_employee_payload(
+            steps.retype(
+                named(FieldName("name"), FieldName("mentor_id")),
+                lambda annotation: annotation | MISSING,
+            ),
+        )
+        .unwrap()
+        .payloads
+    )
+
+    assert annotations(compiled.relation) == {
+        FieldName("id"): EmployeeId,
+        FieldName("name"): Text | MISSING,
+        FieldName("department_id"): DepartmentId,
+        FieldName("mentor_id"): EmployeeId | None | MISSING,
+    }
+
+
+def test_retype_to_gives_the_named_field_one_type() -> None:
+    (compiled,) = (
+        compile_employee_payload(steps.retype_to(FieldName("name"), int))
+        .unwrap()
+        .payloads
+    )
+
+    assert annotations(compiled.relation)[FieldName("name")] is int
+
+
+class Constrained(pydantic.BaseModel):
+    code: Annotated[Text, "constraint"]
+
+
+def test_a_retyped_field_drops_the_old_types_constraints() -> None:
+    payload = Payload(
+        name=PayloadName.fake(),
+        source=Constrained,
+        step=steps.retype_to(FieldName("code"), int),
+    )
+
+    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+
+    match compiled.relation.fields:
+        case (ir.Field(info=info),):
+            assert info.metadata == []
+        case fields:
+            pytest.fail(f"expected one own field, got {fields}")
+
+
+def test_retyping_an_unknown_field_is_a_diagnostic() -> None:
+    unknown = FieldName("nme")
+
+    assert employee_payload_diagnostics(steps.retype_to(unknown, int)) == (
+        diagnostics.UnknownField(
+            view=PayloadName.fake(),
+            source=ir.SourceName("Employee"),
+            field=unknown,
+            valid=tuple(map(FieldName, Employee.model_fields)),
+        ),
+    )
+
+
+def test_retyping_a_field_resolved_through_a_nested_pipeline_is_a_diagnostic() -> None:
+    step = steps.pipeline(
+        steps.resolve(named(FieldName("department_id")), steps.omit(FieldName("name"))),
+        steps.retype_to(FieldName("department"), int),
+    )
+
+    assert employee_payload_diagnostics(step) == (
+        diagnostics.RetypeNestedField(
+            view=PayloadName.fake(),
+            source=ir.SourceName("Employee"),
+            field=FieldName("department"),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        steps.retype_to(FieldName("name"), int),
+        steps.resolve(
+            named(FieldName("department_id")),
+            steps.retype(named(FieldName("name")), lambda annotation: annotation),
+        ),
+    ],
+    ids=["in the view", "in a nested pipeline"],
+)
+def test_retype_in_a_view_is_a_diagnostic(step: steps.Step) -> None:
+    assert resolve_diagnostics(Employee, step) == (
+        diagnostics.RetypeInView(view=ViewName.fake()),
+    )
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "message"),
+    [
+        (
+            diagnostics.RetypeInView(view=ViewName("CompanySummary")),
+            (
+                "CompanySummary: a View cannot retype its fields, because its "
+                "mapping copies each value unchanged. Retype in a Payload instead."
+            ),
+        ),
+        (
+            diagnostics.RetypeNestedField(
+                view=PayloadName("CompanyUpdate"),
+                source=ir.SourceName("Company"),
+                field=FieldName("parent"),
+            ),
+            (
+                "CompanyUpdate: cannot retype Company.parent, because its type is "
+                "the model of a nested pipeline."
+            ),
+        ),
+    ],
+    ids=["in-view", "nested"],
+)
+def test_a_retype_diagnostic_message_names_the_offending_values(
+    diagnostic: diagnostics.CompileDiagnostic, message: str
+) -> None:
+    assert diagnostic.describe().root == message
+
+
+# Base classes.
+
+
+class NamedBase(pydantic.BaseModel):
+    name: Text
+
+
+class Keyed[T](pydantic.BaseModel):
+    name: T
+
+
+class DepartmentNamedBase(pydantic.BaseModel):
+    name: DepartmentId
+
+
+@pytest.mark.parametrize("base", [NamedBase, Keyed[Text]])
+def test_a_kept_field_the_base_declares_with_the_same_type_compiles(
+    base: type[pydantic.BaseModel],
+) -> None:
+    payload = Payload(
+        name=PayloadName.fake(), source=Company, step=steps.pipeline(), base=base
+    )
+
+    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+
+    # The model inherits `name`; the relation still holds it for the mapping.
+    assert compiled.base is base
+    assert [field.name for field in compiled.relation.fields] == names(
+        Text("name"), Text("secret"), Text("revenue")
+    )
+
+
+@pytest.mark.parametrize("base", [DepartmentNamedBase, Keyed[DepartmentId]])
+def test_a_kept_field_the_base_declares_with_another_type_is_a_diagnostic(
+    base: type[pydantic.BaseModel],
+) -> None:
+    view = View(name=ViewName.fake(), source=Company, step=steps.pipeline(), base=base)
+
+    match compile_catalog([view], []):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            assert error.diagnostics == (
+                diagnostics.BaseFieldTypeMismatch(
+                    view=view.name,
+                    base=base,
+                    field=FieldName("name"),
+                    declared=DepartmentId,
+                    kept=Text,
+                ),
+            )
+
+
+def test_a_field_the_base_declares_is_not_checked_once_omitted() -> None:
+    payload = Payload(
+        name=PayloadName.fake(),
+        source=Company,
+        step=steps.omit(FieldName("name")),
+        base=DepartmentNamedBase,
+    )
+
+    assert isinstance(compile_catalog([], [payload]), Ok)
+
+
+def test_the_base_field_type_mismatch_message_contains_the_offending_values() -> None:
+    view = ViewName.fake()
+    message = diagnostics.BaseFieldTypeMismatch(
+        view=view,
+        base=Keyed[DepartmentId],
+        field=FieldName("name"),
+        declared=DepartmentId,
+        kept=Text,
+    ).describe()
+
+    assert all(
+        part in message.root
+        for part in (view.root, "Keyed[", "'name'", "DepartmentId", "Text")
+    )
+
+
+class DepartmentBase(pydantic.BaseModel):
+    department: Department
+
+
+def test_a_nested_field_the_base_declares_is_a_diagnostic() -> None:
+    view = View(
+        name=ViewName.fake(),
+        source=Employee,
+        step=steps.resolve(
+            named(FieldName("department_id")), steps.project([FieldName("name")])
+        ),
+        base=DepartmentBase,
+    )
+
+    match compiler.compile_views(hr_graph(), [view]):
+        case Ok(compiled):
+            pytest.fail(f"expected diagnostics, got {compiled}")
+        case Err(error):
+            assert error.diagnostics == (
+                diagnostics.BaseFieldIsNestedModel(
+                    view=view.name, base=DepartmentBase, field=FieldName("department")
+                ),
+            )

@@ -1,3 +1,5 @@
+import enum
+
 import pydantic
 import pytest
 from hypothesis import event, given
@@ -110,6 +112,35 @@ def test_a_renamed_field_keeps_its_value_and_position_under_the_new_name() -> No
     ]
 
 
+def test_omitting_the_selected_primary_key_drops_it_from_each_row() -> None:
+    view = view_of(steps.omit(steps.select(steps.is_primary_key)))
+    view_engine = make_engine(view)
+    company = Company.fake(CompanyId.fake())
+    view_engine.put(company).unwrap()
+
+    assert read(view_engine, view.name) == (row_of(company, FieldName("id")),)
+
+
+def test_selected_renamed_fields_keep_their_values_and_positions() -> None:
+    view = view_of(
+        steps.rename(
+            named(FieldName("id"), FieldName("secret")),
+            lambda field: FieldName(f"company_{field.root}"),
+        )
+    )
+    view_engine = make_engine(view)
+    company = Company.fake(CompanyId.fake())
+    view_engine.put(company).unwrap()
+
+    assert [list(row.root.items()) for row in read(view_engine, view.name)] == [
+        [
+            (FieldName("company_id"), company.id),
+            (FieldName("name"), company.name),
+            (FieldName("company_secret"), company.secret),
+        ]
+    ]
+
+
 def test_a_projected_view_returns_each_entity_with_only_the_listed_fields() -> None:
     view = view_of(steps.project([FieldName("name")]))
     view_engine = make_engine(view)
@@ -118,6 +149,33 @@ def test_a_projected_view_returns_each_entity_with_only_the_listed_fields() -> N
 
     assert read(view_engine, view.name) == (
         engine.ViewRow({FieldName("name"): company.name}),
+    )
+
+
+class Kind(enum.Enum):
+    COMPANY = "company"
+
+
+@pytest.mark.parametrize(
+    "default",
+    ["company", None, pydantic.MISSING, [], {}, Kind.COMPANY],
+    ids=["str", "none", "missing", "list", "dict", "enum"],
+)
+def test_an_added_field_holds_its_default_in_each_row(
+    default: ir.UncheckedDefault,
+) -> None:
+    added = FieldName("kind")
+    view = view_of(
+        steps.pipeline(
+            steps.project([FieldName("name")]), steps.add(added, object, default)
+        )
+    )
+    view_engine = make_engine(view)
+    company = Company.fake(CompanyId.fake())
+    view_engine.put(company).unwrap()
+
+    assert read(view_engine, view.name) == (
+        engine.ViewRow({FieldName("name"): company.name, added: default}),
     )
 
 
@@ -471,6 +529,9 @@ def with_ids_again(
                 values[reference.field.root] = (
                     vars(value)["id"] if isinstance(value, pydantic.BaseModel) else None
                 )
+            case ir.Added():
+                # An added field holds no value of the Source.
+                pass
     return source(**values)
 
 
