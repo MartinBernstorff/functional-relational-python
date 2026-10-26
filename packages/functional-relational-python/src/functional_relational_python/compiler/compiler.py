@@ -743,11 +743,11 @@ def _lookup(
                 optionality=reference.optionality,
             )
             # A lifted Reference is followed from the Entity it is read off.
-            return (
-                ir.ChainedLookup(chain=(*field.value.lookups(), lookup))
-                if (field.value.lookups())
-                else lookup
-            )
+            match field.value:
+                case ir.Lifted(through=through):
+                    return ir.ChainedLookup(chain=(*through, lookup))
+                case _:
+                    return lookup
         case Err(error):
             pass
     match error:
@@ -917,7 +917,7 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
     """The Entity a resolved field holds: the Lookups that find it from the
     subject, in turn, and its fields."""
 
-    chain: tuple[ir.Lookup, ...]
+    chain: tuple[ir.EntityLookup, ...]
     relation: ir.Relation
 
     @staticmethod

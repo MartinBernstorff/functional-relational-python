@@ -1360,6 +1360,33 @@ def test_reverse_appends_the_referencing_entity_as_an_optional_field() -> None:
     ]
 
 
+def test_flattening_a_reversed_entity_lifts_its_fields_as_optional() -> None:
+    view = compile_reversing(
+        ChannelCampaign,
+        steps.pipeline(
+            steps.reverse(MetaCampaign, steps.project([FieldName("ad_account")])),
+            steps.flatten(FieldName("meta_campaign")),
+        ),
+    )
+
+    assert [
+        (field.name, field.info.annotation, field.value)
+        for field in view.relation.fields
+        if isinstance(field, ir.Field)
+    ] == [
+        (FieldName("id"), ChannelCampaignId, ir.SourceField(field=FieldName("id"))),
+        (FieldName("name"), Text, ir.SourceField(field=FieldName("name"))),
+        (
+            FieldName("ad_account"),
+            Text | None,
+            ir.Lifted(
+                through=(meta_campaign_lookup(),),
+                field=ir.SourceField(field=FieldName("ad_account")),
+            ),
+        ),
+    ]
+
+
 def test_a_reversed_nested_pipeline_types_the_field_by_its_relation() -> None:
     view = compile_reversing(
         ChannelCampaign,
@@ -2317,6 +2344,7 @@ def pipelines(
                     "resolve",
                     "flatten",
                     "reverse",
+                    "reverse_flatten",
                 ]
             )
         ):
@@ -2370,16 +2398,37 @@ def pipelines(
                         Text(f"flat_{index}"),
                     )
                 )
-            # Without a reverse to draw, this falls through to a resolve.
-            case "reverse" if depth.root > 0 and (
+            # A reverse_flatten lifts the reversed field's fields, each renamed to a
+            # name no other field has. Without a reverse to draw, this falls
+            # through to a resolve.
+            case "reverse" | "reverse_flatten" as action if depth.root > 0 and (
                 unused := [
                     reversal for reversal in reversible if reversal[0] not in fields
                 ]
             ):
                 name, model, via = draw(st.sampled_from(unused))
                 nested = draw(pipelines(graph, model, Depth(depth.root - 1)))
-                fields.append(name)
-                drawn.append(steps.reverse_via(model, via, nested))
+                drawn.append(
+                    steps.pipeline(
+                        steps.reverse_via(
+                            model,
+                            via,
+                            nested,
+                            *(
+                                [
+                                    steps.rename(
+                                        steps.select(lambda _field: True),
+                                        prefixed(Text(f"flat_{index}")),
+                                    )
+                                ]
+                                if action == "reverse_flatten"
+                                else []
+                            ),
+                        ),
+                        *([steps.flatten(name)] if action == "reverse_flatten" else []),
+                    )
+                )
+                fields.extend([] if action == "reverse_flatten" else [name])
             case _:
                 resolved = [kept for kept in fields if kept in references]
                 if not resolved or depth.root == 0:

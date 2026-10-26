@@ -456,6 +456,28 @@ def test_reverse_gives_the_entity_referencing_each_row_or_none() -> None:
     )
 
 
+def test_flattening_a_reversed_entity_lifts_its_values_or_none() -> None:
+    view = employee_view(
+        steps.pipeline(
+            steps.project([FieldName("id")]),
+            steps.reverse(Profile, steps.project([FieldName("bio")])),
+            steps.flatten(FieldName("profile")),
+        )
+    )
+    view_engine = profile_engine(view)
+    department = DepartmentId(1)
+    with_profile = Employee.fake(EmployeeId(1), department, None)
+    without_profile = Employee.fake(EmployeeId(2), department, None)
+    profile = Profile.fake(ProfileId(1), with_profile.id)
+    for entity in (with_profile, without_profile, profile):
+        view_engine.put(entity).unwrap()
+
+    assert read(view_engine, view.name) == tuple(
+        engine.ViewRow({FieldName("id"): employee.id, FieldName("bio"): bio})
+        for employee, bio in ((with_profile, profile.bio), (without_profile, None))
+    )
+
+
 def test_a_reverse_sees_the_entities_put_since_the_last_read() -> None:
     view = employee_view(
         steps.pipeline(steps.project([FieldName("id")]), steps.reverse(Profile))
