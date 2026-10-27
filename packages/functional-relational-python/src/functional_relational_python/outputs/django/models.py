@@ -64,6 +64,7 @@ from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     FirstParty,
     ImportBlock,
+    LineLength,
     ModulePath,
     PythonString,
     Symbol,
@@ -1903,6 +1904,7 @@ class _PlannedModel(pydantic.BaseModel, frozen=True):
         """Every Symbol the model refers to by name, besides its fields',
         `django.db.models` ones too."""
         yield self.manager
+        yield DjangoModelsRenderer.class_var
         yield from self.options.bases
         for decorator in self.options.decorators:
             yield decorator.function
@@ -1957,8 +1959,7 @@ class _PlannedModel(pydantic.BaseModel, frozen=True):
         )
         return FileText(
             f"{decorators}{statement.root}\n"
-            f"    {DjangoModelsRenderer.manager.root} = "
-            f"{self.manager.bound_name().root}()\n"
+            f"    {self._manager_line().root}\n"
             + "".join(declaration.line().root for declaration in self.declarations)
             + "\n    class Meta:\n"
             + "".join(
@@ -1967,6 +1968,26 @@ class _PlannedModel(pydantic.BaseModel, frozen=True):
                 for name, value in options.items()
             )
             + constraints.root
+        )
+
+    def _manager_line(self) -> Expression:
+        """`objects: ClassVar[<Manager>] = <Manager>()`. The annotation types
+        `objects` as the Manager, where a type checker would otherwise keep the
+        type a base declares, e.g. the `Manager[Self]` older django-stubs declare.
+        Split as ruff format splits it: the value parenthesized, or else the
+        annotation."""
+        manager = self.manager.bound_name().root
+        target = Expression(
+            f"{DjangoModelsRenderer.manager.root}: "
+            f"{DjangoModelsRenderer.class_var.bound_name().root}[{manager}]"
+        )
+        indent = Indent(4)
+        if len(f"{indent.pad().root}{target.root} = (") <= LineLength.default().root:
+            return indent.assigned(target, Expression(f"{manager}()"))
+        origin, _, _ = target.root.partition("[")
+        return Expression(
+            f"{origin}[\n{indent.deeper().pad().root}{manager}\n"
+            f"{indent.pad().root}] = {manager}()"
         )
 
     @staticmethod
@@ -1992,6 +2013,10 @@ class DjangoModelsRenderer:
     )
     models_import: typing.ClassVar[Identifier] = Identifier("models")
     manager: typing.ClassVar[FieldName] = FieldName("objects")
+    class_var: typing.ClassVar[Symbol] = Symbol(
+        module=ModulePath("typing"), qualname=(Identifier("ClassVar"),)
+    )
+    """What annotates the manager, so a type checker types it as the Manager."""
     reserved: typing.ClassVar[frozenset[FieldName]] = frozenset(
         {FieldName("pk"), FieldName("Meta"), FieldName("models"), manager}
     )
@@ -2953,7 +2978,7 @@ class DjangoModelsRenderer:
         planned: list[_PlannedModel], imports: frozenset[Symbol]
     ) -> Iterator[DjangoModelNameClash | DjangoModelNameCaseClash]:
         """`imports` are the Symbols the module imports by name: field classes,
-        Managers, existing Django models, base classes, decorators and
+        `ClassVar`, Managers, existing Django models, base classes, decorators and
         defaults. Django also tells models apart by their lowercased names."""
         bound: dict[Identifier, list[Symbol | Identifier]] = {
             DjangoModelsRenderer.models_import: [DjangoModelsRenderer.models_import]
