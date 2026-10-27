@@ -36,6 +36,7 @@ from functional_relational_python.outputs.django.models import (
     DjangoModelsRenderer,
     InvalidDjangoFieldName,
     InvalidReverseAccessorName,
+    MixedDjangoChoiceTypes,
     NoDjangoFieldRule,
     OnDelete,
     OnDeleteForNonReference,
@@ -193,11 +194,13 @@ def diagnostics(
             return error.diagnostics
 
 
-def field_line(field: FieldName, models: DjangoModels) -> FileText:
-    """The line declaring `field` of `Thing`."""
+def field_line(
+    entity: type[pydantic.BaseModel], field: FieldName, models: DjangoModels
+) -> FileText:
+    """The line declaring `field` of `entity`."""
     (line,) = (
         FileText(line.strip())
-        for line in render([Thing], models).root.splitlines()
+        for line in render([entity], models).root.splitlines()
         if line.strip().startswith(f"{field.root} = ")
     )
     return line
@@ -227,7 +230,7 @@ def all_rules_for_tags() -> DjangoModels:
     ],
 )
 def test_builtin_rule_for_the_wrapped_type(field: str, expected: str) -> None:
-    assert field_line(FieldName(field), all_rules_for_tags()) == FileText(
+    assert field_line(Thing, FieldName(field), all_rules_for_tags()) == FileText(
         f"{field} = {expected}"
     )
 
@@ -257,7 +260,7 @@ def test_the_catalog_overrides_the_rule_for_a_type(
         {tuple[Text, ...]: DjangoField.fake(), overridden: char_field()}, {}
     )
 
-    assert field_line(FieldName(field), models) == FileText(
+    assert field_line(Thing, FieldName(field), models) == FileText(
         f"{field} = models.CharField(max_length=254)"
     )
 
@@ -283,7 +286,7 @@ def test_an_overridden_field_class_outside_django_is_imported() -> None:
 def test_an_optional_overridden_field_is_nullable() -> None:
     models = config({tuple[Text, ...]: DjangoField.fake(), Text: char_field()}, {})
 
-    assert field_line(FieldName("optional"), models) == FileText(
+    assert field_line(Thing, FieldName("optional"), models) == FileText(
         "optional = models.CharField(max_length=254, null=True)"
     )
 
@@ -316,9 +319,10 @@ class Budget(pydantic.RootModel[pydantic.PositiveInt]):
     pass
 
 
-type PastMoment = Annotated[
-    datetime.datetime, pydantic.AwareDatetime, pydantic.PastDatetime
-]
+PastMoment = Annotated[datetime.datetime, pydantic.AwareDatetime, pydantic.PastDatetime]
+
+
+type AliasedMoment = PastMoment
 
 
 class Shade(enum.StrEnum):
@@ -347,7 +351,7 @@ class Ruled(pydantic.BaseModel):
     name: Name
     budget: Budget
     moment: PastMoment
-    maybe_moment: PastMoment | None
+    maybe_moment: AliasedMoment | None
     shade: Shade
     size: Size
     channel: Channel
@@ -356,16 +360,6 @@ class Ruled(pydantic.BaseModel):
     member: Literal[Shade.DARK]
     shades: list[Shade]
     maybe_texts: list[Text | None] | None
-
-
-def ruled_line(field: FieldName, models: DjangoModels) -> FileText:
-    """The line declaring `field` of `Ruled`."""
-    (line,) = (
-        FileText(line.strip())
-        for line in render([Ruled], models).root.splitlines()
-        if line.strip().startswith(f"{field.root} = ")
-    )
-    return line
 
 
 @pytest.mark.parametrize(
@@ -391,7 +385,7 @@ def ruled_line(field: FieldName, models: DjangoModels) -> FileText:
     ],
 )  # fmt: skip
 def test_builtin_rule_for_a_type_it_looks_into(field: str, expected: str) -> None:
-    assert ruled_line(FieldName(field), config({}, {})) == FileText(
+    assert field_line(Ruled, FieldName(field), config({}, {})) == FileText(
         f"{field} = {expected}"
     )
 
@@ -417,7 +411,9 @@ def test_the_catalog_overrides_the_rule_inside_a_type(
 ) -> None:
     models = config({overridden: char_field()}, {})
 
-    assert ruled_line(FieldName(field), models) == FileText(f"{field} = {expected}")
+    assert field_line(Ruled, FieldName(field), models) == FileText(
+        f"{field} = {expected}"
+    )
 
 
 def test_override_arguments_import_the_symbols_and_fields_they_name() -> None:
@@ -455,21 +451,38 @@ class Mixed(enum.Enum):
     NUMBER = 1
 
 
-def test_a_type_whose_values_have_no_one_rule_is_a_diagnostic() -> None:
+def test_values_of_several_types_are_a_diagnostic() -> None:
+    class HasMixed(pydantic.BaseModel):
+        id: ThingId
+        enum_values: Mixed
+        literal_values: Literal["a", 1]
+
+    assert set(diagnostics([HasMixed], config({}, {}))) == {
+        MixedDjangoChoiceTypes(
+            entity=HasMixed,
+            field=FieldName(field),
+            values_of=AnnotationText.of(values_of),
+            value_types=(int, str),
+        )
+        for field, values_of in (
+            ("enum_values", Mixed),
+            ("literal_values", Literal["a", 1]),
+        )
+    }
+
+
+def test_a_list_of_a_type_without_a_rule_is_a_diagnostic() -> None:
     class Unruled(pydantic.BaseModel):
         id: ThingId
-        mixed: Mixed
-        literal: Literal["a", 1]
         items: list[frozenset[Text]]
 
-    assert set(diagnostics([Unruled], config({}, {}))) == {
+    assert diagnostics([Unruled], config({}, {})) == (
         NoDjangoFieldRule(
             entity=Unruled,
-            field=FieldName(field),
-            annotation=AnnotationText.of(Unruled.model_fields[field].annotation),
-        )
-        for field in ("mixed", "literal", "items")
-    }
+            field=FieldName("items"),
+            annotation=AnnotationText.of(list[frozenset[Text]]),
+        ),
+    )
 
 
 def test_a_django_choices_enum_that_cannot_be_imported_is_a_diagnostic() -> None:
@@ -482,7 +495,7 @@ def test_a_django_choices_enum_that_cannot_be_imported_is_a_diagnostic() -> None
 
     assert diagnostics([HasLocal], config({}, {})) == (
         UnimportableDjangoChoices(
-            entity=HasLocal, field=FieldName("local"), choices=Local
+            entity=HasLocal, field=FieldName("local"), enum_class=Local
         ),
     )
 

@@ -111,7 +111,7 @@ class DjangoField(pydantic.BaseModel, frozen=True):
         """This field with `arguments` added, after its own."""
         return self.model_copy(update={"arguments": {**self.arguments, **arguments}})
 
-    def call(self, positional: Iterable[ValueExpression]) -> ValueExpression:
+    def to_expression(self, positional: Iterable[ValueExpression]) -> ValueExpression:
         """The field constructed with `positional` and its arguments, e.g.
         `models.ForeignKey('Company', on_delete=models.PROTECT)`."""
         arguments = ", ".join(
@@ -148,7 +148,7 @@ class DjangoField(pydantic.BaseModel, frozen=True):
             case Symbol():
                 return ValueExpression(DjangoField._referred(argument).root)
             case DjangoField():
-                return argument.call(())
+                return argument.to_expression(())
 
     @staticmethod
     def _referred(symbol: Symbol) -> TypeExpression:
@@ -269,15 +269,38 @@ class UnimportableDjangoChoices(pydantic.BaseModel, Diagnostic, frozen=True):
 
     entity: type[pydantic.BaseModel]
     field: FieldName
-    choices: type[enum.Enum]
+    enum_class: type[enum.Enum]
 
     def describe(self) -> DiagnosticMessage:
-        name = self.choices.__qualname__
+        name = self.enum_class.__qualname__
         return DiagnosticMessage(
             f"{self.entity.__qualname__}.{self.field.root}: the Django field's "
             f"choices are '{name}.choices', but '{name}' cannot be imported by its "
             "module and name. Define it at module level, or add a rule to "
             "DjangoModels.field_types."
+        )
+
+
+class MixedDjangoChoiceTypes(pydantic.BaseModel, Diagnostic, frozen=True):
+    """An Entity field's type is, or wraps, an enum or `Literal` whose values have
+    several types, e.g. `Literal["a", 1]`, so no one Django field holds them.
+
+    `values_of` is the enum or `Literal`, and `value_types` are in name order.
+    """
+
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+    values_of: AnnotationText
+    value_types: tuple[type, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        types = ", ".join(
+            f"'{value_type.__qualname__}'" for value_type in self.value_types
+        )
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}.{self.field.root}: the values of "
+            f"'{self.values_of.root}' are of the types {types}, but a Django field "
+            "holds one. Add a rule to DjangoModels.field_types."
         )
 
 
@@ -413,13 +436,17 @@ class AutoIncrementOnNonPrimaryKey(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 type _DeclarationDiagnostic = (
-    NoDjangoFieldRule | UnimportableDjangoChoices | AutoIncrementOnNonPrimaryKey
+    NoDjangoFieldRule
+    | UnimportableDjangoChoices
+    | MixedDjangoChoiceTypes
+    | AutoIncrementOnNonPrimaryKey
 )
 
 
 type DjangoDiagnostic = (
     NoDjangoFieldRule
     | UnimportableDjangoChoices
+    | MixedDjangoChoiceTypes
     | InvalidDjangoFieldName
     | AutoIncrementOnNonPrimaryKey
     | OnDeleteForNonReference
@@ -450,9 +477,21 @@ type StoredValue = object
 
 
 class UnimportableChoicesError(Exception):
-    def __init__(self, choices: type[enum.Enum]) -> None:
-        self.choices = choices
-        super().__init__(f"{choices!r} cannot be imported by its module and name")
+    def __init__(self, enum_class: type[enum.Enum]) -> None:
+        self.enum_class = enum_class
+        super().__init__(f"{enum_class!r} cannot be imported by its module and name")
+
+
+class MixedValueTypesError(Exception):
+    def __init__(
+        self, annotation: RuntimeAnnotation, value_types: tuple[type, ...]
+    ) -> None:
+        self.annotation = annotation
+        self.value_types = value_types
+        super().__init__(f"The values of {annotation!r} have several types")
+
+
+type FieldRuleError = NoFieldRuleError | UnimportableChoicesError | MixedValueTypesError
 
 
 class FieldTypes(pydantic.BaseModel, frozen=True):
@@ -508,7 +547,7 @@ class FieldTypes(pydantic.BaseModel, frozen=True):
 
     def field_of(
         self, annotation: RuntimeAnnotation, role: FieldRole
-    ) -> Result[_TypedField, NoFieldRuleError | UnimportableChoicesError]:
+    ) -> Result[_TypedField, FieldRuleError]:
         optionality = Optionality.REQUIRED
         current = annotation
         while True:
@@ -531,13 +570,13 @@ class FieldTypes(pydantic.BaseModel, frozen=True):
                 continue
             match self._builtin_of(current, role):
                 case Ok(typed):
-                    return Ok(typed.or_optional(optionality))
+                    return Ok(typed.made_optional_by(optionality))
                 case Err() as error:
                     return error
 
     def _builtin_of(
         self, annotation: RuntimeAnnotation, role: FieldRole
-    ) -> Result[_TypedField, NoFieldRuleError | UnimportableChoicesError]:
+    ) -> Result[_TypedField, FieldRuleError]:
         """The built-in rule for `annotation`, which no override names."""
         if annotation in FieldTypes.builtin and not (
             role == FieldRole.PRIMARY_KEY and annotation is str
@@ -570,7 +609,7 @@ class FieldTypes(pydantic.BaseModel, frozen=True):
                         _TypedField(
                             field=DjangoField(
                                 field_class=FieldTypes.array_field,
-                                arguments={Identifier("base_field"): typed.declared()},
+                                arguments={Identifier("base_field"): typed.with_null()},
                             ),
                             optionality=Optionality.REQUIRED,
                         )
@@ -581,7 +620,7 @@ class FieldTypes(pydantic.BaseModel, frozen=True):
 
     def _enum_of(
         self, enum_class: type[enum.Enum], role: FieldRole
-    ) -> Result[_TypedField, NoFieldRuleError | UnimportableChoicesError]:
+    ) -> Result[_TypedField, FieldRuleError]:
         stored = tuple(FieldTypes._stored(member) for member in enum_class)
         if not any(
             f"{base.__module__}.{base.__qualname__}"
@@ -614,10 +653,12 @@ class FieldTypes(pydantic.BaseModel, frozen=True):
         choices: ValueExpression | Symbol,
         role: FieldRole,
         optionality: Optionality,
-    ) -> Result[_TypedField, NoFieldRuleError | UnimportableChoicesError]:
+    ) -> Result[_TypedField, FieldRuleError]:
         """The field of the type every `stored` value has, with `choices`, made
         optional by `optionality`."""
-        match tuple({type(value) for value in stored}):
+        match tuple(
+            sorted({type(value) for value in stored}, key=lambda t: t.__qualname__)
+        ):
             case (value_type,):
                 match self.field_of(value_type, role):
                     case Ok(typed):
@@ -627,12 +668,14 @@ class FieldTypes(pydantic.BaseModel, frozen=True):
                                     {Identifier("choices"): choices}
                                 ),
                                 optionality=typed.optionality,
-                            ).or_optional(optionality)
+                            ).made_optional_by(optionality)
                         )
                     case Err() as error:
                         return error
-            case _:
+            case ():
                 return Err(NoFieldRuleError(annotation))
+            case value_types:
+                return Err(MixedValueTypesError(annotation, value_types))
 
     @staticmethod
     def _stored(value: StoredValue) -> StoredValue:
@@ -654,7 +697,7 @@ class _TypedField(pydantic.BaseModel, frozen=True):
     field: DjangoField
     optionality: Optionality
 
-    def or_optional(self, optionality: Optionality) -> _TypedField:
+    def made_optional_by(self, optionality: Optionality) -> _TypedField:
         """This field, made optional by an `optionality` it is wrapped in."""
         match optionality:
             case Optionality.OPTIONAL:
@@ -662,7 +705,7 @@ class _TypedField(pydantic.BaseModel, frozen=True):
             case Optionality.REQUIRED:
                 return self
 
-    def declared(self) -> DjangoField:
+    def with_null(self) -> DjangoField:
         """The field, with `null=True` when it is optional."""
         match self.optionality:
             case Optionality.OPTIONAL:
@@ -711,7 +754,7 @@ class _Declaration(pydantic.BaseModel, frozen=True):
 
     def line(self) -> FileText:
         return FileText(
-            f"    {self.name.root} = {self.field.call(self.positional).root}\n"
+            f"    {self.name.root} = {self.field.to_expression(self.positional).root}\n"
         )
 
 
@@ -784,6 +827,7 @@ class DjangoModelsRenderer:
                     case (
                         NoDjangoFieldRule()
                         | UnimportableDjangoChoices()
+                        | MixedDjangoChoiceTypes()
                         | AutoIncrementOnNonPrimaryKey()
                     ):
                         reported.append(declared)
@@ -868,20 +912,27 @@ class DjangoModelsRenderer:
                             )
                         case UnimportableChoicesError():
                             yield UnimportableDjangoChoices(
-                                entity=model, field=field, choices=error.choices
+                                entity=model, field=field, enum_class=error.enum_class
+                            )
+                        case MixedValueTypesError():
+                            yield MixedDjangoChoiceTypes(
+                                entity=model,
+                                field=field,
+                                values_of=AnnotationText.of(error.annotation),
+                                value_types=error.value_types,
                             )
                     continue
             if role == FieldRole.PLAIN and typed.field.is_auto_increment():
                 yield AutoIncrementOnNonPrimaryKey(entity=model, field=field)
                 continue
-            declared = typed.declared()
+            django_field = typed.with_null()
             if role == FieldRole.PRIMARY_KEY:
-                declared = declared.with_arguments(
+                django_field = django_field.with_arguments(
                     {Identifier("primary_key"): ValueExpression("True")}
                 )
             yield _Declaration(
                 name=field,
-                field=declared,
+                field=django_field,
                 positional=(),
                 source=field,
                 role=role,
