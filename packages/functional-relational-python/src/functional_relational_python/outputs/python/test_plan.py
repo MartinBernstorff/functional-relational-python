@@ -28,6 +28,7 @@ from functional_relational_python.outputs.python.plan import (
     Scope,
     Unimportable,
     UnsupportedAnnotation,
+    UnsupportedMetadata,
 )
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
@@ -281,7 +282,7 @@ def test_every_unsupported_annotation_is_reported() -> None:
     assert [
         diagnostic.field
         for diagnostic in diagnostics_of(compile_all([view]), app_layout())
-        if isinstance(diagnostic, UnsupportedAnnotation)
+        if isinstance(diagnostic, (UnsupportedAnnotation, UnsupportedMetadata))
     ] == [FieldName(name) for name in WithUnsupported.model_fields]
 
 
@@ -525,6 +526,19 @@ def test_models_and_mappings_in_one_module_is_a_diagnostic() -> None:
             ),
             "CompanyPublic.tags: cannot generate the type 'Annotated[int, 0]'.",
         ),
+        (
+            UnsupportedMetadata(
+                view=ViewName("CompanyPublic"),
+                field=FieldName("code"),
+                metadata=AnnotationText("_PydanticGeneralMetadata(pattern='^a')"),
+            ),
+            (
+                "CompanyPublic.code: cannot write the metadata "
+                "'_PydanticGeneralMetadata(pattern='^a')'. Name the annotated type "
+                "with a `type` statement, e.g. `type Name = Annotated[...]`, and "
+                "type the field with it."
+            ),
+        ),
     ],
     ids=[
         "unimportable-field",
@@ -533,6 +547,7 @@ def test_models_and_mappings_in_one_module_is_a_diagnostic() -> None:
         "one-module",
         "defining-module",
         "unsupported",
+        "unsupported-metadata",
     ],
 )
 def test_a_diagnostic_message_names_the_offending_values(

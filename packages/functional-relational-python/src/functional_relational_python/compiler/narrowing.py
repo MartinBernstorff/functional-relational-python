@@ -15,6 +15,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
     Optionality,
     RuntimeAnnotation,
+    SpecialForm,
     SplitAnnotation,
 )
 from functional_relational_python.pipeline import ir
@@ -33,25 +34,10 @@ def split(annotation: RuntimeAnnotation) -> SplitAnnotation:
     )
 
 
-def without_none(annotation: RuntimeAnnotation) -> RuntimeAnnotation:
-    """`annotation` without `None`.
-
-    The metadata of an `Annotated` inside the union is left out, as the generated
-    model leaves it out.
-    """
-    return Optionality.of_aliased_annotation(annotation).required
-
-
-class _SpecialForm(typing.Protocol):
-    """A special form such as `Literal`, subscripted at run time."""
-
-    def __getitem__(self, parameters: object, /) -> RuntimeAnnotation: ...
-
-
 def _literal(member: enum.Enum) -> RuntimeAnnotation:
     """`Literal[member]`. A type checker takes only a member written out in a
     `Literal`, so it is subscripted as the object it is at run time."""
-    return typing.cast("_SpecialForm", typing.Literal)[member]
+    return typing.cast("SpecialForm", typing.Literal)[member]
 
 
 def nameable(member: enum.Enum) -> bool:
@@ -98,42 +84,42 @@ def _narrowed(
             pass
         case ir.Field() | ir.NestedField():
             return field
-    annotation = field.annotation()
     # A Reference stays one, so that it can still be resolved.
     narrowing = (
         tuple(term for term in terms if not isinstance(term, ir.FilterIsNull))
         if ir.References().selects(field, entity_graph)
         else terms
     )
+    narrowed = field
     for term in narrowing:
-        annotation = _narrowed_by(term, column, annotation)
-    if annotation == field.annotation():
-        return field
-    return field.narrowed(annotation)
+        narrowed = _narrowed_by(term, column, narrowed)
+    return narrowed
 
 
-def _narrowed_by(
-    term: ir.Filter, column: FieldName, annotation: RuntimeAnnotation
-) -> RuntimeAnnotation:
-    """`annotation`, the type of a field whose value is `column`, narrowed by
-    `term`."""
+def _narrowed_by(term: ir.Filter, column: FieldName, field: ir.Field) -> ir.Field:
+    """`field`, whose value is `column`, narrowed by `term`.
+
+    A field narrowed to a `Literal` loses its type's constraints: they constrain
+    the wider type, and pydantic may refuse to apply them to a `Literal`.
+    """
     match term:
         case ir.FilterComparison(
             operator=ir.ComparisonOperator.EQ,
             field=ir.SourceField(field=tested),
             operand=ir.EnumLiteral(member=member),
         ) if tested == column and nameable(member):
-            return _literal(member)
+            return field.retyped(_literal(member))
         case ir.FilterIsNull(field=ir.SourceField(field=tested)) if (
-            tested == column and split(annotation).optionality is Optionality.OPTIONAL
+            tested == column
+            and split(field.annotation()).optionality is Optionality.OPTIONAL
         ):
-            return typing.Literal[None]
+            return field.retyped(typing.Literal[None])
         case ir.FilterNot(term=ir.FilterIsNull(field=ir.SourceField(field=tested))) if (
             tested == column
         ):
-            return without_none(annotation)
+            return field.without_none()
         case _:
-            return annotation
+            return field
 
 
 def required(
@@ -167,13 +153,13 @@ def required(
     match value:
         case ir.SourceField(field=column) | ir.RequiredField(field=column):
             value_required = ir.RequiredField(field=column)
-            narrowed_type = without_none(annotation)
+            narrowed = field.without_none()
         case ir.Lifted():
             value_required = value.required()
-            narrowed_type = without_none(annotation)
+            narrowed = field.without_none()
         case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
             value_required = value.required()
-            narrowed_type = value_required.annotation()
+            narrowed = field.narrowed(value_required.annotation())
         case ir.Added():
             return diagnostics.RequireAddedField(view=view, field=field.name)
-    return field.narrowed(narrowed_type).model_copy(update={"value": value_required})
+    return narrowed.model_copy(update={"value": value_required})
