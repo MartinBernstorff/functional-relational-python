@@ -23,6 +23,7 @@ from functional_relational_python.compiler.diagnostics import UnknownField
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
+    Optionality,
     RuntimeAnnotation,
 )
 from functional_relational_python.entity_graph.id import (
@@ -31,6 +32,7 @@ from functional_relational_python.entity_graph.id import (
     OneToOne,
     OneToOneMarker,
 )
+from functional_relational_python.outputs.django.conditions import DjangoColumn
 from functional_relational_python.outputs.django.models import (
     AppLabel,
     AutoIncrementOnNonPrimaryKey,
@@ -46,6 +48,7 @@ from functional_relational_python.outputs.django.models import (
     DbTable,
     Default,
     DefaultForNonField,
+    DefaultForReferencePrimaryKey,
     DjangoDiagnostic,
     DjangoField,
     DjangoFieldNameClash,
@@ -58,6 +61,7 @@ from functional_relational_python.outputs.django.models import (
     ExistingModelInGeneratedModule,
     ExistingModelOfNonEntity,
     FieldDefault,
+    FieldTypes,
     ForeignKeyConstraint,
     IndexField,
     IndexName,
@@ -71,8 +75,12 @@ from functional_relational_python.outputs.django.models import (
     OnDelete,
     OnDeleteForNonReference,
     OnDeleteOnExistingModel,
+    OptionalPrimaryKeyReference,
     OrderingTerm,
+    OwnPrimaryKey,
+    PrimaryKeyOfNonOneToOne,
     ReferenceKey,
+    ReferencePrimaryKey,
     RelatedName,
     RelatedNameForNonReference,
     ReverseAccessorClash,
@@ -738,6 +746,123 @@ def test_a_one_to_one_reference_is_a_one_to_one_field_with_a_reverse_accessor() 
     )
 
 
+def keyed_by(reference: FieldName) -> EntityModelOptions:
+    """The Entity's model has `reference` as its primary key."""
+    return EntityModelOptions.inherited().model_copy(
+        update={"primary_key": ReferencePrimaryKey(reference=reference)}
+    )
+
+
+def test_a_one_to_one_reference_can_be_the_primary_key_in_place_of_the_id() -> None:
+    models = config({}, {}).model_copy(
+        update={
+            "entity_model_options": {CompanyDetails: keyed_by(FieldName("company_id"))}
+        }
+    )
+
+    text = render([Company, CompanyDetails], models).root
+
+    assert (
+        "class CompanyDetails(models.Model):\n"
+        "    objects = CompanyDetailsManager()\n"
+        "    company = models.OneToOneField('Company', on_delete=models.PROTECT, "
+        "related_name='company_details_by_company', primary_key=True)\n"
+        "    successor = "
+    ) in text
+
+
+@pytest.mark.parametrize(
+    ("entity", "options", "expected"),
+    [
+        (
+            Department,
+            keyed_by(FieldName("company_id")),
+            PrimaryKeyOfNonOneToOne(entity=Department, field=FieldName("company_id")),
+        ),
+        (
+            Department,
+            keyed_by(FieldName("founded")),
+            PrimaryKeyOfNonOneToOne(entity=Department, field=FieldName("founded")),
+        ),
+        (
+            CompanyDetails,
+            keyed_by(FieldName("successor_id")),
+            OptionalPrimaryKeyReference(
+                entity=CompanyDetails, field=FieldName("successor_id")
+            ),
+        ),
+        (
+            CompanyDetails,
+            keyed_by(FieldName("company_id")).model_copy(
+                update={"defaults": {FieldName("id"): AutoNow()}}
+            ),
+            DefaultForReferencePrimaryKey(
+                entity=CompanyDetails, reference=FieldName("company_id")
+            ),
+        ),
+    ],
+    ids=["many-to-one", "not a reference", "optional", "default for the id"],
+)
+def test_a_primary_key_reference_django_cannot_key_by_is_a_diagnostic(
+    entity: type[pydantic.BaseModel],
+    options: EntityModelOptions,
+    expected: DjangoDiagnostic,
+) -> None:
+    models = config({}, {}).model_copy(
+        update={"entity_model_options": {entity: options}}
+    )
+
+    assert diagnostics([Company, Department, CompanyDetails], models) == (expected,)
+
+
+class UnruledId(Id[complex]):
+    """No Django field rule holds a `complex`."""
+
+
+class UnruledDetails(pydantic.BaseModel):
+    id: UnruledId
+    company_id: Annotated[CompanyId, OneToOne()]
+
+
+def test_the_id_of_a_reference_keyed_model_is_held_by_the_reference_column() -> None:
+    """The `id` needs no Django field rule, and its column is the Reference's,
+    which is never NULL."""
+    models = config({}, {}).model_copy(
+        update={
+            "entity_model_options": {UnruledDetails: keyed_by(FieldName("company_id"))}
+        }
+    )
+    graph = EntityGraph.build(
+        [Company, UnruledDetails], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+
+    _ = DjangoModelsRenderer.render(graph, models).unwrap()
+    assert DjangoModelsRenderer.columns(graph, models, FieldTypes(overrides={})).of(
+        UnruledDetails, FieldName("id")
+    ) == DjangoColumn(
+        attribute=FieldName("company_id"), optionality=Optionality.REQUIRED
+    )
+
+
+def test_a_catalog_wide_default_for_the_id_of_a_reference_keyed_model_is_left_out() -> (
+    None
+):
+    """The `id` has no column of its own, so the default has no field to go on."""
+    models = config({}, {}).model_copy(
+        update={
+            "model_options": CatalogModelOptions.default().model_copy(
+                update={"defaults": {FieldName("id"): Default(value=uuid4())}}
+            ),
+            "entity_model_options": {CompanyDetails: keyed_by(FieldName("company_id"))},
+        }
+    )
+
+    text = render([Company, CompanyDetails], models).root
+
+    assert "class CompanyDetails(models.Model):\n    objects" in text
+    assert text.count("default=uuid4") == 1
+
+
 class HolderId(Id[int]):
     pass
 
@@ -1374,6 +1499,7 @@ def person_options() -> EntityModelOptions:
             FieldName("employer_id"): RelatedName("employees"),
             FieldName("heads_id"): RelatedName("head"),
         },
+        primary_key=OwnPrimaryKey(),
     )
 
 
@@ -1389,7 +1515,14 @@ def uuid_default() -> EntityModelOptions:
 
 @pytest.mark.parametrize(
     "entity_model_options",
-    [{}, {Person: person_options(), Department: uuid_default()}],
+    [
+        {},
+        {
+            Person: person_options(),
+            Department: uuid_default(),
+            CompanyDetails: keyed_by(FieldName("company_id")),
+        },
+    ],
     ids=["django", "options"],
 )
 def test_generated_models_type_check_and_make_migrations(
@@ -1416,7 +1549,7 @@ def test_generated_models_type_check_and_make_migrations(
         }
     )
     graph = EntityGraph.build(
-        [Company, Department, Person, Ruled, Campaign],
+        [Company, CompanyDetails, Department, Person, Ruled, Campaign],
         IdBase.fake(),
         OneToOneMarker.fake(),
     ).unwrap()
