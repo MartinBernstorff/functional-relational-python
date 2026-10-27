@@ -47,6 +47,7 @@ from functional_relational_python.outputs.django.models import (
     ExistingDjangoModel,
     ModelGenericBase,
     PlainBase,
+    ReferencePrimaryKey,
     RelatedName,
 )
 from functional_relational_python.outputs.django.queries import (
@@ -1163,7 +1164,9 @@ class Database:
         node = entity_graph().entities[type(entity)]
         _ = model.objects.create(
             **{
-                DjangoModelsRenderer.attribute_of(node, FieldName(name)).root: value
+                DjangoModelsRenderer.attribute_of(
+                    config, node, FieldName(name)
+                ).root: value
                 for name, value in entity.model_dump(mode="json").items()
             }
         )
@@ -1627,6 +1630,55 @@ def test_a_view_reads_through_a_related_name_like_the_engine(view: View) -> None
     entities = organisation()
     (compiled,) = compile_all([view]).views
     config = Modules.with_options(CatalogModelOptions.default())
+
+    with Database.of([view], (), config) as django_models:
+        Database.put(entities, config)
+        rows = Database.read(django_models, compiled, every_row)
+
+    assert rows == engine_rows([compiled], entities)[view.name]
+
+
+def badge_by_id() -> View:
+    """Filters on the `id` of a Badge keyed by its Employee."""
+    return View(
+        name=ViewName("NotTheFirstBadge"),
+        source=Badge,
+        step=steps.where(
+            conditions.not_(
+                conditions.eq(conditions.field(FieldName("id")), BadgeId(1))
+            )
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "view", [*read_views(), badge_by_id()], ids=lambda view: view.name.root
+)
+def test_a_view_reads_a_model_keyed_by_its_reference_like_the_engine(
+    view: View,
+) -> None:
+    """A Badge's model has the Employee it is of as its primary key, so its `id`
+    is read from that column. Each Badge's `id` is its Employee's."""
+    entities = tuple(
+        entity.model_copy(update={"id": BadgeId(entity.employee_id.root)})
+        if isinstance(entity, Badge)
+        else entity
+        for entity in organisation()
+    )
+    (compiled,) = compile_all([view]).views
+    config = Modules.config().model_copy(
+        update={
+            "entity_model_options": {
+                Badge: EntityModelOptions.inherited().model_copy(
+                    update={
+                        "primary_key": ReferencePrimaryKey(
+                            reference=FieldName("employee_id")
+                        )
+                    }
+                )
+            }
+        }
+    )
 
     with Database.of([view], (), config) as django_models:
         Database.put(entities, config)

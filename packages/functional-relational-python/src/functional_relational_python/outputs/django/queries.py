@@ -512,7 +512,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             classes=classes,
             writer=conditions.ConditionWriter(
                 columns=DjangoModelsRenderer.columns(
-                    graph, FieldTypes(overrides=config.field_types)
+                    graph, config, FieldTypes(overrides=config.field_types)
                 ),
                 models=Expression(DjangoQueriesRenderer.django_models.root),
                 enums={
@@ -1264,7 +1264,7 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                 FieldName(name),
                 Expression(
                     f"{row.root}."
-                    f"{DjangoModelsRenderer.attribute_of(node, FieldName(name)).root}"
+                    f"{DjangoModelsRenderer.attribute_of(self.config, node, FieldName(name)).root}"
                 ),
             )
             for name in entity.model_fields
@@ -1297,7 +1297,9 @@ class _RowReader(pydantic.BaseModel, frozen=True):
             case ir.SourceField() | ir.RequiredField():
                 # A required field that is `None` fails the View model's validation.
                 node = self.graph.entities[reached.trail.subject]
-                attribute = DjangoModelsRenderer.attribute_of(node, value.field)
+                attribute = DjangoModelsRenderer.attribute_of(
+                    self.config, node, value.field
+                )
                 return self._through(
                     read_as, Expression(f"{row.root}.{attribute.root}")
                 )
@@ -1313,7 +1315,9 @@ class _RowReader(pydantic.BaseModel, frozen=True):
             case ir.Lifted(through=through, field=read_field):
                 followed = self._followed(through, reached)
                 node = self.graph.entities[through[-1].target]
-                attribute = DjangoModelsRenderer.attribute_of(node, read_field.field)
+                attribute = DjangoModelsRenderer.attribute_of(
+                    self.config, node, read_field.field
+                )
                 lifted = self._through(
                     read_as,
                     Expression(f"{followed.reached.row().root}.{attribute.root}"),
