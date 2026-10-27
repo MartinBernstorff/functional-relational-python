@@ -1,4 +1,5 @@
 import datetime
+import enum
 import os
 import subprocess
 import sys
@@ -6,8 +7,9 @@ import textwrap
 import uuid
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
+import django.db.models
 import pydantic
 import pytest
 from safe_result import Err, Ok
@@ -40,6 +42,7 @@ from functional_relational_python.outputs.django.models import (
     ReferenceKey,
     ReverseAccessorClash,
     SetNullOnRequiredReference,
+    UnimportableDjangoChoices,
 )
 from functional_relational_python.outputs.django.queries import DjangoQueriesRenderer
 from functional_relational_python.outputs.python.plan import PlacedModels
@@ -303,6 +306,185 @@ def test_every_type_without_a_rule_is_a_diagnostic() -> None:
             annotation=AnnotationText.of(frozenset[Text]),
         ),
     }
+
+
+class Name(pydantic.RootModel[Annotated[str, pydantic.Field(min_length=1)]]):
+    pass
+
+
+class Budget(pydantic.RootModel[pydantic.PositiveInt]):
+    pass
+
+
+type PastMoment = Annotated[
+    datetime.datetime, pydantic.AwareDatetime, pydantic.PastDatetime
+]
+
+
+class Shade(enum.StrEnum):
+    LIGHT = "light"
+    DARK = "dark"
+
+
+class Size(enum.IntEnum):
+    SMALL = 1
+    LARGE = 2
+
+
+class Channel(django.db.models.TextChoices):
+    META = "meta", "Meta"
+    GOOGLE = "google", "Google"
+
+
+class RuledId(Id[int]):
+    pass
+
+
+class Ruled(pydantic.BaseModel):
+    """An Entity with a field of each kind of type a built-in rule looks into."""
+
+    id: RuledId
+    name: Name
+    budget: Budget
+    moment: PastMoment
+    maybe_moment: PastMoment | None
+    shade: Shade
+    size: Size
+    channel: Channel
+    kind: Literal["area", "money"]
+    maybe_kind: Literal["area", None]
+    member: Literal[Shade.DARK]
+    shades: list[Shade]
+    maybe_texts: list[Text | None] | None
+
+
+def ruled_line(field: FieldName, models: DjangoModels) -> FileText:
+    """The line declaring `field` of `Ruled`."""
+    (line,) = (
+        FileText(line.strip())
+        for line in render([Ruled], models).root.splitlines()
+        if line.strip().startswith(f"{field.root} = ")
+    )
+    return line
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        # `Annotated` metadata is left out.
+        ("name", "models.TextField()"),
+        ("budget", "models.BigIntegerField()"),
+        ("moment", "models.DateTimeField()"),
+        ("maybe_moment", "models.DateTimeField(null=True)"),
+        # An enum is the field of its values' type, with its values as choices.
+        ("shade", "models.TextField(choices=[('light', 'light'), ('dark', 'dark')])"),
+        ("size", "models.BigIntegerField(choices=[(1, 1), (2, 2)])"),
+        # A Django Choices enum's own choices keep its labels.
+        ("channel", "models.TextField(choices=Channel.choices)"),
+        # A Literal is the field of its values' type, with them as choices.
+        ("kind", "models.TextField(choices=[('area', 'area'), ('money', 'money')])"),
+        ("maybe_kind", "models.TextField(choices=[('area', 'area')], null=True)"),
+        ("member", "models.TextField(choices=[('dark', 'dark')])"),
+        # A list is an array of the field of its items.
+        ("shades", "ArrayField(base_field=models.TextField(choices=[('light', 'light'), ('dark', 'dark')]))"),
+        ("maybe_texts", "ArrayField(base_field=models.TextField(null=True), null=True)"),
+    ],
+)  # fmt: skip
+def test_builtin_rule_for_a_type_it_looks_into(field: str, expected: str) -> None:
+    assert ruled_line(FieldName(field), config({}, {})) == FileText(
+        f"{field} = {expected}"
+    )
+
+
+def test_a_django_choices_enum_and_the_array_field_are_imported() -> None:
+    text = render([Ruled], config({}, {})).root
+
+    assert "\nfrom django.contrib.postgres.fields import ArrayField\n" in text
+    assert f"\nfrom {Channel.__module__} import Channel\n" in text
+
+
+@pytest.mark.parametrize(
+    ("field", "overridden", "expected"),
+    [
+        # The rule for an annotated type wins over the rule for what it annotates.
+        ("budget", pydantic.PositiveInt, "models.CharField(max_length=254)"),
+        # An enum takes the rule for its values' type.
+        ("channel", str, "models.CharField(max_length=254, choices=Channel.choices)"),
+    ],
+)  # fmt: skip
+def test_the_catalog_overrides_the_rule_inside_a_type(
+    field: str, overridden: RuntimeAnnotation, expected: str
+) -> None:
+    models = config({overridden: char_field()}, {})
+
+    assert ruled_line(FieldName(field), models) == FileText(f"{field} = {expected}")
+
+
+def test_override_arguments_import_the_symbols_and_fields_they_name() -> None:
+    colour = Symbol(
+        module=ModulePath("app.choices"),
+        qualname=(Identifier("Colour"), Identifier("choices")),
+    )
+    fields = ModulePath("app.fields")
+    array = DjangoField(
+        field_class=Symbol(module=fields, qualname=(Identifier("ListField"),)),
+        arguments={
+            Identifier("base_field"): DjangoField(
+                field_class=Symbol(
+                    module=fields, qualname=(Identifier("ColourField"),)
+                ),
+                arguments={Identifier("choices"): colour},
+            ),
+            Identifier("size"): ValueExpression("3"),
+        },
+    )
+
+    text = render([Thing], config({tuple[Text, ...]: array}, {})).root
+
+    assert (
+        "\n\nfrom app.choices import Colour\n"
+        "from app.fields import ColourField, ListField\n"
+    ) in text
+    assert (
+        "    tags = ListField(base_field=ColourField(choices=Colour.choices), size=3)\n"
+    ) in text
+
+
+class Mixed(enum.Enum):
+    TEXT = "text"
+    NUMBER = 1
+
+
+def test_a_type_whose_values_have_no_one_rule_is_a_diagnostic() -> None:
+    class Unruled(pydantic.BaseModel):
+        id: ThingId
+        mixed: Mixed
+        literal: Literal["a", 1]
+        items: list[frozenset[Text]]
+
+    assert set(diagnostics([Unruled], config({}, {}))) == {
+        NoDjangoFieldRule(
+            entity=Unruled,
+            field=FieldName(field),
+            annotation=AnnotationText.of(Unruled.model_fields[field].annotation),
+        )
+        for field in ("mixed", "literal", "items")
+    }
+
+
+def test_a_django_choices_enum_that_cannot_be_imported_is_a_diagnostic() -> None:
+    class Local(django.db.models.TextChoices):
+        ONE = "one", "One"
+
+    class HasLocal(pydantic.BaseModel):
+        id: ThingId
+        local: Local
+
+    assert diagnostics([HasLocal], config({}, {})) == (
+        UnimportableDjangoChoices(
+            entity=HasLocal, field=FieldName("local"), choices=Local
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -628,7 +810,7 @@ def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None
         born: Moment
 
     graph = EntityGraph.build(
-        [Company, Department, Person], IdBase.fake(), OneToOneMarker.fake()
+        [Company, Department, Person, Ruled], IdBase.fake(), OneToOneMarker.fake()
     ).unwrap()
     files = GeneratedFiles.merged(
         [
@@ -645,7 +827,7 @@ def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None
         textwrap.dedent(
             f"""\
             SECRET_KEY = "test"
-            INSTALLED_APPS = ["app"]
+            INSTALLED_APPS = ["django.contrib.postgres", "app"]
             DATABASES = {{
                 "default": {{
                     "ENGINE": "django.db.backends.sqlite3",

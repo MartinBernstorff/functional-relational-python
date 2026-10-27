@@ -16,6 +16,7 @@ dev = [
     "lefthook>=2.2.2",
     "mypy>=2.4.0",
     "noprim>=0.4.0",
+    "psycopg[binary]>=3.3.6",
     "pyrefly>=1.4.0",
     "pytest>=9.1.1",
     "pytest-randomly>=5.0.0",
