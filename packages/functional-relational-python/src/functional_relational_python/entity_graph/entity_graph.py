@@ -41,6 +41,14 @@ type AnnotationMetadata = object
 """One of the objects after the type in `Annotated[X, ...]`, e.g. `OneToOne()`."""
 
 
+class SpecialForm(typing.Protocol):
+    """A special form such as `Literal` or `Annotated`, subscripted at run time. A
+    type checker takes only types written out in one, so it is subscripted as this
+    protocol."""
+
+    def __getitem__(self, parameters: object, /) -> RuntimeAnnotation: ...
+
+
 class Optionality(StrEnum):
     """Whether a value may be `None`.
 

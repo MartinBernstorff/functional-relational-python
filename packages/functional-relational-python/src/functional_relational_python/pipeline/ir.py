@@ -7,6 +7,7 @@ and the Value that computes it. Backends run the Relation, not the node tree.
 
 import copy
 import enum
+import typing
 from collections.abc import Callable, Collection, Iterable, Mapping
 from typing import Annotated
 
@@ -15,6 +16,7 @@ from pydantic.fields import FieldInfo
 from safe_result import Err, Ok
 
 from functional_relational_python.entity_graph.entity_graph import (
+    AnnotationMetadata,
     EntityGraph,
     EntityNode,
     FieldName,
@@ -22,6 +24,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     NotAReferenceError,
     Optionality,
     RuntimeAnnotation,
+    SpecialForm,
 )
 from functional_relational_python.entity_graph.id import IdType
 
@@ -654,9 +657,7 @@ class Field(pydantic.BaseModel, frozen=True):
     def retyped(self, annotation: RuntimeAnnotation) -> Field:
         """This field typed by `annotation`, keeping its default but not the old
         type's constraints."""
-        retyped = self._annotated(annotation)
-        object.__setattr__(retyped.info, "metadata", [])
-        return retyped
+        return self._annotated(annotation, ())
 
     def reference_source(self) -> tuple[FieldName, FieldInfo] | Field:
         """The subject's field this field's ID is read from, with that field's
@@ -680,20 +681,57 @@ class Field(pydantic.BaseModel, frozen=True):
     def narrowed(self, annotation: RuntimeAnnotation) -> Field:
         """This field typed by `annotation`, a narrower type than its own, keeping
         its default and its type's constraints, which still hold."""
-        return self._annotated(annotation)
+        return self._annotated(annotation, self.info.metadata)
+
+    def without_none(self) -> Field:
+        """This field typed without `None`, keeping its default, its type's
+        constraints, and those of an `Annotated` inside the `None`: a field typed
+        `PastAwareDatetime | None` is typed `PastAwareDatetime`.
+
+        Those constraints move to the field, where pydantic records the metadata
+        of a field typed `Annotated[X, ...]`.
+        """
+        split = Optionality.of_aliased_annotation(self.annotation())
+        match split.optionality:
+            case Optionality.REQUIRED:
+                return self
+            case Optionality.OPTIONAL:
+                return self._annotated(
+                    split.required, (*self.info.metadata, *split.metadata)
+                )
 
     def admitting_none(self) -> Field:
         """This field typed to admit `None` too, keeping its default and its
-        type's constraints."""
-        return self._annotated(Optionality.OPTIONAL.annotate(self.annotation()))
+        type's constraints.
 
-    def _annotated(self, annotation: RuntimeAnnotation) -> Field:
-        """This field typed by `annotation`, with a copy of its info."""
+        Unless its type admits `None` already, those constraints move inside the
+        `None`, where pydantic records those of `Annotated[X, ...] | None`, so that
+        they do not apply to `None`.
+        """
+        annotation = self.annotation()
+        if (
+            not self.info.metadata
+            or Optionality.of_aliased_annotation(annotation).optionality
+            is Optionality.OPTIONAL
+        ):
+            return self._annotated(
+                Optionality.OPTIONAL.annotate(annotation), self.info.metadata
+            )
+        annotated = typing.cast("SpecialForm", Annotated)[
+            (annotation, *self.info.metadata)
+        ]
+        return self._annotated(Optionality.OPTIONAL.annotate(annotated), ())
+
+    def _annotated(
+        self, annotation: RuntimeAnnotation, metadata: Iterable[AnnotationMetadata]
+    ) -> Field:
+        """This field typed by `annotation` with `metadata`, with a copy of its
+        info."""
         info = copy.copy(self.info)
         # `FieldInfo.annotation` is typed narrower than the annotations a Source
         # can have, e.g. `int | None`, so set it untyped.
         object.__setattr__(info, "annotation", annotation)
-        object.__setattr__(info, "metadata", list(self.info.metadata))
+        object.__setattr__(info, "metadata", list(metadata))
         return self.model_copy(update={"info": info})
 
     def optionality(self) -> Optionality:

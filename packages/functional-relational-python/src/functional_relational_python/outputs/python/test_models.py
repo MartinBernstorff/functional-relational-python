@@ -756,24 +756,26 @@ def valid_stamped() -> Stamped:
 @pytest.mark.parametrize(
     ("field", "invalid"),
     [
-        ("created_at", datetime.datetime(2000, 1, 1)),
-        ("created_at", datetime.datetime(3000, 1, 1, tzinfo=datetime.UTC)),
-        ("deleted_at", datetime.datetime(3000, 1, 1, tzinfo=datetime.UTC)),
-        ("budget", 0),
-        ("ratio", 2.0),
+        (FieldName("created_at"), datetime.datetime(2000, 1, 1)),
+        (FieldName("created_at"), datetime.datetime(3000, 1, 1, tzinfo=datetime.UTC)),
+        (FieldName("deleted_at"), datetime.datetime(3000, 1, 1, tzinfo=datetime.UTC)),
+        (FieldName("budget"), 0),
+        (FieldName("ratio"), 2.0),
     ],
     ids=["naive", "future", "optional-future", "not-positive", "out-of-range"],
 )
-def test_a_view_model_validates_as_its_source_does(field: str, invalid: object) -> None:
+def test_a_view_model_validates_as_its_source_does(
+    field: FieldName, invalid: object
+) -> None:
     module = types.ModuleType("app_views")
     exec(stamped_module().root, module.__dict__)
-    row = valid_stamped().model_dump() | {field: invalid}
+    row = valid_stamped().model_dump() | {field.root: invalid}
 
     with pytest.raises(pydantic.ValidationError):
         _ = Stamped.model_validate(row)
     with pytest.raises(pydantic.ValidationError) as raised:
         _ = module.StampedView.model_validate(row)
-    assert [error["loc"] for error in raised.value.errors()] == [(field,)]
+    assert [error["loc"] for error in raised.value.errors()] == [(field.root,)]
 
 
 def test_a_view_model_runs_its_sources_validators() -> None:

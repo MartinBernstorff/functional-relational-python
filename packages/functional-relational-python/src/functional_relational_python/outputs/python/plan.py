@@ -762,6 +762,14 @@ class UnionFunctionPlan(MappingFunctionPlan, frozen=True):
         }
 
 
+class UnwritableError(Exception):
+    """An object generated source cannot write as an expression, e.g. a `dict`."""
+
+    def __init__(self, value: MetadataValue) -> None:
+        self.value = value
+        super().__init__(f"{value!r} cannot be written as an expression")
+
+
 class _AnnotationRenderer:
     """Writes one field's annotation and default as source, collecting what they
     refer to.
@@ -801,11 +809,6 @@ class _AnnotationRenderer:
             return self._named(base)
         arguments = ", ".join(self.render(arg).root for arg in generic["args"])
         return TypeExpression(f"{self._named(origin).root}[{arguments}]")
-
-    def render_field(self, field: ir.Field) -> TypeExpression:
-        """The field's type, with the metadata pydantic moved from its type to the
-        field, e.g. of `PastAwareDatetime`, written back as `Annotated`."""
-        return self._annotated(field.annotation(), field.info.metadata)
 
     def render(self, annotation: ir.RuntimeAnnotation) -> TypeExpression:
         origin = typing.get_origin(annotation)
@@ -860,12 +863,18 @@ class _AnnotationRenderer:
             _AnnotationRenderer._writable_in_literal(arg) for arg in args
         ):
             self.symbols.add(_AnnotationRenderer.literal)
-            values = ", ".join(self._literal_value(arg).root for arg in args)
+            values: list[str] = []
+            for arg in args:
+                match self._value(arg):
+                    case Ok(value):
+                        values.append(value.root)
+                    case Err():
+                        return self._unsupported(annotation)
             return TypeExpression(
-                f"{_AnnotationRenderer.literal.reference().root}[{values}]"
+                f"{_AnnotationRenderer.literal.reference().root}[{', '.join(values)}]"
             )
         if origin is typing.Annotated:
-            return self._annotated(args[0], args[1:])
+            return self.render_annotated(args[0], args[1:])
         if origin is typing.Literal or not args:
             return self._unsupported(annotation)
         rendered = ", ".join(self.render(arg).root for arg in args)
@@ -884,103 +893,90 @@ class _AnnotationRenderer:
             case _:
                 return type(arg) in (str, int, bool)
 
-    def _annotated(
+    def render_annotated(
         self,
         annotated: ir.RuntimeAnnotation,
         metadata: Sequence[AnnotationMetadata],
     ) -> TypeExpression:
         """`Annotated[<annotated>, <metadata>...]`, so the generated model
-        validates as the annotated type does.
+        validates as the annotated type does. A field's type is rendered with the
+        metadata pydantic moved from it to the field, e.g. of `PastAwareDatetime`.
 
         A generated model is not an Entity, so it leaves the one-to-one marker out,
         as it does when the marker marks the whole field. Metadata the generator
-        cannot write is reported.
+        cannot write is reported, as is any problem with the annotated type.
         """
-        kept = [item for item in metadata if not self.one_to_one_marker.marks(item)]
-        unwritable = [
-            item for item in kept if not _AnnotationRenderer._writable_as_value(item)
-        ]
-        for item in unwritable:
-            self.diagnostics.append(
-                UnsupportedMetadata(
-                    view=self.view,
-                    field=self.field,
-                    metadata=AnnotationText(repr(item)),
-                )
-            )
-        if unwritable:
-            return TypeExpression(repr(annotated))
         rendered = self.render(annotated)
+        kept = [item for item in metadata if not self.one_to_one_marker.marks(item)]
         if not kept:
             return rendered
+        written: list[str] = []
+        for item in kept:
+            match self._value(item):
+                case Ok(value):
+                    written.append(value.root)
+                case Err(error):
+                    self.diagnostics.append(
+                        UnsupportedMetadata(
+                            view=self.view,
+                            field=self.field,
+                            metadata=AnnotationText(repr(error.value)),
+                        )
+                    )
         self.symbols.add(UnionPlan.annotated)
-        written = ", ".join(
-            [rendered.root, *(self._literal_value(item).root for item in kept)]
-        )
-        return TypeExpression(f"{UnionPlan.annotated.reference().root}[{written}]")
+        arguments = ", ".join([rendered.root, *written])
+        return TypeExpression(f"{UnionPlan.annotated.reference().root}[{arguments}]")
 
-    @staticmethod
-    def _writable_as_value(value: MetadataValue) -> bool:
-        """Whether `value` can be written as an expression: a string, a number, a
-        boolean or `None`; an enum member named by an identifier; a class,
-        function or `type` alias, by name; or a dataclass instance as a call of its
-        class with its fields, when each can be written and the call gives an equal
-        instance."""
+    def _value(self, value: MetadataValue) -> Result[ValueExpression, UnwritableError]:
+        """`value` as an expression: a string, a finite number, a boolean or
+        `None`; an enum member named by an identifier; a class, function or `type`
+        alias, by name; or a dataclass instance as a call of its class."""
         match value:
-            case enum.Enum():
-                return narrowing.nameable(value)
-            case type() | typing.TypeAliasType() | types.FunctionType():
-                return True
-            case float():
-                return math.isfinite(value)
-            case None:
-                return True
-            case _ if dataclasses.is_dataclass(value) and not isinstance(value, type):
-                fields = _AnnotationRenderer._dataclass_fields(value)
-                return (
-                    all(
-                        _AnnotationRenderer._writable_as_value(field)
-                        for field in fields.values()
-                    )
-                    and type(value)(
-                        **{name.root: field for name, field in fields.items()}
-                    )
-                    == value
+            case enum.Enum() if narrowing.nameable(value):
+                return Ok(
+                    ValueExpression.of_enum_member(self._named(type(value)), value)
                 )
+            case type() | typing.TypeAliasType() | types.FunctionType():
+                return Ok(ValueExpression(self._named(value).root))
+            case str() if type(value) is str:
+                return Ok(PythonString(value).literal())
+            case _ if dataclasses.is_dataclass(value) and not isinstance(value, type):
+                return self._dataclass_call(value)
+            case _ if (
+                value is None
+                or type(value) in (bool, int)
+                or (type(value) is float and math.isfinite(value))
+            ):
+                return Ok(ValueExpression(repr(value)))
             case _:
-                return type(value) in (str, int, bool)
+                return Err(UnwritableError(value))
 
-    @staticmethod
-    def _dataclass_fields(
-        instance: DataclassInstance,
-    ) -> Mapping[Identifier, MetadataValue]:
-        """The fields of `instance` its class's constructor takes, by name, but for
-        those at their default."""
-        return {
-            Identifier(field.name): getattr(instance, field.name)
+    def _dataclass_call(
+        self, instance: DataclassInstance
+    ) -> Result[ValueExpression, UnwritableError]:
+        """`instance` as a call of its class with the fields its constructor takes,
+        but for those at their default. That fails when a field cannot be written,
+        or the call would not give an equal instance."""
+        fields = {
+            field.name: getattr(instance, field.name)
             for field in dataclasses.fields(instance)
             if field.init and getattr(instance, field.name) != field.default
         }
-
-    def _literal_value(self, value: MetadataValue) -> ValueExpression:
-        """`value`, which `_writable_as_value` admits, as an expression."""
-        match value:
-            case enum.Enum():
-                return ValueExpression.of_enum_member(self._named(type(value)), value)
-            case type() | typing.TypeAliasType() | types.FunctionType():
-                return ValueExpression(self._named(value).root)
-            case str():
-                return PythonString(value).literal()
-            case _ if dataclasses.is_dataclass(value) and not isinstance(value, type):
-                arguments = ", ".join(
-                    f"{name.root}={self._literal_value(field).root}"
-                    for name, field in _AnnotationRenderer._dataclass_fields(
-                        value
-                    ).items()
-                )
-                return ValueExpression(f"{self._named(type(value)).root}({arguments})")
-            case _:
-                return ValueExpression(repr(value))
+        arguments: list[str] = []
+        for name, field in fields.items():
+            match self._value(field):
+                case Ok(written):
+                    arguments.append(f"{name}={written.root}")
+                case Err():
+                    return Err(UnwritableError(instance))
+        try:
+            rebuilt = type(instance)(**fields)
+        except TypeError, ValueError:
+            return Err(UnwritableError(instance))
+        if rebuilt != instance:
+            return Err(UnwritableError(instance))
+        called = self._named(type(instance)).root
+        return Ok(ValueExpression(f"{called}({', '.join(arguments)})"))
 
     def _named(self, annotation: ir.RuntimeAnnotation) -> TypeExpression:
         match Symbol.of(annotation):
@@ -1077,7 +1073,9 @@ class _ModelPlanner:
                 ):
                     rendered = Inherited()
                 case ir.Field():
-                    rendered = renderer.render_field(field)
+                    rendered = renderer.render_annotated(
+                        field.annotation(), field.info.metadata
+                    )
                 case ir.NestedField(value=found, relation=nested_relation):
                     self.used.use(found.lookups()[-1].target)
                     model = self.plan(
