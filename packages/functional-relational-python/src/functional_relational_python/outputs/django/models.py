@@ -9,6 +9,12 @@ referenced Entity's model, `<entity>_by_<foreign key>`, e.g.
 follow it backwards. A many-to-one Reference has no reverse accessor, so several
 never clash.
 
+An Entity's constraints, see `pipeline.constraints`, are in its model's
+`Meta.constraints`, with a check per numeric bound its fields' types set, e.g.
+`campaign_lifetime_budget_gt` for `lifetime_budget: PositiveInt`. A Condition is
+written with the semantics it has in `where`, see `conditions`; so a row violates
+a Check exactly where the Check is false in Python.
+
 Everything here is pure: it builds file contents and touches no filesystem, and
 it never imports Django. Migrations are the user's to make.
 """

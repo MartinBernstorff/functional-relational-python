@@ -72,7 +72,9 @@ type Checked = (
 class ConditionChecker(pydantic.BaseModel, frozen=True):
     """Checks a Condition against `relation`, the relation at its `where`.
 
-    Every defective term is reported, not only the first.
+    Every defective term is reported, not only the first. `view` is what the
+    Condition belongs to: a View's or Payload's `where`, or a constraint, whose
+    relation is its Entity's.
     """
 
     view: ConditionOwner
