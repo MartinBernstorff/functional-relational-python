@@ -765,8 +765,12 @@ def test_a_one_to_one_reference_can_be_the_primary_key_in_place_of_the_id() -> N
     assert (
         "class CompanyDetails(models.Model):\n"
         "    objects = CompanyDetailsManager()\n"
-        "    company = models.OneToOneField('Company', on_delete=models.PROTECT, "
-        "related_name='company_details_by_company', primary_key=True)\n"
+        "    company = models.OneToOneField(\n"
+        '        "Company",\n'
+        "        on_delete=models.PROTECT,\n"
+        '        related_name="company_details_by_company",\n'
+        "        primary_key=True,\n"
+        "    )\n"
         "    successor = "
     ) in text
 
