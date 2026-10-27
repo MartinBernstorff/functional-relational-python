@@ -62,6 +62,7 @@ from functional_relational_python.outputs.django import conditions
 from functional_relational_python.outputs.python.mappings import Expression, Indent
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
+    FirstParty,
     ImportBlock,
     ModulePath,
     PythonString,
@@ -1999,9 +2000,12 @@ class DjangoModelsRenderer:
 
     @staticmethod
     def render(
-        graph: EntityGraph, config: DjangoModels
+        graph: EntityGraph, config: DjangoModels, first_party: FirstParty
     ) -> Result[GeneratedFiles, DiagnosticsError[DjangoDiagnostic]]:
         """The module of Django models, or every diagnostic.
+
+        Its imports of `first_party` packages, and of the packages of the Django
+        models and queries modules, are first party.
 
         Models are in name order, and refer to each other by name, so the order of
         Entities does not matter.
@@ -2144,7 +2148,19 @@ class DjangoModelsRenderer:
                         text=DjangoModelsRenderer._module(
                             config.app_label,
                             planned,
-                            imports,
+                            ImportBlock(
+                                modules=frozenset(),
+                                symbols=imports
+                                | {
+                                    Symbol(
+                                        module=ModulePath("django.db"),
+                                        qualname=(DjangoModelsRenderer.models_import,),
+                                    )
+                                },
+                                first_party=first_party.with_generated(
+                                    (config.module, config.queries)
+                                ),
+                            ),
                             conditions.ConditionWriter(
                                 columns=DjangoModelsRenderer.columns(
                                     graph, config, types
@@ -2967,23 +2983,10 @@ class DjangoModelsRenderer:
     def _module(
         app_label: AppLabel,
         planned: list[_PlannedModel],
-        imports: frozenset[Symbol],
+        imports: ImportBlock,
         writer: conditions.ConditionWriter,
     ) -> FileText:
-        imported = (
-            ImportBlock(
-                modules=frozenset(),
-                symbols=imports
-                | {
-                    Symbol(
-                        module=ModulePath("django.db"),
-                        qualname=(DjangoModelsRenderer.models_import,),
-                    )
-                },
-            )
-            .text()
-            .root
-        )
+        imported = imports.text().root
         classes = "\n\n".join(
             model.statement(
                 app_label, DjangoModelsRenderer._constraints_option(writer, model)

@@ -18,6 +18,7 @@ from functional_relational_python.outputs.python.plan import (
     UnionPlan,
 )
 from functional_relational_python.outputs.python.symbols import (
+    FirstParty,
     ImportBlock,
     LineLength,
     ModulePath,
@@ -50,7 +51,7 @@ class ModelsRenderer:
     )
 
     @staticmethod
-    def files(plan: PythonPlan) -> tuple[GeneratedFile, ...]:
+    def files(plan: PythonPlan, first_party: FirstParty) -> tuple[GeneratedFile, ...]:
         """One file per module, in module order.
 
         `render.PythonRenderer` writes them together with the mapping functions.
@@ -66,6 +67,7 @@ class ModelsRenderer:
                         for model in view.with_nested()
                     ),
                     plan.unions.get(module, ()),
+                    first_party,
                 ),
             )
             for module in plan.model_modules()
@@ -76,6 +78,7 @@ class ModelsRenderer:
         module: ModulePath,
         models: Sequence[ModelPlan],
         unions: Sequence[UnionPlan],
+        first_party: FirstParty,
     ) -> FileText:
         """The classes of `models`, then the `type` statements of `unions`."""
         imports = (
@@ -89,6 +92,7 @@ class ModelsRenderer:
                     )
                     if symbol.module.root != "builtins" and symbol.module != module
                 ),
+                first_party=first_party,
             )
             .text()
             .root

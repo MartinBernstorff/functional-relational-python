@@ -4,11 +4,11 @@ import sys
 import pytest
 
 from functional_relational_python.outputs.python.symbols import (
+    FirstParty,
     ImportBlock,
     ImportSection,
     ImportText,
     ModulePath,
-    SitePackages,
     Symbol,
 )
 from functional_relational_python.support.filesystem import FileText
@@ -20,18 +20,29 @@ from functional_relational_python.support.identifier import Identifier
     [
         (ModulePath("collections.abc"), ImportSection.STANDARD_LIBRARY),
         (ModulePath("pydantic.types"), ImportSection.THIRD_PARTY),
-        (
-            ModulePath("functional_relational_python.outputs"),
-            ImportSection.FIRST_PARTY,
-        ),
         (ModulePath("app.views"), ImportSection.FIRST_PARTY),
     ],
-    ids=["standard-library", "installed", "project", "not-importable"],
+    ids=["standard-library", "unlisted", "listed"],
 )
-def test_a_module_is_in_the_section_of_where_it_is_installed(
+def test_a_module_is_first_party_when_its_package_is_listed(
     module: ModulePath, section: ImportSection
 ) -> None:
-    assert ImportSection.of(module, SitePackages.current()) == section
+    first_party = FirstParty(frozenset({ModulePath.fake().top_level()}))
+
+    assert first_party.section(module) == section
+
+
+def test_a_generated_modules_package_is_first_party() -> None:
+    generated = ModulePath("generated.views")
+
+    assert (
+        FirstParty(frozenset()).with_generated([generated]).section(generated)
+        == ImportSection.FIRST_PARTY
+    )
+
+
+def mixed_first_party() -> FirstParty:
+    return FirstParty(frozenset({Identifier("app"), Identifier("App2")}))
 
 
 def mixed_block() -> ImportBlock:
@@ -53,6 +64,7 @@ def mixed_block() -> ImportBlock:
             )
             for name in names
         ),
+        first_party=mixed_first_party(),
     )
 
 
@@ -82,6 +94,7 @@ def test_a_long_import_from_is_split_as_ruff_splits_it() -> None:
             Symbol(module=ModulePath.fake(), qualname=(Identifier(name),))
             for name in names
         ),
+        first_party=FirstParty.fake(),
     )
 
     assert block.text() == ImportText(
@@ -92,20 +105,19 @@ def test_a_long_import_from_is_split_as_ruff_splits_it() -> None:
 
 
 def test_an_import_block_is_as_ruff_sorts_it() -> None:
-    assert ruff_import_diff(mixed_block().text()) == FileText("")
+    assert ruff_import_diff(mixed_block().text(), mixed_first_party()) == FileText("")
 
 
 def test_an_empty_import_block_has_no_text() -> None:
-    assert ImportBlock(modules=frozenset(), symbols=frozenset()).text() == ImportText(
-        ""
-    )
+    assert ImportBlock(
+        modules=frozenset(), symbols=frozenset(), first_party=FirstParty.fake()
+    ).text() == ImportText("")
 
 
-def ruff_import_diff(text: FileText | ImportText) -> FileText:
-    """How ruff would sort the imports of `text`: empty when they are sorted
-    already. The packages generated source here imports from site-packages are
-    third party and the rest first party, which is how `ImportSection.of` has
-    them in this workspace."""
+def ruff_import_diff(text: FileText | ImportText, first_party: FirstParty) -> FileText:
+    """How ruff would sort the imports of `text`, with the packages of
+    `first_party` known to be first party: empty when they are sorted already."""
+    known = ", ".join(sorted(f'"{package.root}"' for package in first_party.root))
     result = subprocess.run(
         [
             sys.executable,
@@ -117,9 +129,7 @@ def ruff_import_diff(text: FileText | ImportText) -> FileText:
             "I",
             "--diff",
             "--config",
-            'lint.isort.default-section = "first-party"',
-            "--config",
-            'lint.isort.known-third-party = ["annotated_types", "django", "pydantic"]',
+            f"lint.isort.known-first-party = [{known}]",
             "--stdin-filename",
             "generated.py",
             "-",

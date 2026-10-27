@@ -2,15 +2,12 @@
 it imports, and annotations as source text."""
 
 import enum
-import importlib.util
 import keyword
 import re
-import site
 import sys
-import sysconfig
 import typing
 from collections.abc import Iterable
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Annotated
 
 import pydantic
@@ -214,25 +211,6 @@ class LineLength(pydantic.RootModel[int], frozen=True):
         return LineLength(88)
 
 
-class SitePackages(pydantic.RootModel[frozenset[Path]], frozen=True):
-    """The directories distributions are installed into."""
-
-    @staticmethod
-    def current() -> SitePackages:
-        """Those of the running interpreter."""
-        return SitePackages(
-            frozenset(
-                Path(directory).resolve()
-                for directory in (
-                    *site.getsitepackages(),
-                    site.getusersitepackages(),
-                    sysconfig.get_path("purelib"),
-                    sysconfig.get_path("platlib"),
-                )
-            )
-        )
-
-
 class ImportSection(enum.IntEnum):
     """A section of import statements, in the order ruff's isort rules put them."""
 
@@ -240,38 +218,33 @@ class ImportSection(enum.IntEnum):
     THIRD_PARTY = enum.auto()
     FIRST_PARTY = enum.auto()
 
-    @staticmethod
-    def of(module: ModulePath, installed: SitePackages) -> ImportSection:
-        """The standard library by name; third party when the module is installed
-        into site-packages; first party otherwise, i.e. the project's own modules,
-        including generated ones that do not exist yet.
 
-        ruff decides what is first party from its configuration and the project's
-        source directories, which frp does not read. This agrees with it where a
-        project marks the packages it develops, e.g. editable workspace members,
-        as first party.
-        """
-        top = module.top_level().root
-        if top in sys.stdlib_module_names:
+class FirstParty(pydantic.RootModel[frozenset[Identifier]], frozen=True):
+    """The top-level packages generated source imports as first party, like
+    ruff's `known-first-party`.
+
+    Configured rather than looked up where packages are installed, so generated
+    source is the same in every environment frp runs in.
+    """
+
+    @staticmethod
+    def fake() -> FirstParty:
+        """This library's package, where tests define their Entities."""
+        return FirstParty(frozenset({Identifier("functional_relational_python")}))
+
+    def with_generated(self, modules: Iterable[ModulePath]) -> FirstParty:
+        """These packages, and those of `modules`, which frp generates."""
+        return FirstParty(self.root | {module.top_level() for module in modules})
+
+    def section(self, module: ModulePath) -> ImportSection:
+        """The standard library by name, first party when its top-level package is
+        one of these, and third party otherwise."""
+        top = module.top_level()
+        if top.root in sys.stdlib_module_names:
             return ImportSection.STANDARD_LIBRARY
-        try:
-            spec = importlib.util.find_spec(top)
-        except ValueError:
-            # An imported module without a spec, e.g. `__main__`, is the project's.
+        if top in self.root:
             return ImportSection.FIRST_PARTY
-        if spec is None:
-            return ImportSection.FIRST_PARTY
-        locations = (
-            *((spec.origin,) if spec.origin is not None else ()),
-            *(spec.submodule_search_locations or ()),
-        )
-        if any(
-            Path(location).resolve().is_relative_to(directory)
-            for location in locations
-            for directory in installed.root
-        ):
-            return ImportSection.THIRD_PARTY
-        return ImportSection.FIRST_PARTY
+        return ImportSection.THIRD_PARTY
 
 
 class MemberKind(enum.IntEnum):
@@ -328,7 +301,7 @@ class ImportBlock(pydantic.BaseModel, frozen=True):
     settings writes them.
 
     They are in a section each for the standard library, third party and first
-    party (see `ImportSection.of`), with a blank line between sections. In a
+    party (see `FirstParty.section`), with a blank line between sections. In a
     section, `import` statements come before `from` statements, each in module
     order: by name ignoring case, then by name. A `from` statement's names are
     constants, then classes, then the rest, each in the same order.
@@ -338,12 +311,12 @@ class ImportBlock(pydantic.BaseModel, frozen=True):
     """Imported by `import <module>`."""
     symbols: frozenset[Symbol]
     """Imported by `from <module> import <name>`, by their bound names."""
+    first_party: FirstParty
 
     def text(self) -> ImportText:
         """The statements; empty without any."""
-        installed = SitePackages.current()
         sections = {
-            module: ImportSection.of(module, installed)
+            module: self.first_party.section(module)
             for module in (*self.modules, *(symbol.module for symbol in self.symbols))
         }
         names: dict[ModulePath, set[Identifier]] = {}

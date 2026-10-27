@@ -90,10 +90,20 @@ def test_find_stops_at_the_repository_root() -> None:
         (FileText('catalog = "a:class"\noutput_dir = "."\n'), InvalidConfigError),
         (FileText('catalog = "a:b"\n'), InvalidConfigError),
         (
-            FileText('catalog = "a:b"\noutput_dir = "."\nunknown = 1\n'),
+            FileText(
+                'catalog = "a:b"\noutput_dir = "."\nknown_first_party = []\n'
+                "unknown = 1\n"
+            ),
+            InvalidConfigError,
+        ),
+        (
+            FileText(
+                'catalog = "a:b"\noutput_dir = "."\nknown_first_party = ["a.b"]\n'
+            ),
             InvalidConfigError,
         ),
     ],
+    ids=["syntax", "no-colon", "keyword", "no-output-dir", "unknown", "dotted"],
 )
 def test_a_bad_config_is_an_error(
     text: FileText, error_type: type[ConfigLoadError]

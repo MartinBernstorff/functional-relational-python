@@ -32,7 +32,7 @@ from functional_relational_python.outputs.python.plan import (
     PythonPlan,
 )
 from functional_relational_python.outputs.python.render import PythonRenderer
-from functional_relational_python.outputs.python.symbols import ModulePath
+from functional_relational_python.outputs.python.symbols import FirstParty, ModulePath
 from functional_relational_python.pipeline import conditions, ir, steps
 from functional_relational_python.pipeline.payloads import (
     DefinitionName,
@@ -107,7 +107,7 @@ def generate(
         PythonLayout.models_only(layout),
     ):
         case Ok(plan):
-            return PythonRenderer.render(plan)
+            return PythonRenderer.render(plan, first_party=FirstParty.fake())
         case Err(error):
             pytest.fail(f"expected generated files, got {error}")
 
@@ -119,7 +119,10 @@ def test_a_model_module_imports_as_ruff_sorts_them() -> None:
         single_module(ModulePath.fake()),
     )
 
-    assert test_symbols.ruff_import_diff(files.files[0].text) == FileText("")
+    first_party = FirstParty.fake().with_generated([ModulePath.fake()])
+    assert test_symbols.ruff_import_diff(files.files[0].text, first_party) == FileText(
+        ""
+    )
 
 
 def test_golden_view_model() -> None:
@@ -703,7 +706,7 @@ def test_a_view_model_leaves_the_marker_out_wherever_it_marks_a_field(
         PythonLayout.models_only(single_module(ModulePath("app.views"))),
     ):
         case Ok(plan):
-            (file,) = PythonRenderer.render(plan).files
+            (file,) = PythonRenderer.render(plan, first_party=FirstParty.fake()).files
         case Err(error):
             pytest.fail(f"expected generated files, got {error}")
 

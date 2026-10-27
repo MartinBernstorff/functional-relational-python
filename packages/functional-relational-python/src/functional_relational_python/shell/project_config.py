@@ -12,6 +12,7 @@ from pathlib import PurePosixPath
 import pydantic
 from safe_result import Err, Ok, Result
 
+from functional_relational_python.outputs.python.symbols import FirstParty
 from functional_relational_python.shell.catalog import ImportPath
 from functional_relational_python.support.filesystem import (
     Directory,
@@ -20,6 +21,7 @@ from functional_relational_python.support.filesystem import (
     FileText,
     RelativePath,
 )
+from functional_relational_python.support.identifier import Identifier
 
 
 class OptionName(pydantic.RootModel[str], frozen=True):
@@ -49,13 +51,22 @@ class ProjectConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
         description="The directory View model modules are written under, relative "
         "to this file. A model in module 'a.b' is written to '<output_dir>/a/b.py'."
     )
+    known_first_party: tuple[Identifier, ...] = pydantic.Field(
+        description="The top-level packages generated modules import as first "
+        "party, as in ruff's `known-first-party`. The packages of generated modules "
+        "always are; any other but the standard library is third party."
+    )
 
     @staticmethod
     def default() -> ProjectConfig:
         return ProjectConfig(
             catalog=ImportPath("views:catalog"),
             output_dir=RelativePath(PurePosixPath(".")),
+            known_first_party=(),
         )
+
+    def first_party(self) -> FirstParty:
+        return FirstParty(frozenset(self.known_first_party))
 
     @staticmethod
     def options() -> tuple[Option, ...]:

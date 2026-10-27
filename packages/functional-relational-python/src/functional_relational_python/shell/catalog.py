@@ -24,7 +24,7 @@ from functional_relational_python.outputs.python.plan import (
     WithoutMappings,
 )
 from functional_relational_python.outputs.python.render import PythonRenderer
-from functional_relational_python.outputs.python.symbols import ModulePath
+from functional_relational_python.outputs.python.symbols import FirstParty, ModulePath
 from functional_relational_python.pipeline.payloads import Payload
 from functional_relational_python.pipeline.unions import Union
 from functional_relational_python.pipeline.views import View
@@ -90,9 +90,14 @@ class Catalog(pydantic.BaseModel, frozen=True):
     django: DjangoModels | WithoutDjangoModels
 
     def generate(
-        self,
+        self, first_party: FirstParty
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
-        """Every generated file, or every diagnostic of every output."""
+        """Every generated file, or every diagnostic of every output.
+
+        Generated imports of `first_party` packages, and of the packages frp
+        generates, are first party; all others but the standard library are
+        third party.
+        """
         match EntityGraph.build(self.entities, self.id_base, self.one_to_one_marker):
             case Err(graph_error):
                 return Err(graph_error)
@@ -100,7 +105,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
                 pass
         parts: list[GeneratedFiles] = []
         reported: list[Diagnostic] = []
-        for generated in self._outputs(graph):
+        for generated in self._outputs(graph, first_party):
             match generated:
                 case Ok(files):
                     parts.append(files)
@@ -118,7 +123,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
                 return Err(merge_error)
 
     def _outputs(
-        self, graph: EntityGraph
+        self, graph: EntityGraph, first_party: FirstParty
     ) -> list[Result[GeneratedFiles, DiagnosticsError[Diagnostic]]]:
         """Each output, with compiling and placing the models as outputs too.
 
@@ -126,7 +131,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
         even when compiling fails. The layout places every model once, for every
         output that refers to it.
         """
-        django_models = self._django_models(graph)
+        django_models = self._django_models(graph, first_party)
         match compiler.compile_catalog(graph, self.views, self.payloads, self.unions):
             case Err(compile_error):
                 return [Err(compile_error), django_models]
@@ -137,19 +142,22 @@ class Catalog(pydantic.BaseModel, frozen=True):
                 return [Err(layout_error), django_models]
             case Ok(placed):
                 return [
-                    self._python(compiled, placed),
+                    self._python(compiled, placed, first_party),
                     django_models,
-                    self._django_queries(graph, compiled, placed),
+                    self._django_queries(graph, compiled, placed, first_party),
                 ]
 
     def _python(
-        self, compiled: compiler.CompiledCatalog, placed: PlacedModels
+        self,
+        compiled: compiler.CompiledCatalog,
+        placed: PlacedModels,
+        first_party: FirstParty,
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
         match PythonPlan.of(compiled, self._python_layout(placed)):
             case Err(plan_error):
                 return Err(plan_error)
             case Ok(plan):
-                return Ok(PythonRenderer.render(plan))
+                return Ok(PythonRenderer.render(plan, first_party))
 
     def _python_layout(self, placed: PlacedModels) -> PythonLayout:
         match self.mappings:
@@ -159,14 +167,14 @@ class Catalog(pydantic.BaseModel, frozen=True):
                 return PythonLayout.mappings_into(placed.module_of, module)
 
     def _django_models(
-        self, graph: EntityGraph
+        self, graph: EntityGraph, first_party: FirstParty
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
         match self.django:
             case WithoutDjangoModels():
                 return Ok(GeneratedFiles(files=()))
             case DjangoModels() as django:
                 pass
-        match DjangoModelsRenderer.render(graph, django):
+        match DjangoModelsRenderer.render(graph, django, first_party):
             case Ok(files):
                 return Ok(files)
             case Err(error):
@@ -177,6 +185,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
         graph: EntityGraph,
         compiled: compiler.CompiledCatalog,
         placed: PlacedModels,
+        first_party: FirstParty,
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
         match self.django:
             case WithoutDjangoModels():
@@ -184,7 +193,11 @@ class Catalog(pydantic.BaseModel, frozen=True):
             case DjangoModels() as django:
                 pass
         match DjangoQueriesRenderer.render(
-            graph, django, compiled.views, placed, compiled.unions
+            graph,
+            django,
+            (*compiled.views, *compiled.unions),
+            placed,
+            first_party=first_party,
         ):
             case Ok(files):
                 return Ok(files)

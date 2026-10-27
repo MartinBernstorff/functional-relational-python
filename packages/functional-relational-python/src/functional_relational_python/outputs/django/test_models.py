@@ -101,6 +101,7 @@ from functional_relational_python.outputs.python import test_symbols
 from functional_relational_python.outputs.python.plan import PlacedModels
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
+    FirstParty,
     ModulePath,
     Symbol,
     ValueExpression,
@@ -245,6 +246,7 @@ def render(
     match DjangoModelsRenderer.render(
         EntityGraph.build(entities, IdBase.fake(), OneToOneMarker.fake()).unwrap(),
         models,
+        first_party=FirstParty.fake(),
     ):
         case Ok(files):
             (file,) = files.files
@@ -259,6 +261,7 @@ def diagnostics(
     match DjangoModelsRenderer.render(
         EntityGraph.build(entities, IdBase.fake(), OneToOneMarker.fake()).unwrap(),
         models,
+        first_party=FirstParty.fake(),
     ):
         case Ok(files):
             pytest.fail(f"expected diagnostics, got {files}")
@@ -931,7 +934,9 @@ def test_the_id_of_a_reference_keyed_model_is_held_by_the_reference_column() -> 
         [Company, UnruledDetails], IdBase.fake(), OneToOneMarker.fake()
     ).unwrap()
 
-    _ = DjangoModelsRenderer.render(graph, models).unwrap()
+    _ = DjangoModelsRenderer.render(
+        graph, models, first_party=FirstParty.fake()
+    ).unwrap()
     assert DjangoModelsRenderer.columns(graph, models, FieldTypes(overrides={})).of(
         UnruledDetails, FieldName("id")
     ) == DjangoColumn(
@@ -1144,7 +1149,9 @@ def test_the_module_is_written_where_the_catalog_names() -> None:
     graph = EntityGraph.build([Company], IdBase.fake(), OneToOneMarker.fake()).unwrap()
     models = config({}, {})
 
-    files = DjangoModelsRenderer.render(graph, models).unwrap()
+    files = DjangoModelsRenderer.render(
+        graph, models, first_party=FirstParty.fake()
+    ).unwrap()
 
     assert [file.path for file in files.files] == [models.module.file_path()]
     assert GeneratedFiles.is_generated(files.files[0].text)
@@ -1226,10 +1233,10 @@ def test_an_entity_with_an_existing_model_gets_none_and_is_imported() -> None:
         # Regenerate with `frp generate`; `frp check` fails when this is stale.
         # Migrations are yours to make, e.g. with `makemigrations`.
 
+        from crm.models import Company
         from django.db import models
 
         from app.queries import CompanyDetailsManager, DepartmentManager
-        from crm.models import Company
 
 
         class CompanyDetails(models.Model):
@@ -1347,7 +1354,7 @@ def test_reverse_accessors_of_an_existing_model_are_checked_as_declared(
         [Company, CompanyDetails], IdBase.fake(), OneToOneMarker.fake()
     ).unwrap()
 
-    match DjangoModelsRenderer.render(graph, models):
+    match DjangoModelsRenderer.render(graph, models, first_party=FirstParty.fake()):
         case Ok():
             reported: tuple[DjangoDiagnostic, ...] = ()
         case Err(error):
@@ -1425,9 +1432,15 @@ def test_generated_models_referencing_an_existing_model_make_migrations(
     ).unwrap()
     files = GeneratedFiles.merged(
         [
-            DjangoModelsRenderer.render(graph, models).unwrap(),
+            DjangoModelsRenderer.render(
+                graph, models, first_party=FirstParty.fake()
+            ).unwrap(),
             DjangoQueriesRenderer.render(
-                graph, models, (), PlacedModels(modules={})
+                graph,
+                models,
+                (),
+                PlacedModels(modules={}),
+                first_party=FirstParty.fake(),
             ).unwrap(),
         ]
     ).unwrap()
@@ -1656,10 +1669,16 @@ def test_generated_models_type_check_and_make_migrations(
     ).unwrap()
     files = GeneratedFiles.merged(
         [
-            DjangoModelsRenderer.render(graph, models).unwrap(),
+            DjangoModelsRenderer.render(
+                graph, models, first_party=FirstParty.fake()
+            ).unwrap(),
             # No Views, so only the QuerySets the models' managers use.
             DjangoQueriesRenderer.render(
-                graph, models, (), PlacedModels(modules={})
+                graph,
+                models,
+                (),
+                PlacedModels(modules={}),
+                first_party=FirstParty.fake(),
             ).unwrap(),
         ]
     ).unwrap()
@@ -2031,7 +2050,10 @@ def test_generated_models_are_as_ruff_formats_and_sorts_them(
     )
 
     assert [ruff_format_diff(text) for text in texts] == [FileText("")] * 3
-    assert [test_symbols.ruff_import_diff(text) for text in texts] == [FileText("")] * 3
+    first_party = FirstParty.fake().with_generated([models.module, models.queries])
+    assert [test_symbols.ruff_import_diff(text, first_party) for text in texts] == [
+        FileText("")
+    ] * 3
 
 
 def ruff_format_diff(text: FileText) -> FileText:

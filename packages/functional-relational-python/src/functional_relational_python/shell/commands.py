@@ -45,7 +45,7 @@ def _generated(
             return Err(load_error)
         case Ok(catalog):
             pass
-    match catalog.generate():
+    match catalog.generate(config_file.config.first_party()):
         case Err(generate_error):
             return Err(generate_error)
         case Ok(files):

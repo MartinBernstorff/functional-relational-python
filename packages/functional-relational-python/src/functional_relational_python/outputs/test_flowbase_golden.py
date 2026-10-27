@@ -53,7 +53,7 @@ from functional_relational_python.entity_graph.id import (
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.python.plan import PythonLayout, PythonPlan
 from functional_relational_python.outputs.python.render import PythonRenderer
-from functional_relational_python.outputs.python.symbols import ModulePath
+from functional_relational_python.outputs.python.symbols import FirstParty, ModulePath
 from functional_relational_python.pipeline import conditions, ir, steps
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.unions import Union, UnionName
@@ -256,7 +256,7 @@ def test_golden_flowbase_view_models() -> None:
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
     ):
         case Ok(plan):
-            (file,) = PythonRenderer.render(plan).files
+            (file,) = PythonRenderer.render(plan, first_party=FirstParty.fake()).files
         case Err(error):
             pytest.fail(f"expected View models, got {error}")
 
@@ -420,7 +420,7 @@ def test_golden_flowbase_campaign_view_model() -> None:
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
     ):
         case Ok(plan):
-            (file,) = PythonRenderer.render(plan).files
+            (file,) = PythonRenderer.render(plan, first_party=FirstParty.fake()).files
         case Err(error):
             pytest.fail(f"expected View models, got {error}")
 
@@ -719,7 +719,7 @@ def test_golden_flowbase_meta_campaign_union_models() -> None:
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
     ):
         case Ok(plan):
-            (file,) = PythonRenderer.render(plan).files
+            (file,) = PythonRenderer.render(plan, first_party=FirstParty.fake()).files
         case Err(error):
             pytest.fail(f"expected Union models, got {error}")
 
@@ -979,7 +979,7 @@ def update_meta_campaign_payload_module() -> FileText:
         PythonLayout.models_only(lambda _: ModulePath("flowbase.payloads")),
     ):
         case Ok(plan):
-            (file,) = PythonRenderer.render(plan).files
+            (file,) = PythonRenderer.render(plan, first_party=FirstParty.fake()).files
             return file.text
         case Err(error):
             pytest.fail(f"expected a Payload Union model, got {error}")
