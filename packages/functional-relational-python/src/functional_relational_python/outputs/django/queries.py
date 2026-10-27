@@ -12,7 +12,9 @@ up, and annotates each row with the name of the first Variant that keeps it;
 QuerySet with a method `as_<view>()` per View and Union over the Entity, and a
 Manager, which is the Entity's Django model's manager `objects`. The method yields
 View models from the QuerySet as filtered, ordered and sliced so far, so a list
-costs one query.
+costs one query. An Entity whose Django model the application already has, see
+`ExistingDjangoModel`, gets no QuerySet or Manager, since its model's manager is
+its own; its Views and Unions still get their two functions.
 
 The View's Filters apply before a slice the QuerySet has taken: `[:10]` gives the
 first ten rows the View keeps, not those of the first ten rows it keeps. A Filter
@@ -35,13 +37,16 @@ The Manager overrides the Manager methods that return a QuerySet (`all`, `filter
 A row is validated non-strictly, so a View model with a strict base accepts what
 Django returns, e.g. a `str` for an enum field. A field typed by a `Literal` of
 enum members, e.g. one a Filter narrows, is read through its enum, since pydantic
-does not take a member's value for a `Literal` of a plain `enum.Enum`. A field the
-View requires that is `None` fails that validation with a
-`pydantic.ValidationError` naming the View model and the field. An Entity the View
-requires that the row does not have raises `ValueError` through the function
-`_required` the module defines, as in a module of mapping functions: a field read
-through it may be optional, so validation alone would not catch it. Both are a
-`ValueError`.
+does not take a member's value for a `Literal` of a plain `enum.Enum`. A field
+lifted out of an Entity that declares it as a required RootModel whose column
+may be NULL, e.g. `Rank(RootModel[int | None])`, is validated as that RootModel,
+so a NULL of an Entity found is `Rank(None)`, not the `None` of no Entity found.
+A field the View requires that is `None` fails that validation with a
+`pydantic.ValidationError` naming the View model and the field. An Entity the
+View requires that the row does not have raises `ValueError` through the
+function `_required` the module defines, as in a module of mapping functions: a
+field read through it may be optional, so validation alone would not catch it.
+Both are a `ValueError`.
 
 A one-to-one Reference is followed backwards through the reverse accessor the
 Django models give it. Django raises for a reverse accessor that found no row, so
@@ -62,6 +67,7 @@ import typing
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 import pydantic
+from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler, narrowing
@@ -223,14 +229,17 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
     def names(self) -> QueryNames:
         return QueryNames(function=self.view.names.function)
 
-    def related_paths(self) -> tuple[RelatedPath, ...]:
+    def related_paths(self, config: DjangoModels) -> tuple[RelatedPath, ...]:
         """Every chain of relations to the Entities the View looks up, in the
         order they are first looked up."""
         return tuple(
             dict.fromkeys(
                 RelatedPath.of(path)
                 for path in ViewQueries._paths(
-                    self.view.relation, _Trail.start(self.view.source), ((),)
+                    self.view.relation,
+                    _Trail.start(self.view.source),
+                    ((),),
+                    config,
                 )
             )
         )
@@ -240,6 +249,7 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
         relation: ir.Relation,
         trail: _Trail,
         paths: tuple[tuple[FieldName, ...], ...],
+        config: DjangoModels,
     ) -> Iterator[tuple[FieldName, ...]]:
         """`trail` is the way to the subject of `relation`, and `paths` the chain
         of relations to each Entity on it, the subject's last. A Hop back needs
@@ -250,7 +260,10 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
                 hop, at = at.hop(lookup)
                 match hop:
                     case _Follow():
-                        path = (*here[-1], DjangoQueriesRenderer.related(lookup))
+                        path = (
+                            *here[-1],
+                            DjangoQueriesRenderer.related(lookup, config),
+                        )
                         yield path
                         here = (*here, path)
                     case _Back():
@@ -259,7 +272,7 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
                 case ir.Field():
                     pass
                 case ir.NestedField(relation=nested):
-                    yield from ViewQueries._paths(nested, at, here)
+                    yield from ViewQueries._paths(nested, at, here, config)
 
 
 class UnionQueries(pydantic.BaseModel, frozen=True):
@@ -302,10 +315,12 @@ class UnionQueries(pydantic.BaseModel, frozen=True):
     def names(self) -> QueryNames:
         return QueryNames(function=self.union.names.function)
 
-    def related_paths(self) -> tuple[RelatedPath, ...]:
+    def related_paths(self, config: DjangoModels) -> tuple[RelatedPath, ...]:
         """Every Variant's chains of relations, each once, in Variant order."""
         return tuple(
-            dict.fromkeys(path for leaf in self.leaves for path in leaf.related_paths())
+            dict.fromkeys(
+                path for leaf in self.leaves for path in leaf.related_paths(config)
+            )
         )
 
 
@@ -419,12 +434,14 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     config: DjangoModels
     queries: tuple[ViewQueries, ...]
     unions: tuple[UnionQueries, ...]
-    enums: Mapping[type[enum.Enum], Symbol]
-    """Every enum the code refers to: of a Filter's literal, or of a field typed
-    by a `Literal` of its members."""
+    classes: Mapping[type, Symbol]
+    """Every class the code refers to: the enum of a Filter's literal, and every
+    class a field is read through."""
+    writer: conditions.ConditionWriter
+    """Writes the Filters of every View, once for all of them."""
 
     @staticmethod
-    def related(lookup: ir.EntityLookup) -> FieldName:
+    def related(lookup: ir.EntityLookup, config: DjangoModels) -> FieldName:
         """The relation `select_related` follows for `lookup`: the foreign key of
         its Reference, or for a ReverseLookup that Reference's reverse
         accessor."""
@@ -432,7 +449,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             case ir.Lookup():
                 return DjangoModelsRenderer.foreign_key_name(lookup.reference.field)
             case ir.ReverseLookup():
-                return DjangoModelsRenderer.reverse_accessor(lookup.target, lookup.via)
+                return config.reverse_accessor_of(lookup.target, lookup.via)
 
     @staticmethod
     def render(
@@ -456,18 +473,22 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             for view in views
             if view.source in graph.entities
         )
-        enums: dict[type[enum.Enum], Symbol] = {}
+        classes: dict[type, Symbol] = {}
         unimportable: list[DjangoQueriesDiagnostic] = []
         for query in queries:
-            for used in dict.fromkeys(_EnumsUsed.by(query.view)):
+            for used, field in dict.fromkeys(
+                _ClassesUsed.by(
+                    query.view, graph, FieldTypes(overrides=config.field_types)
+                )
+            ):
                 match Symbol.of(used):
                     case Ok(symbol):
-                        enums[used] = symbol
+                        classes[used] = symbol
                     case Err():
                         unimportable.append(
                             Unimportable(
                                 view=query.view.name,
-                                field=None,
+                                field=field,
                                 annotation=AnnotationText.of(used),
                             )
                         )
@@ -480,9 +501,23 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                 for union in unions
                 if union.source in graph.entities
             ),
-            enums=enums,
+            classes=classes,
+            writer=conditions.ConditionWriter(
+                columns=DjangoModelsRenderer.columns(
+                    graph, FieldTypes(overrides=config.field_types)
+                ),
+                models=Expression(DjangoQueriesRenderer.django_models.root),
+                enums={
+                    used: symbol.qualified()
+                    for used, symbol in classes.items()
+                    if issubclass(used, enum.Enum)
+                },
+            ),
         )
-        entities = sorted(graph.entities, key=lambda entity: entity.__name__)
+        entities = sorted(
+            (entity for entity in graph.entities if config.generates(entity)),
+            key=lambda entity: entity.__name__,
+        )
         return DiagnosticsError.or_ok(
             (
                 *DjangoQueriesRenderer._modules(config, (*views, *unions), placed),
@@ -527,7 +562,21 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             DjangoQueriesRenderer.expressions,
             *((DjangoQueriesRenderer.iterator_module,) if self._read() else ()),
             *(query.model.module for query in self._read()),
-            *(symbol.module for symbol in self.enums.values()),
+            *(symbol.module for symbol in self.classes.values()),
+        )
+
+    def _django_model_modules(self) -> tuple[ModulePath, ...]:
+        """The modules of the Django models, generated and existing, imported only
+        for type checking."""
+        return ModulePath.ordered(
+            (
+                self.config.module,
+                *(
+                    existing.module
+                    for entity, existing in self.config.existing.items()
+                    if entity in self.graph.entities
+                ),
+            )
         )
 
     def _clashes(
@@ -561,7 +610,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                         f"{entity.__qualname__})"
                     ),
                 )
-        for imported in (*self._imports(), self.config.module):
+        for imported in (*self._imports(), *self._django_model_modules()):
             module.refer_to_module(imported)
         module.refer(
             DjangoQueriesRenderer.map_builtin, AnnotationText("the built-in map")
@@ -606,7 +655,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     def _local_clashes(self, query: ReadQueries) -> Iterator[NameClash]:
         """Names the functions of `query` bind that shadow a module they refer
         to."""
-        enum_modules = tuple(symbol.module for symbol in self.enums.values())
+        class_modules = tuple(symbol.module for symbol in self.classes.values())
         row = Namespace(
             Scope(
                 f"{self.config.queries.root}.{query.names().from_row_function().root}"
@@ -616,7 +665,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             DjangoQueriesRenderer.row_parameter,
             AnnotationText(f"the parameter for {query.source.describe().root}"),
         )
-        for module in (query.model.module, *enum_modules):
+        for module in (query.model.module, *class_modules):
             row.refer_to_module(module)
         yield from row.clashes()
         queryset = Namespace(
@@ -634,7 +683,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             DjangoQueriesRenderer.kept_variable,
             AnnotationText("the variable holding the QuerySet of kept rows"),
         )
-        for module in (DjangoQueriesRenderer.django_models, *enum_modules):
+        for module in (DjangoQueriesRenderer.django_models, *class_modules):
             queryset.refer_to_module(module)
         yield from queryset.clashes()
 
@@ -647,9 +696,14 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             "".join(f"import {module.root}\n" for module in section)
             for section in ModulePath.import_sections(self._imports())
         )
-        type_checking = (
-            f"\nif {DjangoQueriesRenderer.typing_module.root}.TYPE_CHECKING:\n"
-            f"    import {self.config.module.root}\n"
+        type_checking = "".join(
+            (
+                f"\nif {DjangoQueriesRenderer.typing_module.root}.TYPE_CHECKING:\n",
+                *(
+                    f"    import {module.root}\n"
+                    for module in self._django_model_modules()
+                ),
+            )
         )
         functions = "".join(
             f"\n\n{self._queryset_function(query).root}"
@@ -684,12 +738,11 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             f'[{query.source.qualified().root}]"'
         )
 
-    @staticmethod
-    def _prepared(query: ReadQueries) -> Expression:
+    def _prepared(self, query: ReadQueries) -> Expression:
         """The QuerySet loading every field and every Entity `query` reads, at the
         indentation of a function body."""
         prepared = f"{DjangoQueriesRenderer.queryset_parameter.root}.defer(None)"
-        paths = query.related_paths()
+        paths = query.related_paths(self.config)
         if not paths:
             return Expression(prepared)
         return Indent(4).exploded(
@@ -708,9 +761,9 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         )
 
     def _queryset_function(self, query: ViewQueries) -> FileText:
-        prepared = DjangoQueriesRenderer._prepared(query)
+        prepared = self._prepared(query)
         signature = DjangoQueriesRenderer._queryset_signature(query).root
-        writer = self._conditions()
+        writer = self.writer
         match DjangoQueriesRenderer._kept_by(writer, query.view):
             case _KeepsEvery():
                 return FileText(f"{signature}    return {prepared.root}\n")
@@ -735,15 +788,6 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         )
         return FileText(f"    {added.root}\n")
 
-    def _conditions(self) -> conditions.ConditionWriter:
-        return conditions.ConditionWriter(
-            columns=DjangoModelsRenderer.columns(
-                self.graph, FieldTypes(overrides=self.config.field_types)
-            ),
-            models=Expression(DjangoQueriesRenderer.django_models.root),
-            enums={used: symbol.qualified() for used, symbol in self.enums.items()},
-        )
-
     @staticmethod
     def _kept_by(
         writer: conditions.ConditionWriter, view: compiler.CompiledView
@@ -764,7 +808,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         Variant may keep every row, the compiler checks, so it is the default."""
         kept = DjangoQueriesRenderer.kept_variable.root
         models = DjangoQueriesRenderer.django_models.root
-        writer = self._conditions()
+        writer = self.writer
         cases: list[Expression] = []
         default: list[Expression] = []
         for leaf in union.leaves:
@@ -818,7 +862,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         )
         return FileText(
             f"{DjangoQueriesRenderer._queryset_signature(union).root}"
-            f"    {kept} = {DjangoQueriesRenderer._prepared(union).root}\n"
+            f"    {kept} = {self._prepared(union).root}\n"
             f"    {kept} = {annotated.root}\n"
             f"{added}"
             f"    return {kept}\n"
@@ -838,7 +882,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         row = Expression(DjangoQueriesRenderer.row_parameter.root)
         model = query.model.qualified().root
         reader = _RowReader(
-            graph=self.graph, config=self.config, enums=self.enums, indent=Indent(8)
+            graph=self.graph, config=self.config, classes=self.classes, indent=Indent(8)
         )
         start = _Reached.start(query.view.source, row)
         read = reader.fields(query.view.relation, start)
@@ -1030,36 +1074,45 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         return FileText(f"{statement.root}{'\n'.join(methods)}")
 
 
-class _EnumsUsed:
-    """The enums a View's query code refers to."""
+class _ClassesUsed:
+    """The classes a View's query code refers to, each with the field read
+    through it, or `None` for the enum of a Filter's literal."""
 
     @staticmethod
-    def by(view: compiler.CompiledView) -> Iterator[type[enum.Enum]]:
-        """Of every Filter's enum literals, and of every field typed by a `Literal`
-        of enum members, nested ones included."""
+    def by(
+        view: compiler.CompiledView, graph: EntityGraph, field_types: FieldTypes
+    ) -> Iterator[tuple[type, FieldName | None]]:
+        """The enum of every Filter's enum literal, and the class every field is
+        read through, nested ones included."""
         for kept in view.relation.filters:
-            yield from conditions.ConditionWriter.enums_in(kept)
-        yield from _EnumsUsed._in_relation(view.relation)
+            for enum_class in conditions.ConditionWriter.enums_in(kept):
+                yield enum_class, None
+        yield from _ClassesUsed._in_relation(view.relation, graph, field_types)
 
     @staticmethod
-    def _in_relation(relation: ir.Relation) -> Iterator[type[enum.Enum]]:
+    def _in_relation(
+        relation: ir.Relation, graph: EntityGraph, field_types: FieldTypes
+    ) -> Iterator[tuple[type, FieldName]]:
         for field in relation.fields:
             match field:
                 case ir.NestedField(relation=nested):
-                    yield from _EnumsUsed._in_relation(nested)
+                    yield from _ClassesUsed._in_relation(nested, graph, field_types)
                 case ir.Field():
-                    match _LiteralEnum.of(field):
-                        case _LiteralEnum(enum_class=enum_class):
-                            yield enum_class
-                        case _NotALiteralEnum():
+                    match _ReadThrough.of(field, graph, field_types):
+                        case (
+                            _ThroughEnum(enum_class=through)
+                            | _ThroughRootModel(root_model=through)
+                        ):
+                            yield through, field.name
+                        case _ReadAsStored():
                             pass
 
 
-class _NotALiteralEnum(pydantic.BaseModel, frozen=True):
+class _ReadAsStored(pydantic.BaseModel, frozen=True):
     """A field read as Django returns it."""
 
 
-class _LiteralEnum(pydantic.BaseModel, frozen=True):
+class _ThroughEnum(pydantic.BaseModel, frozen=True):
     """A field read from one of the subject's own fields, typed by a `Literal` of
     members of `enum_class`, e.g. one a Filter narrows to `Literal[Role.LEAD]`.
 
@@ -1070,25 +1123,70 @@ class _LiteralEnum(pydantic.BaseModel, frozen=True):
 
     enum_class: type[enum.Enum]
 
+
+class _ThroughRootModel(pydantic.BaseModel, frozen=True):
+    """A field lifted out of an Entity that declares it as `root_model`, required,
+    whose column may still be NULL because a type it wraps admits `None`, e.g.
+    `Rank(RootModel[int | None])`.
+
+    Lifted through an optional Lookup, the field is `Rank | None`, which pydantic
+    validates a NULL as `None`, not as the `Rank(None)` the Entity holds, so the
+    value Django returns is validated as `root_model` first, non-strictly like
+    the row.
+    """
+
+    root_model: type[pydantic.BaseModel]
+
+
+class _ReadThrough:
+    """How the value Django returns for a field is read."""
+
     @staticmethod
-    def of(field: ir.Field) -> _LiteralEnum | _NotALiteralEnum:
+    def of(
+        field: ir.Field, graph: EntityGraph, field_types: FieldTypes
+    ) -> _ThroughEnum | _ThroughRootModel | _ReadAsStored:
         match field.value:
             case ir.SourceField() | ir.RequiredField():
-                pass
-            case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
-                return _NotALiteralEnum()
-            case ir.Lifted() | ir.Added():
-                return _NotALiteralEnum()
-        split = narrowing.split(field.annotation())
+                return _ReadThrough._literal_enum(field.annotation())
+            case ir.Lifted() as lifted:
+                return _ReadThrough._wrapping_none(lifted, graph, field_types)
+            case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() | ir.Added():
+                return _ReadAsStored()
+
+    @staticmethod
+    def _literal_enum(
+        annotation: ir.RuntimeAnnotation,
+    ) -> _ThroughEnum | _ReadAsStored:
+        split = narrowing.split(annotation)
         members = typing.get_args(split.required)
         classes = {type(member) for member in members}
         match split.optionality, typing.get_origin(split.required), tuple(classes):
             case Optionality.REQUIRED, typing.Literal, (enum_class,) if issubclass(
                 enum_class, enum.Enum
             ):
-                return _LiteralEnum(enum_class=enum_class)
+                return _ThroughEnum(enum_class=enum_class)
             case _:
-                return _NotALiteralEnum()
+                return _ReadAsStored()
+
+    @staticmethod
+    def _wrapping_none(
+        lifted: ir.Lifted, graph: EntityGraph, field_types: FieldTypes
+    ) -> _ThroughRootModel | _ReadAsStored:
+        match lifted.declared():
+            case FieldInfo(annotation=annotation):
+                split = narrowing.split(annotation)
+            case ir.Undeclared():
+                return _ReadAsStored()
+        column = DjangoModelsRenderer.column_optionality(
+            graph.entities[lifted.through[-1].target], lifted.field.field, field_types
+        )
+        match split.optionality, column, split.required:
+            case Optionality.REQUIRED, Optionality.OPTIONAL, type() as root_model if (
+                issubclass(root_model, pydantic.RootModel)
+            ):
+                return _ThroughRootModel(root_model=root_model)
+            case _:
+                return _ReadAsStored()
 
 
 class _KeepsEvery(pydantic.BaseModel, frozen=True):
@@ -1105,7 +1203,7 @@ class _RowReader(pydantic.BaseModel, frozen=True):
 
     graph: EntityGraph
     config: DjangoModels
-    enums: Mapping[type[enum.Enum], Symbol]
+    classes: Mapping[type, Symbol]
     indent: Indent
 
     def fields(self, relation: ir.Relation, reached: _Reached) -> Expression:
@@ -1155,20 +1253,17 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                     lambda indent: self.at(indent).fields(nested, followed.reached),
                 )
             case ir.Field(value=value):
-                pass
+                field_types = FieldTypes(overrides=self.config.field_types)
+                read_as = _ReadThrough.of(field, self.graph, field_types)
         row = reached.row()
         match value:
             case ir.SourceField() | ir.RequiredField():
                 # A required field that is `None` fails the View model's validation.
                 node = self.graph.entities[reached.trail.subject]
                 attribute = DjangoModelsRenderer.attribute_of(node, value.field)
-                read = Expression(f"{row.root}.{attribute.root}")
-                match _LiteralEnum.of(field):
-                    case _LiteralEnum(enum_class=enum_class):
-                        through = self.enums[enum_class].qualified().root
-                        return Expression(f"{through}({read.root})")
-                    case _NotALiteralEnum():
-                        return read
+                return self._through(
+                    read_as, Expression(f"{row.root}.{attribute.root}")
+                )
             case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
                 followed = self._followed(value.lookups(), reached)
                 return self.indent.looked_up(
@@ -1182,10 +1277,32 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                 followed = self._followed(through, reached)
                 node = self.graph.entities[through[-1].target]
                 attribute = DjangoModelsRenderer.attribute_of(node, read_field.field)
-                lifted = Expression(f"{followed.reached.row().root}.{attribute.root}")
+                lifted = self._through(
+                    read_as,
+                    Expression(f"{followed.reached.row().root}.{attribute.root}"),
+                )
                 return self.indent.looked_up(prefix, followed.absent, lambda _: lifted)
             case ir.Added():
                 return LeftOut()
+
+    def _through(
+        self,
+        through: _ThroughEnum | _ThroughRootModel | _ReadAsStored,
+        read: Expression,
+    ) -> Expression:
+        """`read`, a value Django returns, read as `through` says."""
+        match through:
+            case _ThroughEnum(enum_class=enum_class):
+                return Expression(
+                    f"{self.classes[enum_class].qualified().root}({read.root})"
+                )
+            case _ThroughRootModel(root_model=root_model):
+                validated = (
+                    f"{self.classes[root_model].qualified().root}.model_validate"
+                )
+                return Expression(f"{validated}({read.root}, strict=False)")
+            case _ReadAsStored():
+                return read
 
     def _followed(
         self, lookups: Iterable[ir.EntityLookup], reached: _Reached
@@ -1233,7 +1350,7 @@ class _RowReader(pydantic.BaseModel, frozen=True):
     def _found(self, lookup: ir.EntityLookup, row: Expression) -> Expression:
         """The row `lookup` finds from `row`: through `_required` if the View
         requires it."""
-        related = DjangoQueriesRenderer.related(lookup).root
+        related = DjangoQueriesRenderer.related(lookup, self.config).root
         name = PythonString(related).literal()
         cast = DjangoQueriesRenderer.typing_module.root
         model = self.config.model_of(lookup.target).qualified().root
@@ -1259,11 +1376,10 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                     f'{cast}.cast("{model}", getattr({row.root}, {name.root}))'
                 )
 
-    @staticmethod
-    def _absent(lookup: ir.EntityLookup, row: Expression) -> Expression:
+    def _absent(self, lookup: ir.EntityLookup, row: Expression) -> Expression:
         """The condition under which an optional `lookup` finds no row from
         `row`."""
-        name = DjangoQueriesRenderer.related(lookup).root
+        name = DjangoQueriesRenderer.related(lookup, self.config).root
         match lookup:
             case ir.Lookup():
                 return Expression(f"{row.root}.{name} is None")

@@ -14,6 +14,9 @@ An Entity's constraints, see `pipeline.constraints`, are in its model's
 `campaign_lifetime_budget_gt` for `lifetime_budget: PositiveInt`. A Condition is
 written with the semantics it has in `where`, see `conditions`; so a row violates
 a Check exactly where the Check is false in Python.
+An Entity the application already has a Django model for, e.g. a hand-written
+`Company`, gets none: a Reference to it is a foreign key to that model, which
+the module imports. See `ExistingDjangoModel`.
 
 Everything here is pure: it builds file contents and touches no filesystem, and
 it never imports Django. Migrations are the user's to make.
@@ -38,6 +41,7 @@ from functional_relational_python.compiler import (
     model_names,
 )
 from functional_relational_python.entity_graph.entity_graph import (
+    AnnotationMetadata,
     Cardinality,
     EntityGraph,
     EntityNode,
@@ -124,6 +128,31 @@ class DjangoField(pydantic.BaseModel, frozen=True):
             case _:
                 return False
 
+    numeric: typing.ClassVar[frozenset[Identifier]] = frozenset(
+        map(
+            Identifier,
+            (
+                "BigIntegerField",
+                "IntegerField",
+                "SmallIntegerField",
+                "PositiveBigIntegerField",
+                "PositiveIntegerField",
+                "PositiveSmallIntegerField",
+                "FloatField",
+                "DecimalField",
+            ),
+        )
+    )
+
+    def is_numeric(self) -> bool:
+        """Whether this is one of Django's non-auto-incrementing numeric fields,
+        whose column compares with a number."""
+        match self.field_class.qualname:
+            case (name,) if self.is_builtin():
+                return name in DjangoField.numeric
+            case _:
+                return False
+
     def reference(self) -> TypeExpression:
         """The field class, where the generated module refers to it."""
         if self.is_builtin():
@@ -165,6 +194,40 @@ class AppLabel(pydantic.RootModel[str], frozen=True):
         return AppLabel("app")
 
 
+class ExistingDjangoModel(pydantic.BaseModel, frozen=True):
+    """A Django model the application already has for an Entity: the class `name`
+    in `module`, e.g. flowbase's `DjangoCompany` in `djank.models.company`.
+
+    frp generates no model for the Entity. The generated models import this one,
+    and their foreign keys point to the class, so that type checkers see the
+    foreign key's ID attribute. `module` must therefore not import the generated
+    models while it is being imported. Django queries import it only when type
+    checking.
+
+    The model holds each field of the Entity under the attribute a generated
+    model would, so that a query reads it: a field under its name, and a
+    Reference `x_id` as the foreign key `x`. Its manager is its own.
+    `reverse_accessors` is the `related_name` its model gives each one-to-one
+    Reference of the Entity, e.g. `meta_detail` for `channel_campaign_id`, which a
+    query follows backwards. frp checks none of this against the model.
+    """
+
+    module: ModulePath
+    name: Identifier
+    reverse_accessors: Mapping[FieldName, FieldName]
+
+    @staticmethod
+    def fake() -> ExistingDjangoModel:
+        return ExistingDjangoModel(
+            module=ModulePath("crm.models"),
+            name=Identifier("Company"),
+            reverse_accessors={},
+        )
+
+    def symbol(self) -> Symbol:
+        return Symbol(module=self.module, qualname=(self.name,))
+
+
 class DjangoModels(pydantic.BaseModel, frozen=True):
     """Generate a Django model per Entity, all into `module` with `app_label`, and
     the Django queries for Views into `queries`.
@@ -175,6 +238,9 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
     Entity, which its model's manager is, see `DjangoQueriesRenderer`.
     `constraints` are each Entity's constraints, which its model's `Meta` lists
     with those its field types imply, see `DjangoModelsRenderer`.
+    Entity, which its model's manager is, see `DjangoQueriesRenderer`. `existing`
+    names the Django model the application already has for an Entity, which then
+    gets no generated model, QuerySet or Manager, see `ExistingDjangoModel`.
     """
 
     module: ModulePath
@@ -183,6 +249,7 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
     on_delete: Mapping[ReferenceKey, OnDelete]
     queries: ModulePath
     constraints: Mapping[type[pydantic.BaseModel], Sequence[Constraint]]
+    existing: Mapping[type[pydantic.BaseModel], ExistingDjangoModel]
 
     @staticmethod
     def fake() -> DjangoModels:
@@ -193,11 +260,40 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
             on_delete={},
             queries=ModulePath("app.queries"),
             constraints={},
+            existing={},
         )
 
     def model_of(self, entity: type[pydantic.BaseModel]) -> Symbol:
-        """The Django model of `entity`, named like it."""
-        return Symbol(module=self.module, qualname=(Identifier(entity.__name__),))
+        """The Django model of `entity`: the existing one, or the generated one,
+        named like it."""
+        match self.existing.get(entity):
+            case ExistingDjangoModel() as existing:
+                return existing.symbol()
+            case None:
+                return Symbol(
+                    module=self.module, qualname=(Identifier(entity.__name__),)
+                )
+
+    def generates(self, entity: type[pydantic.BaseModel]) -> bool:
+        """Whether frp generates `entity`'s Django model, QuerySet and Manager:
+        unless the application has its own model for it."""
+        return entity not in self.existing
+
+    def reverse_accessor_of(
+        self, entity: type[pydantic.BaseModel], reference: FieldName
+    ) -> FieldName:
+        """The attribute of the referenced Entity's Django model holding the
+        `entity` whose one-to-one Reference `reference` points to it: the one an
+        existing model declares, else the one frp generates, see
+        `DjangoModelsRenderer.reverse_accessor`. An existing model declaring none
+        is a diagnostic of the Django models."""
+        match self.existing.get(entity):
+            case ExistingDjangoModel(reverse_accessors=declared) if (
+                reference in declared
+            ):
+                return declared[reference]
+            case ExistingDjangoModel() | None:
+                return DjangoModelsRenderer.reverse_accessor(entity, reference)
 
     def query_set_of(self, entity: type[pydantic.BaseModel]) -> Symbol:
         """The QuerySet of `entity`'s Django model, e.g. `CompanyQuerySet`."""
@@ -229,6 +325,78 @@ class NoDjangoFieldRule(pydantic.BaseModel, Diagnostic, frozen=True):
         return DiagnosticMessage(
             f"{self.entity.__qualname__}.{self.field.root}: no Django field for "
             f"'{self.annotation.root}'. Add one to DjangoModels.field_types."
+        )
+
+
+class ExistingModelOfNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`existing` names a Django model for a class that is not an Entity."""
+
+    model: type[pydantic.BaseModel]
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.model.__qualname__}: DjangoModels.existing names a Django model "
+            "for it, but it is not an Entity."
+        )
+
+
+class ExistingModelInGeneratedModule(pydantic.BaseModel, Diagnostic, frozen=True):
+    """An existing Django model is in the module frp generates the Django models
+    or queries into, which would overwrite it."""
+
+    entity: type[pydantic.BaseModel]
+    module: ModulePath
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}: its existing Django model is in "
+            f"'{self.module.root}', which frp generates."
+        )
+
+
+class UndeclaredReverseAccessor(pydantic.BaseModel, Diagnostic, frozen=True):
+    """An Entity with an existing Django model has a one-to-one Reference whose
+    reverse accessor its `ExistingDjangoModel.reverse_accessors` does not
+    declare."""
+
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}.{self.field.root}: a one-to-one Reference "
+            "of an existing Django model, but its reverse_accessors does not name "
+            "the related_name."
+        )
+
+
+class ReverseAccessorOfNonOneToOne(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`ExistingDjangoModel.reverse_accessors` names a field that is not a
+    one-to-one Reference of its Entity."""
+
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}.{self.field.root}: its existing Django "
+            "model's reverse_accessors names it, but it is not a one-to-one "
+            "Reference."
+        )
+
+
+class OnDeleteOnExistingModel(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`on_delete` names a Reference of an Entity whose Django model exists, so
+    frp does not generate its foreign key."""
+
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}.{self.field.root}: DjangoModels.on_delete "
+            "names it, but its Entity's Django model is in DjangoModels.existing, "
+            "so frp does not generate its foreign key."
         )
 
 
@@ -376,6 +544,19 @@ class ConstraintsForNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class ConstraintsOnExistingModel(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`DjangoModels.constraints` has constraints for an Entity with an existing
+    Django model, which frp does not generate, so cannot add them to."""
+
+    entity: type[pydantic.BaseModel]
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}: DjangoModels.constraints has constraints "
+            "for it, but its Django model is an existing one, not generated."
+        )
+
+
 class ConstraintNameClash(pydantic.BaseModel, Diagnostic, frozen=True):
     """Several constraints, declared or implied by a field's type, have one name.
     The database needs each name once. `entities` have those constraints."""
@@ -411,6 +592,7 @@ type _DeclarationDiagnostic = NoDjangoFieldRule | AutoIncrementOnNonPrimaryKey
 type _ConstraintDiagnostic = (
     diagnostics.CompileDiagnostic
     | ConstraintsForNonEntity
+    | ConstraintsOnExistingModel
     | ConstraintNameClash
     | UnimportableConstraintEnum
 )
@@ -421,7 +603,12 @@ type DjangoDiagnostic = (
     | InvalidDjangoFieldName
     | AutoIncrementOnNonPrimaryKey
     | OnDeleteForNonReference
+    | OnDeleteOnExistingModel
     | SetNullOnRequiredReference
+    | ExistingModelOfNonEntity
+    | ExistingModelInGeneratedModule
+    | UndeclaredReverseAccessor
+    | ReverseAccessorOfNonOneToOne
     | DjangoFieldNameClash
     | DjangoModelNameClash
     | ReverseAccessorClash
@@ -573,15 +760,28 @@ class _CheckedUnique(pydantic.BaseModel, frozen=True):
 
 class _ImpliedBound(pydantic.BaseModel, frozen=True):
     """A bound a field's type sets, e.g. `Gt(0)`: the field, where not NULL,
-    compares with `bound` by `operator`."""
+    is as `compared` says."""
 
     name: ConstraintName
-    field: ir.SourceField
-    operator: ir.ComparisonOperator
-    bound: ValueExpression
+    compared: ir.FilterComparison
 
 
 type _PlannedConstraint = _CheckedCheck | _CheckedUnique | _ImpliedBound
+
+
+class _BoundValue(pydantic.RootModel[int | float], frozen=True):
+    """A finite number a field's type bounds it by, as a plain `int` or `float`."""
+
+    def key(self) -> float:
+        """For ordering bounds."""
+        return self.root
+
+
+class _Bound(pydantic.BaseModel, frozen=True):
+    """A field's value, where not `None`, compares with `value` by `operator`."""
+
+    operator: ir.ComparisonOperator
+    value: _BoundValue
 
 
 class _ModelConstraints(pydantic.BaseModel, frozen=True):
@@ -591,11 +791,12 @@ class _ModelConstraints(pydantic.BaseModel, frozen=True):
     diagnostics: tuple[_ConstraintDiagnostic, ...]
 
 
-class _ImportedEnum(pydantic.BaseModel, frozen=True):
-    """An enum a constraint refers to, and how the module imports it."""
+class _ConstraintEnums(pydantic.BaseModel, frozen=True):
+    """The enums constraints refer to, each by how the module imports it, and
+    those it cannot import."""
 
-    enum_class: type[enum.Enum]
-    symbol: Symbol
+    symbols: Mapping[type[enum.Enum], Symbol]
+    diagnostics: tuple[UnimportableConstraintEnum, ...]
 
 
 class _PlannedModel(pydantic.BaseModel, frozen=True):
@@ -641,11 +842,16 @@ class DjangoModelsRenderer:
             for model, node in graph.entities.items()
             for reference in node.references
         }
+        reported.extend(DjangoModelsRenderer._existing_misconfigured(graph, config))
         for key, on_delete in config.on_delete.items():
             match references.get(key):
                 case None:
                     reported.append(
                         OnDeleteForNonReference(entity=key.entity, field=key.field)
+                    )
+                case Reference() if not config.generates(key.entity):
+                    reported.append(
+                        OnDeleteOnExistingModel(entity=key.entity, field=key.field)
                     )
                 case Reference(optionality=Optionality.REQUIRED) if (
                     on_delete == OnDelete.SET_NULL
@@ -655,17 +861,19 @@ class DjangoModelsRenderer:
                     )
                 case Reference():
                     pass
-        reported.extend(
-            ConstraintsForNonEntity(model=model)
-            for model in config.constraints
-            if model not in graph.entities
-        )
+        reported.extend(DjangoModelsRenderer._misplaced_constraints(graph, config))
         for model, node in sorted(
             graph.entities.items(), key=lambda item: item[0].__name__
         ):
+            if not config.generates(model):
+                # Its fields are unknown, but reverse accessors may still clash.
+                reported.extend(
+                    DjangoModelsRenderer._accessor_clashes(graph, config, model, ())
+                )
+                continue
             declarations: list[_Declaration] = []
             for declared in DjangoModelsRenderer._declarations(
-                model, node, types, config.on_delete
+                model, node, types, config
             ):
                 match declared:
                     case _Declaration():
@@ -674,10 +882,12 @@ class DjangoModelsRenderer:
                         reported.append(declared)
             reported.extend(DjangoModelsRenderer._field_clashes(model, declarations))
             reported.extend(
-                DjangoModelsRenderer._accessor_clashes(graph, model, declarations)
+                DjangoModelsRenderer._accessor_clashes(
+                    graph, config, model, declarations
+                )
             )
             constraints = DjangoModelsRenderer._constraints(
-                model, node, config.constraints.get(model, ())
+                model, node, config.constraints.get(model, ()), types
             )
             reported.extend(constraints.diagnostics)
             planned.append(
@@ -690,13 +900,8 @@ class DjangoModelsRenderer:
                 )
             )
         reported.extend(DjangoModelsRenderer._constraint_name_clashes(planned))
-        enums: dict[type[enum.Enum], Symbol] = {}
-        for imported in DjangoModelsRenderer._constraint_enums(planned):
-            match imported:
-                case _ImportedEnum(enum_class=enum_class, symbol=symbol):
-                    enums[enum_class] = symbol
-                case UnimportableConstraintEnum():
-                    reported.append(imported)
+        enums = DjangoModelsRenderer._constraint_enums(planned)
+        reported.extend(enums.diagnostics)
         imports = frozenset(
             {
                 *(
@@ -706,7 +911,13 @@ class DjangoModelsRenderer:
                     if not declaration.field.is_builtin()
                 ),
                 *(model.manager for model in planned),
-                *(symbol.imported() for symbol in enums.values()),
+                *(symbol.imported() for symbol in enums.symbols.values()),
+                *(
+                    config.model_of(reference.target)
+                    for model in planned
+                    for reference in graph.entities[model.entity].references
+                    if not config.generates(reference.target)
+                ),
             }
         )
         imported_names = frozenset(symbol.bound_name() for symbol in imports)
@@ -736,7 +947,7 @@ class DjangoModelsRenderer:
                                 ),
                                 enums={
                                     used: symbol.reference()
-                                    for used, symbol in enums.items()
+                                    for used, symbol in enums.symbols.items()
                                 },
                             ),
                         ),
@@ -750,14 +961,14 @@ class DjangoModelsRenderer:
         model: type[pydantic.BaseModel],
         node: EntityNode,
         types: FieldTypes,
-        on_delete: Mapping[ReferenceKey, OnDelete],
+        config: DjangoModels,
     ) -> Iterator[_Declaration | _DeclarationDiagnostic]:
         references = {reference.field: reference for reference in node.references}
         for name, info in model.model_fields.items():
             field = FieldName(name)
             match references.get(field):
                 case Reference() as reference:
-                    yield DjangoModelsRenderer._foreign_key(model, reference, on_delete)
+                    yield DjangoModelsRenderer._foreign_key(model, reference, config)
                     continue
                 case None:
                     pass
@@ -867,6 +1078,7 @@ class DjangoModelsRenderer:
         model: type[pydantic.BaseModel],
         node: EntityNode,
         declared: Iterable[Constraint],
+        types: FieldTypes,
     ) -> _ModelConstraints:
         """The constraints `declared` for `model`, checked against it, then those
         its fields' types imply."""
@@ -875,7 +1087,7 @@ class DjangoModelsRenderer:
         relation = ir.Relation.of(ir.FromSource(source=model))
         for constraint in declared:
             checker = condition_checker.ConditionChecker(
-                view=constraint.name, relation=relation, subject=model
+                owner=constraint.name, relation=relation, subject=model
             )
             match constraint:
                 case Check(condition=condition):
@@ -889,7 +1101,7 @@ class DjangoModelsRenderer:
                 case Unique(fields=fields, where=where):
                     unknown = [
                         diagnostics.UnknownField(
-                            view=constraint.name,
+                            owner=constraint.name,
                             source=relation.source,
                             field=field,
                             valid=relation.field_names(),
@@ -922,17 +1134,18 @@ class DjangoModelsRenderer:
                                     where=checked,
                                 )
                             )
-        planned.extend(dict.fromkeys(DjangoModelsRenderer._implied_bounds(model, node)))
+        planned.extend(DjangoModelsRenderer._implied_bounds(model, node, types))
         return _ModelConstraints(planned=tuple(planned), diagnostics=tuple(reported))
 
     @staticmethod
     def _implied_bounds(
-        model: type[pydantic.BaseModel], node: EntityNode
+        model: type[pydantic.BaseModel], node: EntityNode, types: FieldTypes
     ) -> Iterator[_ImpliedBound]:
-        """A Check per numeric bound on a field other than the primary key and the
-        References, e.g. `Gt(0)` of `PositiveInt`: on the field, inside its `None`,
-        or on a RootModel it is or wraps. A bound applies where the field is not
-        `None`, as a SQL check passes where the column is NULL.
+        """A Check per numeric bound on a field held in a numeric column, other
+        than the primary key and the References, e.g. `Gt(0)` of `PositiveInt`:
+        on the field, inside its `None`, or on a RootModel it is or wraps. A bound
+        applies where the field is not `None`, as a SQL check passes where the
+        column is NULL. Of several bounds by one operator, the tightest applies.
 
         A bound that is not a finite `int` or `float`, e.g. a `Decimal` or a
         `datetime`, implies none, nor do other metadata, e.g. `MinLen`.
@@ -943,51 +1156,99 @@ class DjangoModelsRenderer:
             field = FieldName(name)
             if field == EntityNode.primary_key or field in references:
                 continue
-            metadata: list[object] = [*info.metadata]
-            current: FieldInfo = info
-            annotation = current.annotation
-            while True:
-                split = Optionality.of_annotation(annotation)
-                metadata.extend(split.metadata)
-                annotation = split.required
-                if not (
-                    isinstance(annotation, type)
-                    and issubclass(annotation, pydantic.RootModel)
-                ):
-                    break
-                current = annotation.model_fields["root"]
-                metadata.extend(current.metadata)
-                annotation = current.annotation
-            for item in metadata:
-                for bound in (
-                    item
-                    if isinstance(item, annotated_types.GroupedMetadata)
-                    else (item,)
-                ):
-                    match bound:
-                        case annotated_types.Gt(gt=value):
-                            operator = ir.ComparisonOperator.GT
-                        case annotated_types.Ge(ge=value):
-                            operator = ir.ComparisonOperator.GE
-                        case annotated_types.Lt(lt=value):
-                            operator = ir.ComparisonOperator.LT
-                        case annotated_types.Le(le=value):
-                            operator = ir.ComparisonOperator.LE
-                        case _:
-                            continue
-                    if (
-                        isinstance(value, bool)
-                        or not isinstance(value, int | float)
-                        or not math.isfinite(value)
-                    ):
-                        continue
-                    suffix = conditions.ConditionWriter.suffix(operator).root
-                    yield _ImpliedBound(
-                        name=ConstraintName(f"{snake}_{name}_{suffix}"),
-                        field=ir.SourceField(field=field),
+            match types.field_of(info.annotation, FieldRole.PLAIN):
+                case Ok(typed) if typed.field.is_numeric():
+                    pass
+                case Ok() | Err():
+                    continue
+            tightest: dict[ir.ComparisonOperator, _BoundValue] = {}
+            for bound in DjangoModelsRenderer._numeric_bounds(info):
+                operator, value = bound.operator, bound.value
+                match operator, tightest.get(operator):
+                    case _, None:
+                        tightest[operator] = value
+                    case ir.ComparisonOperator.GT | ir.ComparisonOperator.GE, known:
+                        tightest[operator] = max(known, value, key=_BoundValue.key)
+                    case _, known:
+                        tightest[operator] = min(known, value, key=_BoundValue.key)
+            for operator, value in tightest.items():
+                suffix = conditions.ConditionWriter.suffix(operator).root
+                yield _ImpliedBound(
+                    name=ConstraintName(f"{snake}_{name}_{suffix}"),
+                    compared=ir.FilterComparison(
                         operator=operator,
-                        bound=ValueExpression(repr(value)),
-                    )
+                        field=ir.SourceField(field=field),
+                        operand=ir.ScalarLiteral(value.root),
+                    ),
+                )
+
+    @staticmethod
+    def _metadata(info: FieldInfo) -> Iterator[AnnotationMetadata]:
+        """The metadata of a field, inside its `None`, and of a RootModel it is
+        or wraps."""
+        yield from info.metadata
+        annotation = info.annotation
+        while True:
+            split = Optionality.of_annotation(annotation)
+            yield from split.metadata
+            annotation = split.required
+            if not (
+                isinstance(annotation, type)
+                and issubclass(annotation, pydantic.RootModel)
+            ):
+                return
+            root = annotation.model_fields["root"]
+            yield from root.metadata
+            annotation = root.annotation
+
+    @staticmethod
+    def _numeric_bounds(
+        info: FieldInfo,
+    ) -> Iterator[_Bound]:
+        """The finite `int` and `float` bounds on a field, inside its `None`, or
+        on a RootModel it is or wraps, as plain `int`s and `float`s."""
+        for item in DjangoModelsRenderer._metadata(info):
+            for bound in (
+                item if isinstance(item, annotated_types.GroupedMetadata) else (item,)
+            ):
+                match bound:
+                    case annotated_types.Gt(gt=value):
+                        operator = ir.ComparisonOperator.GT
+                    case annotated_types.Ge(ge=value):
+                        operator = ir.ComparisonOperator.GE
+                    case annotated_types.Lt(lt=value):
+                        operator = ir.ComparisonOperator.LT
+                    case annotated_types.Le(le=value):
+                        operator = ir.ComparisonOperator.LE
+                    case _:
+                        continue
+                match value:
+                    case bool():
+                        pass
+                    case int():
+                        # A plain `int`, also of a subclass, e.g. an `IntEnum`,
+                        # whose own `repr` is no Python source.
+                        yield _Bound(
+                            operator=operator, value=_BoundValue(math.trunc(value))
+                        )
+                    case float() if math.isfinite(value):
+                        yield _Bound(
+                            operator=operator,
+                            value=_BoundValue(float.__float__(value)),
+                        )
+                    case _:
+                        pass
+
+    @staticmethod
+    def _misplaced_constraints(
+        graph: EntityGraph, config: DjangoModels
+    ) -> Iterator[ConstraintsForNonEntity | ConstraintsOnExistingModel]:
+        """Constraints for a model no generated Django model holds."""
+        for model in config.constraints:
+            if model not in graph.entities:
+                yield ConstraintsForNonEntity(model=model)
+            elif not config.generates(model):
+                yield ConstraintsOnExistingModel(entity=model)
 
     @staticmethod
     def _constraint_name_clashes(
@@ -1012,11 +1273,11 @@ class DjangoModelsRenderer:
         return field
 
     @staticmethod
-    def _constraint_enums(
-        planned: Iterable[_PlannedModel],
-    ) -> Iterator[_ImportedEnum | UnimportableConstraintEnum]:
+    def _constraint_enums(planned: Iterable[_PlannedModel]) -> _ConstraintEnums:
         """The enums the written constraints refer to, each by how the module
         imports it."""
+        symbols: dict[type[enum.Enum], Symbol] = {}
+        reported: list[UnimportableConstraintEnum] = []
         for model in planned:
             for constraint in model.constraints:
                 match constraint:
@@ -1029,12 +1290,15 @@ class DjangoModelsRenderer:
                 for enum_class in used:
                     match Symbol.of(enum_class):
                         case Ok(symbol):
-                            yield _ImportedEnum(enum_class=enum_class, symbol=symbol)
+                            symbols[enum_class] = symbol
                         case Err():
-                            yield UnimportableConstraintEnum(
-                                constraint=constraint.name,
-                                enum_class=AnnotationText.of(enum_class),
+                            reported.append(
+                                UnimportableConstraintEnum(
+                                    constraint=constraint.name,
+                                    enum_class=AnnotationText.of(enum_class),
+                                )
                             )
+        return _ConstraintEnums(symbols=symbols, diagnostics=tuple(reported))
 
     @staticmethod
     def _constraints_option(
@@ -1078,18 +1342,12 @@ class DjangoModelsRenderer:
                     (Expression(f"condition={condition.root}"), name),
                     Expression(")"),
                 )
-            case _ImpliedBound(field=field, operator=operator, bound=bound):
-                column = writer.columns.of(entity, field.field).attribute.root
-                suffix = conditions.ConditionWriter.suffix(operator).root
-                compared = conditions.QLookup(
-                    entries=(
-                        conditions.QEntry(
-                            lookup=Expression(f"{column}__{suffix}"),
-                            value=Expression(bound.root),
-                        ),
-                    )
+            case _ImpliedBound(compared=compared):
+                # Written as the rows it keeps: an ordering keeps no NULL in
+                # Python, but SQL passes a check that is NULL, as a bound should.
+                condition = writer.written(
+                    writer.kept(compared, entity), indent.deeper()
                 )
-                condition = writer.written(compared, indent.deeper())
                 return indent.exploded(
                     Expression(f"{models}.CheckConstraint("),
                     (Expression(f"condition={condition.root}"), name),
@@ -1112,14 +1370,55 @@ class DjangoModelsRenderer:
                 )
 
     @staticmethod
+    def _existing_misconfigured(
+        graph: EntityGraph, config: DjangoModels
+    ) -> Iterator[
+        ExistingModelOfNonEntity
+        | ExistingModelInGeneratedModule
+        | UndeclaredReverseAccessor
+        | ReverseAccessorOfNonOneToOne
+    ]:
+        """Existing Django models named for a non-Entity, or in a generated
+        module, or declaring other reverse accessors than their Entity's
+        one-to-one References have."""
+        for entity, existing in config.existing.items():
+            if existing.module in (config.module, config.queries):
+                yield ExistingModelInGeneratedModule(
+                    entity=entity, module=existing.module
+                )
+            match graph.entities.get(entity):
+                case None:
+                    yield ExistingModelOfNonEntity(model=entity)
+                    continue
+                case EntityNode() as node:
+                    pass
+            one_to_one = [
+                reference.field
+                for reference in node.references
+                if reference.cardinality == Cardinality.ONE_TO_ONE
+            ]
+            yield from (
+                UndeclaredReverseAccessor(entity=entity, field=field)
+                for field in one_to_one
+                if field not in existing.reverse_accessors
+            )
+            yield from (
+                ReverseAccessorOfNonOneToOne(entity=entity, field=field)
+                for field in existing.reverse_accessors
+                if field not in one_to_one
+            )
+
+    @staticmethod
     def _accessor_clashes(
         graph: EntityGraph,
+        config: DjangoModels,
         model: type[pydantic.BaseModel],
         declarations: Iterable[_Declaration],
     ) -> Iterator[ReverseAccessorClash | InvalidReverseAccessorName]:
         """Reverse accessors on `model`'s Django model named like another one, or
-        like a name the model binds or reserves, or named as Django forbids.
-        References are in Entity name and field order."""
+        like a name the model binds or reserves, or, for one frp generates, named
+        as Django forbids. An existing model declares its own. References are in
+        Entity name and field order."""
         bound = {
             *DjangoModelsRenderer.reserved,
             *(
@@ -1138,8 +1437,7 @@ class DjangoModelsRenderer:
                     and reference.cardinality == Cardinality.ONE_TO_ONE
                 ):
                     by_name.setdefault(
-                        DjangoModelsRenderer.reverse_accessor(entity, reference.field),
-                        [],
+                        config.reverse_accessor_of(entity, reference.field), []
                     ).append(ReferenceKey(entity=entity, field=reference.field))
         for name, references in by_name.items():
             if len(references) > 1 or name in bound:
@@ -1152,18 +1450,25 @@ class DjangoModelsRenderer:
                 yield from (
                     InvalidReverseAccessorName(name=name, reference=reference)
                     for reference in references
+                    if config.generates(reference.entity)
                 )
 
     @staticmethod
     def _foreign_key(
         model: type[pydantic.BaseModel],
         reference: Reference,
-        on_delete: Mapping[ReferenceKey, OnDelete],
+        config: DjangoModels,
     ) -> _Declaration:
         """A foreign key to the referenced Entity's model, named without `_id`: a
         `OneToOneField` with a reverse accessor for a one-to-one Reference, else a
-        `ForeignKey` without one (`related_name='+'`)."""
-        deleted = on_delete.get(
+        `ForeignKey` without one (`related_name='+'`). A generated model is named
+        by a string, since it may be defined further down, an existing one by
+        its imported class."""
+        bound = config.model_of(reference.target).bound_name().root
+        target = ValueExpression(
+            repr(bound) if config.generates(reference.target) else bound
+        )
+        deleted = config.on_delete.get(
             ReferenceKey(entity=model, field=reference.field), OnDelete.PROTECT
         )
         match reference.cardinality:
@@ -1172,9 +1477,7 @@ class DjangoModelsRenderer:
                 related_name = "+"
             case Cardinality.ONE_TO_ONE:
                 field_class = Identifier("OneToOneField")
-                related_name = DjangoModelsRenderer.reverse_accessor(
-                    model, reference.field
-                ).root
+                related_name = config.reverse_accessor_of(model, reference.field).root
         arguments = {
             Identifier("on_delete"): ValueExpression(f"models.{deleted.value}"),
             Identifier("related_name"): ValueExpression(repr(related_name)),
@@ -1184,7 +1487,7 @@ class DjangoModelsRenderer:
         return _Declaration(
             name=DjangoModelsRenderer.foreign_key_name(reference.field),
             field=DjangoField.builtin(field_class, arguments),
-            positional=(ValueExpression(repr(reference.target.__name__)),),
+            positional=(target,),
             source=reference.field,
             role=FieldRole.FOREIGN_KEY,
         )
@@ -1209,8 +1512,8 @@ class DjangoModelsRenderer:
     def _name_clashes(
         planned: list[_PlannedModel], imports: frozenset[Symbol]
     ) -> Iterator[DjangoModelNameClash]:
-        """`imports` are the field classes and Managers the module imports by
-        name."""
+        """`imports` are the field classes, Managers and existing Django models
+        the module imports by name."""
         bound: dict[Identifier, list[Symbol | Identifier]] = {
             DjangoModelsRenderer.models_import: [DjangoModelsRenderer.models_import]
         }

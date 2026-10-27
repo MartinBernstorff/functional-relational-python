@@ -42,6 +42,7 @@ from functional_relational_python.outputs.django.models import (
     DjangoField,
     DjangoModels,
     DjangoModelsRenderer,
+    ExistingDjangoModel,
 )
 from functional_relational_python.outputs.django.queries import (
     DjangoQueriesDiagnostic,
@@ -57,6 +58,7 @@ from functional_relational_python.outputs.python.plan import (
     PythonLayout,
     PythonPlan,
     Scope,
+    Unimportable,
 )
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
@@ -169,10 +171,15 @@ class Rank(pydantic.RootModel[int | None], frozen=True):
         )
 
 
+class Stars(pydantic.RootModel[Rank], frozen=True, strict=True):
+    """Never `None` itself, but its column may be NULL through the Rank it wraps.
+    Strict, so only a non-strict validation takes a NULL for it."""
+
+
 class Badge(pydantic.BaseModel, frozen=True):
     """Followed backwards from the Employee wearing it. `label` and `caption` are
     both optional and of one type, so they can be compared with each other.
-    `rank` may be ordered, but its column may be NULL."""
+    `rank` may be ordered, but its column may be NULL, as may that of `stars`."""
 
     id: BadgeId
     employee_id: Annotated[EmployeeId, OneToOne()]
@@ -180,6 +187,7 @@ class Badge(pydantic.BaseModel, frozen=True):
     caption: Text | None
     level: Level
     rank: Rank
+    stars: Stars
 
 
 class Note(pydantic.BaseModel, frozen=True):
@@ -213,7 +221,53 @@ class Modules:
             on_delete={},
             queries=Modules.queries,
             constraints={},
+            existing={},
         )
+
+
+class ExistingCompany:
+    """`Company`'s Django model as the application wrote it, `Firm`, named unlike
+    the Entity. It is in the app of the generated models, so the tests register
+    and drop it with them."""
+
+    module: ClassVar[ModulePath] = ModulePath("frp_existing_django")
+    source: ClassVar[FileText] = FileText(
+        "from django.db import models\n"
+        "\n"
+        "\n"
+        "class Firm(models.Model):\n"
+        "    id = models.BigIntegerField(primary_key=True)\n"
+        "    name = models.TextField()\n"
+        "    parent = models.ForeignKey(\n"
+        '        "self", on_delete=models.PROTECT, related_name="+", null=True\n'
+        "    )\n"
+        "\n"
+        "    class Meta:\n"
+        '        app_label = "frp_generated"\n'
+    )
+
+    @staticmethod
+    def config() -> DjangoModels:
+        generated = Modules.config()
+        return DjangoModels(
+            module=generated.module,
+            app_label=generated.app_label,
+            field_types=generated.field_types,
+            on_delete=generated.on_delete,
+            queries=generated.queries,
+            constraints={},
+            existing={
+                Company: ExistingDjangoModel(
+                    module=ExistingCompany.module,
+                    name=Identifier("Firm"),
+                    reverse_accessors={},
+                )
+            },
+        )
+
+    @staticmethod
+    def sources() -> tuple[tuple[ModulePath, FileText], ...]:
+        return ((ExistingCompany.module, ExistingCompany.source),)
 
 
 def compile_all(
@@ -884,6 +938,9 @@ class Database:
     """The generated View models, Django models and queries, run in this process
     against an in-memory SQLite database."""
 
+    generated: ClassVar[DjangoModels] = Modules.config()
+    """The config with every Django model generated."""
+
     @staticmethod
     def configure() -> None:
         """Configures Django once per process. No other test runs Django in its
@@ -917,16 +974,13 @@ class Database:
         apps.clear_cache()
 
     @staticmethod
-    def files(views: Iterable[View], unions: Iterable[Union] = ()) -> GeneratedFiles:
+    def files(
+        views: Iterable[View],
+        unions: Iterable[Union] = (),
+        config: DjangoModels = generated,
+    ) -> GeneratedFiles:
         """The View and Union models, Django models and queries of `views` and
         `unions`."""
-        return Database.files_of(Modules.config(), views, unions)
-
-    @staticmethod
-    def files_of(
-        config: DjangoModels, views: Iterable[View], unions: Iterable[Union]
-    ) -> GeneratedFiles:
-        """As `files`, generating the Django models and queries by `config`."""
         compiled = compile_all(views, unions)
         plan = PythonPlan.of(
             compiler.CompiledCatalog(
@@ -960,34 +1014,36 @@ class Database:
     @staticmethod
     @contextlib.contextmanager
     def of(
-        views: Iterable[View], unions: Iterable[Union] = ()
+        views: Iterable[View],
+        unions: Iterable[Union] = (),
+        config: DjangoModels = generated,
+        existing: Iterable[tuple[ModulePath, FileText]] = (),
     ) -> Generator[types.ModuleType]:
         """The module of Django models, with a table per model, for `views` and
-        `unions`.
+        `unions`. `existing` are the modules of the Django models `config` names
+        as existing, with their source; their models are in the generated app.
 
         The models are unregistered afterwards, so the next call can define them
         again.
         """
-        with Database.of_config(Modules.config(), views, unions) as django_models:
-            yield django_models
-
-    @staticmethod
-    @contextlib.contextmanager
-    def of_config(
-        config: DjangoModels, views: Iterable[View], unions: Iterable[Union]
-    ) -> Generator[types.ModuleType]:
-        """As `of`, generating the Django models and queries by `config`."""
         Database.configure()
-        files = Database.files_of(config, views, unions)
-        label = Modules.config().app_label.root
+        files = Database.files(views, unions, config)
+        label = config.app_label.root
         sys.modules[Generated.models.root] = Executed.models(
             Database.text(files, Generated.models)
         )
+        sources = (
+            *existing,
+            *(
+                (module, Database.text(files, module))
+                for module in (Modules.queries, Modules.django)
+            ),
+        )
         try:
-            for module in (Modules.queries, Modules.django):
+            for module, source in sources:
                 executed = types.ModuleType(module.root)
                 sys.modules[module.root] = executed
-                exec(Database.text(files, module).root, executed.__dict__)
+                exec(source.root, executed.__dict__)
             with connection.schema_editor() as editor:
                 for model in apps.all_models[label].values():
                     editor.create_model(model)
@@ -1000,26 +1056,38 @@ class Database:
         finally:
             apps.all_models[label].clear()
             apps.clear_cache()
-            for module in (Generated.models, Modules.queries, Modules.django):
+            for module in (Generated.models, *(module for module, _ in sources)):
                 _ = sys.modules.pop(module.root, None)
 
     @staticmethod
+    def model_of(entity: type[pydantic.BaseModel], config: DjangoModels) -> type[Model]:
+        """The Django model of `entity`, existing or generated, from the modules
+        `of` executed."""
+        symbol = config.model_of(entity)
+        match getattr(sys.modules[symbol.module.root], symbol.bound_name().root):
+            case type() as model if issubclass(model, Model):
+                return model
+            case found:
+                pytest.fail(f"expected a Django model, got {found!r}")
+
+    @staticmethod
     def put(
-        django_models: types.ModuleType, entities: Iterable[pydantic.BaseModel]
+        entities: Iterable[pydantic.BaseModel],
+        config: DjangoModels = generated,
     ) -> None:
         """Stores each Entity as a row of its Django model, in one transaction, so
         References are checked once every row is stored. An enum is stored as its
         value, as Django stores one it has a built-in rule for."""
         with transaction.atomic():
             for entity in entities:
-                Database.create(django_models, entity)
+                Database.create(entity, config)
 
     @staticmethod
-    def create(django_models: types.ModuleType, entity: pydantic.BaseModel) -> None:
+    def create(entity: pydantic.BaseModel, config: DjangoModels) -> None:
         """Stores `entity` as a row of its Django model."""
-        model = getattr(django_models, type(entity).__name__)
+        model = Database.model_of(type(entity), config)
         node = entity_graph().entities[type(entity)]
-        model.objects.create(
+        _ = model.objects.create(
             **{
                 DjangoModelsRenderer.attribute_of(node, FieldName(name)).root: value
                 for name, value in entity.model_dump(mode="json").items()
@@ -1036,9 +1104,9 @@ class Database:
 
     @staticmethod
     def rejected(
-        django_models: types.ModuleType,
         entities: Iterable[pydantic.BaseModel],
         source: type[pydantic.BaseModel],
+        config: DjangoModels,
     ) -> frozenset[IdValue]:
         """The IDs of the `source` Entities the database refuses to store, each
         stored on its own after every other Entity. Nothing is kept, so a refused
@@ -1047,12 +1115,12 @@ class Database:
         with transaction.atomic():
             for entity in entities:
                 if type(entity) is not source:
-                    Database.create(django_models, entity)
+                    Database.create(entity, config)
             for entity in entities:
                 if type(entity) is source:
                     try:
                         with transaction.atomic():
-                            Database.create(django_models, entity)
+                            Database.create(entity, config)
                     except IntegrityError:
                         refused.add(Database.primary_key(entity))
             transaction.set_rollback(True)
@@ -1132,6 +1200,7 @@ def badges(employees: Sequence[Employee]) -> tuple[Badge, ...]:
             caption=None if index % 2 == 0 else Text("label 1"),
             level=Level.GOLD if index % 2 else Level.BRONZE,
             rank=Rank(None if index % 4 == 0 else index),
+            stars=Stars(Rank(None if index % 3 == 1 else index)),
         )
         for index, employee in enumerate(employees[:-1])
     )
@@ -1259,6 +1328,18 @@ def read_views() -> list[View]:
                 steps.flatten(FieldName("badge")),
             ),
         ),
+        # A NULL rank of a Badge found is `Rank(None)`; one of no Badge, `None`.
+        # Likewise for stars, wrapping a Rank.
+        View(
+            name=ViewName("FlattenedRank"),
+            source=Employee,
+            step=steps.pipeline(
+                steps.reverse(
+                    Badge, steps.project([FieldName("rank"), FieldName("stars")])
+                ),
+                steps.flatten(FieldName("badge")),
+            ),
+        ),
         View(
             name=ViewName("Lead"),
             source=Employee,
@@ -1352,10 +1433,115 @@ def test_a_view_reads_in_one_query_like_the_engine(view: View) -> None:
     (compiled,) = compile_all([view]).views
 
     with Database.of([view]) as django_models:
-        Database.put(django_models, entities)
+        Database.put(entities)
         rows = Database.read(django_models, compiled, every_row)
 
     assert rows == engine_rows([compiled], entities)[view.name]
+
+
+@pytest.mark.parametrize(
+    "view",
+    [view for view in read_views() if view.source is not Company],
+    ids=lambda view: view.name.root,
+)
+def test_a_view_reads_through_an_existing_model_like_the_engine(view: View) -> None:
+    """`Company`'s Django model is the application's own, which the generated
+    models reference and the query selects related through."""
+    entities = organisation()
+    config = ExistingCompany.config()
+    (compiled,) = compile_all([view]).views
+
+    with Database.of([view], (), config, ExistingCompany.sources()) as django_models:
+        Database.put(entities, config)
+        rows = Database.read(django_models, compiled, every_row)
+
+    assert rows == engine_rows([compiled], entities)[view.name]
+
+
+def test_a_view_over_an_existing_model_reads_through_its_functions() -> None:
+    """The existing model has no QuerySet with a method per View, so the
+    application calls the View's functions."""
+    view = View(name=ViewName("Hydrated"), source=Company, step=steps.hydrate())
+    entities = organisation()
+    config = ExistingCompany.config()
+    (compiled,) = compile_all([view]).views
+    function = compiled.names.function.root
+
+    with Database.of([view], (), config, ExistingCompany.sources()):
+        Database.put(entities, config)
+        queries = sys.modules[Modules.queries.root]
+        companies = Database.model_of(Company, config).objects.order_by("pk")
+        with CaptureQueriesContext(connection) as captured:
+            rows = tuple(
+                Executed.row_of(getattr(queries, f"{function}_from_row")(row))
+                for row in getattr(queries, f"{function}_queryset")(companies)
+            )
+
+    assert len(captured.captured_queries) == 1, captured.captured_queries
+    assert rows == engine_rows([compiled], entities)[view.name]
+
+
+def test_an_existing_model_gets_no_query_set_and_is_imported_for_type_checking() -> (
+    None
+):
+    compiled = compile_all(golden_views())
+
+    text = DjangoQueriesRenderer.render(
+        entity_graph(),
+        ExistingCompany.config(),
+        compiled.views,
+        placed_into(Generated.models, compiled),
+    ).unwrap()
+
+    (file,) = text.files
+    assert "CompanyQuerySet" not in file.text.root
+    assert "CompanyManager" not in file.text.root
+    assert (
+        "if typing.TYPE_CHECKING:\n"
+        "    import frp_existing_django\n"
+        "    import frp_generated_django\n"
+    ) in file.text.root
+    assert (
+        "def company_full_queryset(\n"
+        '    queryset: "django.db.models.QuerySet[frp_existing_django.Firm]",\n'
+    ) in file.text.root
+
+
+def test_a_query_follows_the_reverse_accessor_an_existing_model_declares() -> None:
+    """`Badge`'s existing model names its one-to-one Reference to the Employee
+    `medal`, where a generated model would name it `badge_by_employee`."""
+    generated = Modules.config()
+    config = DjangoModels(
+        module=generated.module,
+        app_label=generated.app_label,
+        field_types=generated.field_types,
+        on_delete=generated.on_delete,
+        queries=generated.queries,
+        constraints={},
+        existing={
+            Badge: ExistingDjangoModel(
+                module=ModulePath("frp_existing_badges"),
+                name=Identifier("Medal"),
+                reverse_accessors={FieldName("employee_id"): FieldName("medal")},
+            )
+        },
+    )
+    view = View(name=ViewName("Decorated"), source=Employee, step=steps.reverse(Badge))
+    compiled = compile_all([view])
+
+    (file,) = (
+        DjangoQueriesRenderer.render(
+            entity_graph(),
+            config,
+            compiled.views,
+            placed_into(Generated.models, compiled),
+        )
+        .unwrap()
+        .files
+    )
+
+    assert "badge_by_employee" not in file.text.root
+    assert '"medal"' in file.text.root
 
 
 def with_mentor_from_last(queryset: QuerySet[Model]) -> QuerySet[Model]:
@@ -1373,7 +1559,7 @@ def test_a_view_reads_the_filtered_ordered_and_sliced_query_set() -> None:
     ]
 
     with Database.of([view]) as django_models:
-        Database.put(django_models, entities)
+        Database.put(entities)
         rows = Database.read(django_models, compiled, with_mentor_from_last)
 
     assert rows == tuple(reversed(with_mentor))[1:3]
@@ -1398,7 +1584,7 @@ def test_a_slice_is_of_the_rows_a_filtered_view_keeps() -> None:
     (compiled,) = compile_all([lead()]).views
 
     with Database.of([lead()]) as django_models:
-        Database.put(django_models, entities)
+        Database.put(entities)
         rows = Database.read(django_models, compiled, last_two)
 
     assert [row.root[FieldName("id")] for row in rows] == [
@@ -1412,7 +1598,7 @@ def test_django_adds_a_condition_to_a_sliced_query_before_its_slice() -> None:
     filters before the LIMIT, where `filter()` refuses. If a Django upgrade
     changes it, a filtered View's slice is no longer of the rows it keeps."""
     with Database.of([lead()]) as django_models:
-        Database.put(django_models, organisation())
+        Database.put(organisation())
         sliced = django_models.Employee.objects.order_by("-pk")[:2]
         kept = sliced.all()
         kept.query.add_q(Q(role=Role.LEAD.value))
@@ -1510,7 +1696,7 @@ def test_a_union_reads_in_one_query_like_the_engine(union: Union, query: Query) 
         expected = tuple(reversed(expected))[:2]
 
     with Database.of([], [union]) as django_models:
-        Database.put(django_models, entities)
+        Database.put(entities)
         rows = Database.read_union(django_models, compiled_union, query)
 
     assert rows == expected
@@ -1548,7 +1734,7 @@ def test_a_view_loads_the_fields_only_or_defer_left_out(query: Query) -> None:
     (compiled,) = compile_all([hydrated()]).views
 
     with Database.of([hydrated()]) as django_models:
-        Database.put(django_models, entities)
+        Database.put(entities)
         rows = Database.read(django_models, compiled, query)
 
     assert rows == engine_rows([compiled], entities)[compiled.name]
@@ -1594,7 +1780,7 @@ def test_a_view_with_a_strict_base_reads_an_enum_field() -> None:
     (compiled,) = compile_all([view]).views
 
     with Database.of([view]) as django_models:
-        Database.put(django_models, entities)
+        Database.put(entities)
         rows = Database.read(django_models, compiled, every_row)
 
     assert rows == engine_rows([compiled], entities)[view.name]
@@ -1644,8 +1830,9 @@ def every_definition() -> tuple[list[View], list[Union]]:
             Modules.config().model_copy(update={"module": LongModules.django}),
             LongModules.views,
         ),
+        (ExistingCompany.config(), Generated.models),
     ],
-    ids=["short", "long"],
+    ids=["short", "long", "existing"],
 )
 def test_generated_queries_are_ruff_formatted(
     config: DjangoModels, views: ModulePath
@@ -1736,6 +1923,56 @@ def test_entities_with_one_name_are_left_to_the_django_models_to_report() -> Non
     assert isinstance(rendered, Ok)
 
 
+def plaque() -> type[pydantic.BaseModel]:
+    """An Entity on a Company, with a field of a RootModel defined in a function,
+    whose column may be NULL."""
+
+    class PlaqueId(Id[int]):
+        pass
+
+    class Score(pydantic.RootModel[int | None]):
+        pass
+
+    class Plaque(pydantic.BaseModel):
+        id: PlaqueId
+        company_id: Annotated[CompanyId, OneToOne()]
+        score: Score
+
+    return Plaque
+
+
+def test_an_unimportable_class_a_field_is_read_through_names_the_field() -> None:
+    plaque_entity = plaque()
+    graph = EntityGraph.build(
+        [Company, plaque_entity], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+    view = View(
+        name=ViewName("CompanyScore"),
+        source=Company,
+        step=steps.pipeline(
+            steps.reverse(plaque_entity, steps.project([FieldName("score")])),
+            steps.flatten(FieldName("plaque")),
+        ),
+    )
+    compiled = compiler.compile_views(graph, [view], []).unwrap()
+
+    rendered = DjangoQueriesRenderer.render(
+        graph, Modules.config(), compiled.views, placed_into(Generated.models, compiled)
+    )
+
+    assert isinstance(rendered, Err)
+    assert (
+        Unimportable(
+            view=view.name,
+            field=FieldName("score"),
+            annotation=AnnotationText.of(
+                plaque_entity.model_fields["score"].annotation
+            ),
+        )
+        in rendered.error.diagnostics
+    )
+
+
 # Differential test: for generated Entities and pipelines, the generated queries
 # and the InMemoryViewEngine give the same View results.
 
@@ -1800,9 +2037,8 @@ def entities(draw: st.DrawFn) -> tuple[pydantic.BaseModel, ...]:
             label=draw(st.none() | texts),
             caption=draw(st.none() | texts),
             level=draw(st.sampled_from(Level)),
-            # Never `None`: a View lifting an optional Rank reads a NULL one as
-            # `None`, not `Rank(None)`, which `read_views` avoids.
-            rank=Rank(draw(st.integers(min_value=0, max_value=2))),
+            rank=Rank(draw(st.none() | st.integers(min_value=0, max_value=2))),
+            stars=Stars(Rank(draw(st.none() | st.integers(min_value=0, max_value=2)))),
         )
         for index, employee_id in enumerate(worn_by)
     ]
@@ -1839,7 +2075,7 @@ def field_conditions(
         for entity in stored
         if type(entity) is source
         and (value := getattr(entity, name)) is not None
-        and value != Rank(None)
+        and value not in (Rank(None), Stars(Rank(None)))
     ]
     same_type = [
         other
@@ -2023,7 +2259,7 @@ def test_queries_give_the_same_view_results_as_the_engine(
     }
 
     with Database.of(case.views, case.unions) as django_models:
-        Database.put(django_models, case.entities)
+        Database.put(case.entities)
         read = {
             **{
                 view.name: database_result(
@@ -2056,11 +2292,11 @@ def test_queries_give_the_same_view_results_as_the_engine(
     assert read == expected
 
 
-def constrained() -> DjangoModels:
-    """The Django models with constraints, one comparing with an enum member."""
+def constrained(config: DjangoModels) -> DjangoModels:
+    """`config` with constraints, one comparing with an enum member."""
     role = conditions.field(FieldName("role"))
     nickname = conditions.field(FieldName("nickname"))
-    return Modules.config().model_copy(
+    return config.model_copy(
         update={
             "constraints": {
                 Employee: (
@@ -2086,13 +2322,32 @@ def constrained() -> DjangoModels:
     )
 
 
-def type_checked(directory: Directory) -> None:
-    """Writes the generated code of `every_definition()` into `directory`, and a
-    project's use of it: the manager's QuerySet methods return the Entity's
-    QuerySet, so `as_<view>()` type checks after them."""
-    Database.files_of(constrained(), *every_definition()).write(
+type Existing = tuple[tuple[ModulePath, FileText], ...]
+"""The modules of the existing Django models a config names, with their source."""
+
+
+type_checked_configs = pytest.mark.parametrize(
+    ("config", "existing"),
+    [(Modules.config(), ()), (ExistingCompany.config(), ExistingCompany.sources())],
+    ids=["generated", "existing"],
+)
+
+
+def type_checked(
+    directory: Directory, config: DjangoModels, existing: Existing
+) -> None:
+    """Writes the generated code of `every_definition()` into `directory`, the
+    `existing` Django models, and a project's use of it: the manager's QuerySet
+    methods return the Entity's QuerySet, so `as_<view>()` type checks after
+    them."""
+    views, unions = every_definition()
+    Database.files(views, unions, constrained(config)).write(
         LocalFileSystem(), directory
     ).unwrap()
+    for module, source in existing:
+        _ = (directory.root / module.file_path().root).write_text(
+            source.root, encoding="utf-8"
+        )
     _ = (directory.root / "frp_generated_use.py").write_text(
         "import frp_generated_django\n"
         "import frp_generated_models\n"
@@ -2117,15 +2372,22 @@ def type_checked(directory: Directory) -> None:
     )
 
 
-def test_generated_queries_pass_mypy_strict(tmp_path: Path) -> None:
+@type_checked_configs
+def test_generated_queries_pass_mypy_strict(
+    tmp_path: Path, config: DjangoModels, existing: Existing
+) -> None:
     """With django-stubs' mypy plugin, which types Django models from a project's
-    settings: here, an app whose models are the generated ones."""
-    type_checked(Directory(tmp_path))
-    label = Modules.config().app_label.root
+    settings: here, an app whose models are the generated and existing ones."""
+    type_checked(Directory(tmp_path), config, existing)
+    label = config.app_label.root
     (tmp_path / label).mkdir()
     _ = (tmp_path / label / "__init__.py").write_text("", encoding="utf-8")
     _ = (tmp_path / label / "models.py").write_text(
-        f"import {Modules.django.root}\n", encoding="utf-8"
+        "".join(
+            f"import {module.root}\n"
+            for module in (Modules.django, *(module for module, _ in existing))
+        ),
+        encoding="utf-8",
     )
     _ = (tmp_path / "frp_settings.py").write_text(
         f'SECRET_KEY = "test"\nINSTALLED_APPS = [{label!r}]\nUSE_TZ = True\n',
@@ -2173,8 +2435,11 @@ def test_generated_queries_pass_mypy_strict(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_generated_queries_pass_the_type_checker(tmp_path: Path) -> None:
-    type_checked(Directory(tmp_path))
+@type_checked_configs
+def test_generated_queries_pass_the_type_checker(
+    tmp_path: Path, config: DjangoModels, existing: Existing
+) -> None:
+    type_checked(Directory(tmp_path), config, existing)
     source_root = Path(__file__).parents[3]
     _ = (tmp_path / "pyrefly.toml").write_text(
         'project-includes = ["frp_generated_*.py"]\n'
@@ -2216,7 +2481,7 @@ def test_an_unmet_required_field_fails_the_view_models_validation(
     (compiled,) = compile_all([view]).views
 
     with Database.of([view]) as django_models:
-        Database.put(django_models, organisation())
+        Database.put(organisation())
         with pytest.raises(pydantic.ValidationError, match="RequiringEmployee"):
             _ = Database.read(django_models, compiled, every_row)
 
@@ -2258,7 +2523,7 @@ def test_an_unmet_required_entity_raises(step: steps.Step, message: str) -> None
     (compiled,) = compile_all([view]).views
 
     with Database.of([view]) as django_models:
-        Database.put(django_models, organisation())
+        Database.put(organisation())
         with pytest.raises(ValueError, match=message):
             _ = Database.read(django_models, compiled, every_row)
 
@@ -2278,7 +2543,7 @@ def test_a_met_requirement_reads_like_the_engine() -> None:
     (compiled,) = compile_all([view]).views
 
     with Database.of([view]) as django_models:
-        Database.put(django_models, entities)
+        Database.put(entities)
         rows = Database.read(django_models, compiled, every_row)
 
     assert rows == engine_rows([compiled], entities)[view.name]
@@ -2323,8 +2588,8 @@ def test_the_database_refuses_exactly_the_rows_a_check_is_false_for(
         update={"constraints": {case.source: (check,)}}
     )
 
-    with Database.of_config(config, [view], ()) as django_models:
-        refused = Database.rejected(django_models, case.entities, case.source)
+    with Database.of([view], (), config):
+        refused = Database.rejected(case.entities, case.source, config)
 
     rows = {
         Database.primary_key(entity)
@@ -2356,7 +2621,7 @@ def test_the_database_refuses_a_second_row_a_unique_keeps() -> None:
     # A View, so that there is a module of View models.
     view = View(name=ViewName("Departments"), source=Department, step=steps.pipeline())
 
-    with Database.of_config(config, [view], ()) as django_models:
-        refused = Database.rejected(django_models, [company, *named], Department)
+    with Database.of([view], (), config):
+        refused = Database.rejected([company, *named], Department, config)
 
     assert refused == {DepartmentId(1)}

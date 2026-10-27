@@ -28,6 +28,7 @@ from functional_relational_python.entity_graph.id import (
     OneToOneMarker,
 )
 from functional_relational_python.pipeline import conditions, ir, steps, test_ir
+from functional_relational_python.pipeline.constraints import ConditionOwner
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
@@ -97,7 +98,7 @@ def test_each_unknown_projected_field_is_a_diagnostic() -> None:
 
     assert diagnostics_of([view]) == tuple(
         diagnostics.UnknownField(
-            view=view.name,
+            owner=view.name,
             source=ir.SourceName("Company"),
             field=field,
             valid=tuple(map(FieldName, Company.model_fields)),
@@ -119,13 +120,13 @@ def test_steps_after_a_defective_project_are_checked_against_its_known_fields() 
 
     assert diagnostics_of([view]) == (
         diagnostics.UnknownField(
-            view=view.name,
+            owner=view.name,
             source=ir.SourceName("Company"),
             field=unknown,
             valid=tuple(map(FieldName, Company.model_fields)),
         ),
         diagnostics.UnknownField(
-            view=view.name,
+            owner=view.name,
             source=ir.SourceName("Company"),
             field=FieldName("secret"),
             valid=(FieldName("name"),),
@@ -183,7 +184,7 @@ def test_an_unknown_field_names_the_source_the_field_and_the_valid_names() -> No
 
     assert diagnostics_of([view]) == (
         diagnostics.UnknownField(
-            view=view.name,
+            owner=view.name,
             source=ir.SourceName("Company"),
             field=unknown,
             valid=(FieldName("name"), FieldName("revenue")),
@@ -193,7 +194,7 @@ def test_an_unknown_field_names_the_source_the_field_and_the_valid_names() -> No
 
 def test_the_unknown_field_message_contains_the_offending_values() -> None:
     message = diagnostics.UnknownField(
-        view=ViewName("CompanySummary"),
+        owner=ViewName("CompanySummary"),
         source=ir.SourceName("Company"),
         field=FieldName("revnue"),
         valid=(FieldName("name"), FieldName("revenue")),
@@ -298,7 +299,7 @@ def test_renaming_an_unknown_field_is_one_diagnostic_even_if_later_steps_use_it(
 
     assert diagnostics_of([view]) == (
         diagnostics.UnknownField(
-            view=view.name,
+            owner=view.name,
             source=ir.SourceName("Company"),
             field=unknown,
             valid=tuple(map(FieldName, Company.model_fields)),
@@ -316,7 +317,7 @@ def test_renaming_an_unknown_field_onto_an_existing_one_reports_both() -> None:
 
     assert diagnostics_of([view]) == (
         diagnostics.UnknownField(
-            view=view.name,
+            owner=view.name,
             source=ir.SourceName("Company"),
             field=unknown,
             valid=tuple(map(FieldName, Company.model_fields)),
@@ -591,7 +592,7 @@ def test_a_default_for_an_unknown_field_that_is_not_a_literal_reports_both() -> 
 
     assert diagnostics_of([view]) == (
         diagnostics.UnknownField(
-            view=view.name,
+            owner=view.name,
             source=ir.SourceName("Company"),
             field=unknown,
             valid=tuple(map(FieldName, Company.model_fields)),
@@ -819,6 +820,26 @@ def test_n_independent_defects_give_exactly_n_diagnostics(
             )
 
 
+def owner_of(
+    diagnostic: diagnostics.CompileDiagnostic,
+) -> ConditionOwner | UnionName:
+    """The View or Payload a diagnostic names: a Condition's owner, or the
+    View of any other step."""
+    match diagnostic:
+        case (
+            diagnostics.UnknownField()
+            | diagnostics.NotASourceColumn()
+            | diagnostics.ComparedTypesDiffer()
+            | diagnostics.NonLiteralConditionValue()
+            | diagnostics.LiteralTypeMismatch()
+            | diagnostics.OrderingOnOptionalField()
+            | diagnostics.UnorderedFieldType()
+        ):
+            return diagnostic.owner
+        case _:
+            return diagnostic.view
+
+
 @given(views_with_defects())
 def test_only_defective_views_are_poisoned_and_each_names_its_diagnostics(
     case: ViewsWithDefects,
@@ -829,7 +850,7 @@ def test_only_defective_views_are_poisoned_and_each_names_its_diagnostics(
     assert {view.name for view in poisoned} == case.defective_views
     for view in poisoned:
         assert view.diagnostics
-        assert all(d.view == view.name for d in view.diagnostics)
+        assert all(owner_of(d) == view.name for d in view.diagnostics)
 
 
 class Projection(pydantic.BaseModel, frozen=True):
@@ -1192,7 +1213,7 @@ def test_a_defect_in_a_nested_pipeline_names_the_referenced_entity() -> None:
         Employee, steps.resolve(named(FieldName("department_id")), steps.omit(unknown))
     ) == (
         diagnostics.UnknownField(
-            view=ViewName.fake(),
+            owner=ViewName.fake(),
             source=ir.SourceName("Department"),
             field=unknown,
             valid=(FieldName("id"), FieldName("name")),
@@ -1608,7 +1629,7 @@ def test_a_defect_in_a_reversed_nested_pipeline_names_the_reversed_entity() -> N
         ChannelCampaign, steps.reverse(MetaCampaign, steps.omit(unknown))
     ) == (
         diagnostics.UnknownField(
-            view=ViewName.fake(),
+            owner=ViewName.fake(),
             source=ir.SourceName("MetaCampaign"),
             field=unknown,
             valid=tuple(map(FieldName, MetaCampaign.model_fields)),
@@ -2051,7 +2072,7 @@ def test_two_flattened_fields_lifting_one_name_report_the_second() -> None:
         (
             FieldName("budget"),
             diagnostics.UnknownField(
-                view=ViewName.fake(),
+                owner=ViewName.fake(),
                 source=ir.SourceName("Employee"),
                 field=FieldName("budget"),
                 valid=(
@@ -2813,7 +2834,7 @@ def test_a_payload_step_defect_is_reported_under_the_payload_name() -> None:
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
-            assert [d.view for d in error.diagnostics] == [payload.name]
+            assert [owner_of(d) for d in error.diagnostics] == [payload.name]
 
 
 def test_a_name_shared_by_a_view_and_a_payload_is_one_diagnostic() -> None:
@@ -2936,7 +2957,7 @@ def test_retyping_an_unknown_field_is_a_diagnostic() -> None:
 
     assert employee_payload_diagnostics(steps.retype_to(unknown, int)) == (
         diagnostics.UnknownField(
-            view=PayloadName.fake(),
+            owner=PayloadName.fake(),
             source=ir.SourceName("Employee"),
             field=unknown,
             valid=tuple(map(FieldName, Employee.model_fields)),
@@ -3313,7 +3334,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
         (
             steps.where(conditions.is_null(conditions.field(FieldName("nicknme")))),
             diagnostics.UnknownField(
-                view=ViewName.fake(),
+                owner=ViewName.fake(),
                 source=ir.SourceName("Deal"),
                 field=FieldName("nicknme"),
                 valid=tuple(map(FieldName, Deal.model_fields)),
@@ -3325,7 +3346,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
                 steps.where(conditions.eq(conditions.field(FieldName("kind")), "deal")),
             ),
             diagnostics.NotASourceColumn(
-                view=ViewName.fake(),
+                owner=ViewName.fake(),
                 source=ir.SourceName("Deal"),
                 field=FieldName("kind"),
             ),
@@ -3335,14 +3356,14 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
                 conditions.eq(conditions.field(FieldName("name")), [Text("Acme")])
             ),
             diagnostics.NonLiteralConditionValue(
-                view=ViewName.fake(),
+                owner=ViewName.fake(),
                 value=diagnostics.LiteralText.of([Text("Acme")]),
             ),
         ),
         (
             steps.where(conditions.eq(conditions.field(FieldName("name")), "Acme")),
             diagnostics.LiteralTypeMismatch(
-                view=ViewName.fake(),
+                owner=ViewName.fake(),
                 source=ir.SourceName("Deal"),
                 field=FieldName("name"),
                 annotation=Text,
@@ -3352,7 +3373,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
         (
             steps.where(conditions.eq(conditions.field(FieldName("name")), None)),
             diagnostics.LiteralTypeMismatch(
-                view=ViewName.fake(),
+                owner=ViewName.fake(),
                 source=ir.SourceName("Deal"),
                 field=FieldName("name"),
                 annotation=Text,
@@ -3367,7 +3388,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
                 )
             ),
             diagnostics.ComparedTypesDiffer(
-                view=ViewName.fake(),
+                owner=ViewName.fake(),
                 source=ir.SourceName("Deal"),
                 field=FieldName("name"),
                 annotation=Text,
@@ -3378,7 +3399,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
         (
             steps.where(conditions.gt(conditions.field(FieldName("bonus")), Score(1))),
             diagnostics.OrderingOnOptionalField(
-                view=ViewName.fake(),
+                owner=ViewName.fake(),
                 source=ir.SourceName("Deal"),
                 field=FieldName("bonus"),
                 operator=ir.ComparisonOperator.GT,
@@ -3392,7 +3413,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
                 )
             ),
             diagnostics.OrderingOnOptionalField(
-                view=ViewName.fake(),
+                owner=ViewName.fake(),
                 source=ir.SourceName("Deal"),
                 field=FieldName("bonus"),
                 operator=ir.ComparisonOperator.LE,
@@ -3401,7 +3422,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
         (
             steps.where(conditions.lt(conditions.field(FieldName("name")), Text("M"))),
             diagnostics.UnorderedFieldType(
-                view=ViewName.fake(),
+                owner=ViewName.fake(),
                 source=ir.SourceName("Deal"),
                 field=FieldName("name"),
                 annotation=Text,
@@ -3438,7 +3459,7 @@ def test_a_condition_on_a_resolved_field_is_a_diagnostic() -> None:
 
     assert reported == (
         diagnostics.NotASourceColumn(
-            view=ViewName.fake(),
+            owner=ViewName.fake(),
             source=ir.SourceName("Employee"),
             field=FieldName("mentor"),
         ),
@@ -3533,7 +3554,7 @@ class Rival(pydantic.BaseModel):
         (
             conditions.gt(conditions.field(FieldName("score")), Score(1)),
             diagnostics.OrderingOnOptionalField(
-                view=ViewName.fake(),
+                owner=ViewName.fake(),
                 source=ir.SourceName("Rival"),
                 field=FieldName("score"),
                 operator=ir.ComparisonOperator.GT,
@@ -3597,7 +3618,7 @@ def test_a_bool_or_float_for_a_narrower_number_field_is_a_diagnostic(
 
     assert diagnostics_of([view]) == (
         diagnostics.LiteralTypeMismatch(
-            view=view.name,
+            owner=view.name,
             source=ir.SourceName("Measure"),
             field=field,
             annotation=Measure.model_fields[field.root].annotation,
@@ -3642,7 +3663,7 @@ def test_building_a_where_checks_nothing() -> None:
         ),
         (
             diagnostics.NotASourceColumn(
-                view=ViewName("DealView"),
+                owner=ViewName("DealView"),
                 source=ir.SourceName("Deal"),
                 field=FieldName("kind"),
             ),
@@ -3653,7 +3674,7 @@ def test_building_a_where_checks_nothing() -> None:
         ),
         (
             diagnostics.NonLiteralConditionValue(
-                view=ViewName("DealView"), value=diagnostics.LiteralText.of([1])
+                owner=ViewName("DealView"), value=diagnostics.LiteralText.of([1])
             ),
             (
                 "DealView: a condition cannot compare with [1]. A literal is None, a "
@@ -3663,7 +3684,7 @@ def test_building_a_where_checks_nothing() -> None:
         ),
         (
             diagnostics.LiteralTypeMismatch(
-                view=ViewName("DealView"),
+                owner=ViewName("DealView"),
                 source=ir.SourceName("Deal"),
                 field=FieldName("name"),
                 annotation=int,
@@ -3676,7 +3697,7 @@ def test_building_a_where_checks_nothing() -> None:
         ),
         (
             diagnostics.ComparedTypesDiffer(
-                view=ViewName("DealView"),
+                owner=ViewName("DealView"),
                 source=ir.SourceName("Deal"),
                 field=FieldName("name"),
                 annotation=int,
@@ -3690,7 +3711,7 @@ def test_building_a_where_checks_nothing() -> None:
         ),
         (
             diagnostics.OrderingOnOptionalField(
-                view=ViewName("DealView"),
+                owner=ViewName("DealView"),
                 source=ir.SourceName("Deal"),
                 field=FieldName("bonus"),
                 operator=ir.ComparisonOperator.GT,
@@ -3699,7 +3720,7 @@ def test_building_a_where_checks_nothing() -> None:
         ),
         (
             diagnostics.UnorderedFieldType(
-                view=ViewName("DealView"),
+                owner=ViewName("DealView"),
                 source=ir.SourceName("Deal"),
                 field=FieldName("name"),
                 annotation=int,

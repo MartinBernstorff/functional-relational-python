@@ -20,7 +20,7 @@ from functional_relational_python.support.diagnostic import (
 class UnknownField(pydantic.BaseModel, Diagnostic, frozen=True):
     """A step names a field the relation does not have at that point."""
 
-    view: ConditionOwner
+    owner: ConditionOwner
     source: ir.SourceName
     field: FieldName
     valid: tuple[FieldName, ...]
@@ -28,7 +28,7 @@ class UnknownField(pydantic.BaseModel, Diagnostic, frozen=True):
     def describe(self) -> DiagnosticMessage:
         valid = ", ".join(f"'{name.root}'" for name in self.valid)
         return DiagnosticMessage(
-            f"{self.view.root}: {self.source.root} has no field "
+            f"{self.owner.root}: {self.source.root} has no field "
             f"'{self.field.root}'. Valid fields: {valid}."
         )
 
@@ -395,13 +395,13 @@ class NotASourceColumn(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition names a field whose value is not one of the Source's own
     fields: a resolved or an added field."""
 
-    view: ConditionOwner
+    owner: ConditionOwner
     source: ir.SourceName
     field: FieldName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: a condition cannot use '{self.field.root}', because "
+            f"{self.owner.root}: a condition cannot use '{self.field.root}', because "
             f"its value is not one of {self.source.root}'s own fields."
         )
 
@@ -417,12 +417,12 @@ class LiteralText(pydantic.RootModel[str], frozen=True):
 class NonLiteralConditionValue(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition compares with a value that generated code cannot write out."""
 
-    view: ConditionOwner
+    owner: ConditionOwner
     value: LiteralText
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: a condition cannot compare with {self.value.root}. "
+            f"{self.owner.root}: a condition cannot compare with {self.value.root}. "
             "A literal is None, a boolean, a finite number, a string, an enum "
             "member, or a RootModel of one of these."
         )
@@ -432,7 +432,7 @@ class LiteralTypeMismatch(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition compares a field with a literal that is not an instance of the
     field's type, or with `None` when the field is not optional."""
 
-    view: ConditionOwner
+    owner: ConditionOwner
     source: ir.SourceName
     field: FieldName
     annotation: RuntimeAnnotation
@@ -440,7 +440,7 @@ class LiteralTypeMismatch(pydantic.BaseModel, Diagnostic, frozen=True):
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: a condition compares {self.source.root}."
+            f"{self.owner.root}: a condition compares {self.source.root}."
             f"{self.field.root}, typed {self.annotation!r}, with {self.value.root}, "
             "which is not of that type."
         )
@@ -450,7 +450,7 @@ class ComparedTypesDiffer(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition compares two fields of different types, apart from either being
     optional."""
 
-    view: ConditionOwner
+    owner: ConditionOwner
     source: ir.SourceName
     field: FieldName
     annotation: RuntimeAnnotation
@@ -459,7 +459,7 @@ class ComparedTypesDiffer(pydantic.BaseModel, Diagnostic, frozen=True):
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: a condition compares {self.source.root}."
+            f"{self.owner.root}: a condition compares {self.source.root}."
             f"{self.field.root}, typed {self.annotation!r}, with "
             f"'{self.other.root}', typed {self.other_annotation!r}."
         )
@@ -469,14 +469,14 @@ class OrderingOnOptionalField(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition orders an optional field, which may be `None`, and `None` has
     no order."""
 
-    view: ConditionOwner
+    owner: ConditionOwner
     source: ir.SourceName
     field: FieldName
     operator: ir.ComparisonOperator
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: cannot compare {self.source.root}.{self.field.root} "
+            f"{self.owner.root}: cannot compare {self.source.root}.{self.field.root} "
             f"with '{self.operator.value}', because it is optional."
         )
 
@@ -484,7 +484,7 @@ class OrderingOnOptionalField(pydantic.BaseModel, Diagnostic, frozen=True):
 class UnorderedFieldType(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition orders a field whose type defines no such ordering."""
 
-    view: ConditionOwner
+    owner: ConditionOwner
     source: ir.SourceName
     field: FieldName
     annotation: RuntimeAnnotation
@@ -492,7 +492,7 @@ class UnorderedFieldType(pydantic.BaseModel, Diagnostic, frozen=True):
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: cannot compare {self.source.root}.{self.field.root} "
+            f"{self.owner.root}: cannot compare {self.source.root}.{self.field.root} "
             f"with '{self.operator.value}', because its type {self.annotation!r} "
             "does not define it."
         )
