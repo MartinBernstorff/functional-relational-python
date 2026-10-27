@@ -130,6 +130,21 @@ class ValueExpression(pydantic.RootModel[str], frozen=True):
     """A value as it is written in generated source, e.g. a field's default."""
 
     @staticmethod
+    def of_scalar(value: object) -> ValueExpression:
+        """`value`, e.g. a string, bytes or a finite number, written as ruff
+        formats it: a string or bytes in the quotes ruff writes, and a float's
+        exponent without a `+`."""
+        match value:
+            case str():
+                return PythonString(value).literal()
+            case bytes():
+                return PythonBytes(value).literal()
+            case float():
+                return ValueExpression(float.__repr__(value).replace("e+", "e"))
+            case _:
+                return ValueExpression(repr(value))
+
+    @staticmethod
     def of_enum_member(
         enum_class: TypeExpression, member: enum.Enum
     ) -> ValueExpression:

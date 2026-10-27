@@ -127,14 +127,16 @@ class Indent(pydantic.RootModel[int], frozen=True):
     def assigned(self, target: Expression, value: Expression) -> Expression:
         """`<target> = <value>` on a line at this indentation, split as ruff
         format splits it: as `fitted` splits it, unless the line up to the
-        value's last opening bracket does not fit. Then the value is
-        parenthesized on lines of its own, split as `fitted` splits it."""
+        value's last opening bracket does not fit, and `<target> = (` does. Then
+        the value is parenthesized on lines of its own, split as `fitted` splits
+        it."""
         line = Expression(f"{target.root} = {value.root}")
+        pad = self.pad().root
         match _Bracketed.of(value):
             case _Bracketed(head=head) if (
-                len(f"{self.pad().root}{line.root}") > LineLength.default().root
-                and len(f"{self.pad().root}{target.root} = {head.root}")
-                > LineLength.default().root
+                len(f"{pad}{line.root}") > LineLength.default().root
+                and len(f"{pad}{target.root} = {head.root}") > LineLength.default().root
+                and len(f"{pad}{target.root} = (") <= LineLength.default().root
             ):
                 inner = self.deeper()
                 written = inner.fitted(value, Expression("")).root

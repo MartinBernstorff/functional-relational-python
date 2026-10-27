@@ -62,7 +62,6 @@ from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     LineLength,
     ModulePath,
-    PythonBytes,
     PythonString,
     Symbol,
     TypeExpression,
@@ -1569,23 +1568,12 @@ class _ChoiceValues(pydantic.BaseModel, frozen=True):
         )
         if unwritable:
             return Err(UnwritableChoicesError(self.values_of, unwritable))
-        written = [_ChoiceValues._written(value).root for value in self.stored]
+        written = [ValueExpression.of_scalar(value).root for value in self.stored]
         return Ok(
             ValueExpression(
                 f"[{', '.join(f'({value}, {value})' for value in written)}]"
             )
         )
-
-    @staticmethod
-    def _written(value: StoredValue) -> ValueExpression:
-        """`value` as source, in the quotes ruff writes."""
-        match value:
-            case str():
-                return PythonString(value).literal()
-            case bytes():
-                return PythonBytes(value).literal()
-            case _:
-                return ValueExpression(repr(value))
 
 
 class _TypedField(pydantic.BaseModel, frozen=True):

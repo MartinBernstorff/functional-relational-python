@@ -389,10 +389,8 @@ class ConditionWriter(pydantic.BaseModel, frozen=True):
         """`literal` as Django stores it: a RootModel as its root, and an enum
         member as its value."""
         match literal:
-            case ir.ScalarLiteral(root=str() as text):
-                return Expression(PythonString(text).literal().root)
             case ir.ScalarLiteral(root=value):
-                return Expression(repr(value))
+                return Expression(ValueExpression.of_scalar(value).root)
             case ir.EnumLiteral(member=member):
                 written = ValueExpression.of_enum_member(
                     self.enums[type(member)], member

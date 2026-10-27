@@ -1735,17 +1735,28 @@ class QuotedId(Id[int]):
     pass
 
 
+class Rate(float, enum.Enum):
+    BIG = 1e16
+
+
+Vast = Annotated[float, annotated_types.Gt(1e20)]
+
+
 class Quoted(pydantic.BaseModel):
-    """Choices that hold quotes and bytes, and names long enough that a line of
-    the model does not fit."""
+    """Choices that hold quotes, bytes and floats with exponents, and names long
+    enough that a line of the model does not fit."""
 
     id: QuotedId
     said: Literal["it's", 'say "hi"', "plain"]
     raw: Literal[b"it's", b"plain"]
+    rate: Rate
+    bounded: Vast
     a_reference_with_a_name_long_enough_that_its_line_does_not_fit_id: CompanyId
     an_optional_reference_whose_line_does_not_fit_even_split_over_lines_id: (
         CompanyId | None
     )
+    a_reference_named_so_long_that_even_its_line_up_to_an_opening_parenthesis_does_not_fit_id: CompanyId
+    a_text_named_so_long_that_its_line_does_not_fit_and_has_nothing_to_split_or_to_be_parenthesized_in: Text
     choices_too_many_for_one_line: Literal[
         "first choice",
         "second choice",
@@ -2056,7 +2067,7 @@ def campaign_config(constraints: Iterable[Constraint]) -> DjangoModels:
 
 def test_golden_constraints() -> None:
     """A Check is written as the negation of the rows it excludes, a Unique as the
-    rows it applies to, and a bound of a field"s type as a Check of its own."""
+    rows it applies to, and a bound of a field's type as a Check of its own."""
     text = render([Company, Campaign], campaign_config(campaign_constraints())).root
 
     assert (

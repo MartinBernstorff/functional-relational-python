@@ -31,7 +31,6 @@ from functional_relational_python.entity_graph.id import OneToOneMarker
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     ModulePath,
-    PythonString,
     Symbol,
     TypeExpression,
     ValueExpression,
@@ -790,10 +789,8 @@ class _AnnotationRenderer:
         match default:
             case ir.NoDefault():
                 return default
-            case ir.ScalarDefault(root=str() as text):
-                return PythonString(text).literal()
             case ir.ScalarDefault(root=value):
-                written = repr(value)
+                return ValueExpression.of_scalar(value)
             case ir.MissingDefault():
                 self.symbols.add(_AnnotationRenderer.missing)
                 written = _AnnotationRenderer.missing.reference().root
@@ -851,10 +848,8 @@ class _AnnotationRenderer:
         match arg:
             case enum.Enum():
                 return ValueExpression.of_enum_member(self._named(type(arg)), arg)
-            case str():
-                return PythonString(arg).literal()
             case _:
-                return ValueExpression(repr(arg))
+                return ValueExpression.of_scalar(arg)
 
     def _named(self, annotation: ir.RuntimeAnnotation) -> TypeExpression:
         match Symbol.of(annotation):
