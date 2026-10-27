@@ -502,6 +502,11 @@ class Added(pydantic.BaseModel, frozen=True):
         return ()
 
 
+class Undeclared(pydantic.BaseModel, frozen=True):
+    """A lifted field the Entity found does not declare: one recovered from a
+    defective step."""
+
+
 class Lifted(pydantic.BaseModel, frozen=True):
     """The value of `field` of the Entity found by following each of `through` in
     turn from the subject: a field `flatten` lifted out of a resolved field. It is
@@ -513,21 +518,25 @@ class Lifted(pydantic.BaseModel, frozen=True):
     def lookups(self) -> tuple[EntityLookup, ...]:
         return self.through
 
+    def declared(self) -> FieldInfo | Undeclared:
+        """The field this value reads, as the Entity found declares it."""
+        declared = self.through[-1].target.model_fields.get(self.field.field.root)
+        if declared is None:
+            return Undeclared()
+        return declared
+
     def required(self) -> Lifted:
         """This value, required by the View: every Lookup on the way must find an
-        Entity, and its field must hold a value."""
-        read = self.field.field
-        declared = self.through[-1].target.model_fields.get(read.root)
-        # A field recovered from a defective step may name no field of the
-        # Entity; it is left as it is.
-        optionality = (
-            Optionality.REQUIRED
-            if declared is None
-            else Optionality.of_aliased_annotation(declared.annotation).optionality
-        )
+        Entity, and its field must hold a value. An Undeclared field is left as it
+        is."""
+        match self.declared():
+            case FieldInfo(annotation=annotation):
+                optionality = Optionality.of_aliased_annotation(annotation).optionality
+            case Undeclared():
+                optionality = Optionality.REQUIRED
         match optionality:
             case Optionality.OPTIONAL:
-                field: SubjectColumn = RequiredField(field=read)
+                field: SubjectColumn = RequiredField(field=self.field.field)
             case Optionality.REQUIRED:
                 field = self.field
         return Lifted(

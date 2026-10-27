@@ -36,15 +36,15 @@ A row is validated non-strictly, so a View model with a strict base accepts what
 Django returns, e.g. a `str` for an enum field. A field typed by a `Literal` of
 enum members, e.g. one a Filter narrows, is read through its enum, since pydantic
 does not take a member's value for a `Literal` of a plain `enum.Enum`. A field
-lifted out of an Entity that declares it as a RootModel whose root may be `None`
-is read through that RootModel, so a NULL in an Entity found is that RootModel of
-`None`, not the `None` of no Entity found. A field the
-View requires that is `None` fails that validation with a
-`pydantic.ValidationError` naming the View model and the field. An Entity the View
-requires that the row does not have raises `ValueError` through the function
-`_required` the module defines, as in a module of mapping functions: a field read
-through it may be optional, so validation alone would not catch it. Both are a
-`ValueError`.
+lifted out of an Entity that declares it as a required RootModel whose column
+may be NULL, e.g. `Rank(RootModel[int | None])`, is validated as that RootModel,
+so a NULL of an Entity found is `Rank(None)`, not the `None` of no Entity found.
+A field the View requires that is `None` fails that validation with a
+`pydantic.ValidationError` naming the View model and the field. An Entity the
+View requires that the row does not have raises `ValueError` through the
+function `_required` the module defines, as in a module of mapping functions: a
+field read through it may be optional, so validation alone would not catch it.
+Both are a `ValueError`.
 
 A one-to-one Reference is followed backwards through the reverse accessor the
 Django models give it. Django raises for a reverse accessor that found no row, so
@@ -65,6 +65,7 @@ import typing
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 import pydantic
+from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler, narrowing
@@ -462,7 +463,11 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         classes: dict[type, Symbol] = {}
         unimportable: list[DjangoQueriesDiagnostic] = []
         for query in queries:
-            for used in dict.fromkeys(_ClassesUsed.by(query.view)):
+            for used, field in dict.fromkeys(
+                _ClassesUsed.by(
+                    query.view, graph, FieldTypes(overrides=config.field_types)
+                )
+            ):
                 match Symbol.of(used):
                     case Ok(symbol):
                         classes[used] = symbol
@@ -470,7 +475,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                         unimportable.append(
                             Unimportable(
                                 view=query.view.name,
-                                field=None,
+                                field=field,
                                 annotation=AnnotationText.of(used),
                             )
                         )
@@ -1018,15 +1023,19 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
 
 
 class _ClassesUsed:
-    """The classes a View's query code refers to."""
+    """The classes a View's query code refers to, each with the field read
+    through it, or `None` for the enum of a Filter's literal."""
 
     @staticmethod
-    def by(view: compiler.CompiledView) -> Iterator[type]:
+    def by(
+        view: compiler.CompiledView, graph: EntityGraph, field_types: FieldTypes
+    ) -> Iterator[tuple[type, FieldName | None]]:
         """The enum of every Filter's enum literal, and the class every field is
         read through, nested ones included."""
         for kept in view.relation.filters:
-            yield from _ClassesUsed._in_filter(kept)
-        yield from _ClassesUsed._in_relation(view.relation)
+            for enum_class in _ClassesUsed._in_filter(kept):
+                yield enum_class, None
+        yield from _ClassesUsed._in_relation(view.relation, graph, field_types)
 
     @staticmethod
     def _in_filter(kept: ir.Filter) -> Iterator[type[enum.Enum]]:
@@ -1054,15 +1063,20 @@ class _ClassesUsed:
                 yield from _ClassesUsed._in_operand(root)
 
     @staticmethod
-    def _in_relation(relation: ir.Relation) -> Iterator[type[enum.Enum]]:
+    def _in_relation(
+        relation: ir.Relation, graph: EntityGraph, field_types: FieldTypes
+    ) -> Iterator[tuple[type, FieldName]]:
         for field in relation.fields:
             match field:
                 case ir.NestedField(relation=nested):
-                    yield from _ClassesUsed._in_relation(nested)
+                    yield from _ClassesUsed._in_relation(nested, graph, field_types)
                 case ir.Field():
-                    match _ReadThrough.of(field):
-                        case _ReadThrough(through=through):
-                            yield through
+                    match _ReadThrough.of(field, graph, field_types):
+                        case (
+                            _ThroughEnum(enum_class=through)
+                            | _ThroughRootModel(root_model=through)
+                        ):
+                            yield through, field.name
                         case _ReadAsStored():
                             pass
 
@@ -1071,41 +1085,51 @@ class _ReadAsStored(pydantic.BaseModel, frozen=True):
     """A field read as Django returns it."""
 
 
-class _ReadThrough(pydantic.BaseModel, frozen=True):
-    """A field whose value Django returns goes through the class `through` before
-    the View model validates it:
+class _ThroughEnum(pydantic.BaseModel, frozen=True):
+    """A field read from one of the subject's own fields, typed by a `Literal` of
+    members of `enum_class`, e.g. one a Filter narrows to `Literal[Role.LEAD]`.
 
-    - The enum of a field read from one of the subject's own fields, typed by a
-      `Literal` of its members, e.g. one a Filter narrows to `Literal[Role.LEAD]`.
-      pydantic does not take a member's value for a `Literal` of members of a
-      plain `enum.Enum`, even non-strictly.
-    - The RootModel of a field lifted out of an Entity that declares it as one
-      whose root may be `None`, e.g. `Rank(RootModel[int | None])`. Lifted
-      through an optional Lookup, the field is `Rank | None`, which pydantic
-      validates a NULL as `None`, not as the `Rank(None)` the Entity holds.
+    pydantic does not take a member's value for a `Literal` of members of a plain
+    `enum.Enum`, even non-strictly, so the value Django returns goes through
+    `enum_class` first.
     """
 
-    through: type
+    enum_class: type[enum.Enum]
+
+
+class _ThroughRootModel(pydantic.BaseModel, frozen=True):
+    """A field lifted out of an Entity that declares it as `root_model`, required,
+    whose column may still be NULL because a type it wraps admits `None`, e.g.
+    `Rank(RootModel[int | None])`.
+
+    Lifted through an optional Lookup, the field is `Rank | None`, which pydantic
+    validates a NULL as `None`, not as the `Rank(None)` the Entity holds, so the
+    value Django returns is validated as `root_model` first, non-strictly like
+    the row.
+    """
+
+    root_model: type[pydantic.BaseModel]
+
+
+class _ReadThrough:
+    """How the value Django returns for a field is read."""
 
     @staticmethod
-    def of(field: ir.Field) -> _ReadThrough | _ReadAsStored:
+    def of(
+        field: ir.Field, graph: EntityGraph, field_types: FieldTypes
+    ) -> _ThroughEnum | _ThroughRootModel | _ReadAsStored:
         match field.value:
             case ir.SourceField() | ir.RequiredField():
                 return _ReadThrough._literal_enum(field.annotation())
-            case ir.Lifted(through=through, field=read):
-                declared = through[-1].target.model_fields.get(read.field.root)
-                # A field recovered from a defective step may name no field of
-                # the Entity; it is read as it is.
-                if declared is None:
-                    return _ReadAsStored()
-                return _ReadThrough._wrapping_none(declared.annotation)
+            case ir.Lifted() as lifted:
+                return _ReadThrough._wrapping_none(lifted, graph, field_types)
             case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() | ir.Added():
                 return _ReadAsStored()
 
     @staticmethod
     def _literal_enum(
         annotation: ir.RuntimeAnnotation,
-    ) -> _ReadThrough | _ReadAsStored:
+    ) -> _ThroughEnum | _ReadAsStored:
         split = narrowing.split(annotation)
         members = typing.get_args(split.required)
         classes = {type(member) for member in members}
@@ -1113,23 +1137,27 @@ class _ReadThrough(pydantic.BaseModel, frozen=True):
             case Optionality.REQUIRED, typing.Literal, (enum_class,) if issubclass(
                 enum_class, enum.Enum
             ):
-                return _ReadThrough(through=enum_class)
+                return _ThroughEnum(enum_class=enum_class)
             case _:
                 return _ReadAsStored()
 
     @staticmethod
     def _wrapping_none(
-        annotation: ir.RuntimeAnnotation,
-    ) -> _ReadThrough | _ReadAsStored:
-        split = narrowing.split(annotation)
-        match split.optionality, split.required:
-            case Optionality.REQUIRED, type() as root_model if issubclass(
-                root_model, pydantic.RootModel
-            ) and (
-                narrowing.split(root_model.model_fields["root"].annotation).optionality
-                is Optionality.OPTIONAL
+        lifted: ir.Lifted, graph: EntityGraph, field_types: FieldTypes
+    ) -> _ThroughRootModel | _ReadAsStored:
+        match lifted.declared():
+            case FieldInfo(annotation=annotation):
+                split = narrowing.split(annotation)
+            case ir.Undeclared():
+                return _ReadAsStored()
+        column = DjangoModelsRenderer.column_optionality(
+            graph.entities[lifted.through[-1].target], lifted.field.field, field_types
+        )
+        match split.optionality, column, split.required:
+            case Optionality.REQUIRED, Optionality.OPTIONAL, type() as root_model if (
+                issubclass(root_model, pydantic.RootModel)
             ):
-                return _ReadThrough(through=root_model)
+                return _ThroughRootModel(root_model=root_model)
             case _:
                 return _ReadAsStored()
 
@@ -1556,14 +1584,17 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                     lambda indent: self.at(indent).fields(nested, followed.reached),
                 )
             case ir.Field(value=value):
-                pass
+                field_types = FieldTypes(overrides=self.config.field_types)
+                read_as = _ReadThrough.of(field, self.graph, field_types)
         row = reached.row()
         match value:
             case ir.SourceField() | ir.RequiredField():
                 # A required field that is `None` fails the View model's validation.
                 node = self.graph.entities[reached.trail.subject]
                 attribute = DjangoModelsRenderer.attribute_of(node, value.field)
-                return self._through(field, Expression(f"{row.root}.{attribute.root}"))
+                return self._through(
+                    read_as, Expression(f"{row.root}.{attribute.root}")
+                )
             case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
                 followed = self._followed(value.lookups(), reached)
                 return self.indent.looked_up(
@@ -1578,21 +1609,29 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                 node = self.graph.entities[through[-1].target]
                 attribute = DjangoModelsRenderer.attribute_of(node, read_field.field)
                 lifted = self._through(
-                    field,
+                    read_as,
                     Expression(f"{followed.reached.row().root}.{attribute.root}"),
                 )
                 return self.indent.looked_up(prefix, followed.absent, lambda _: lifted)
             case ir.Added():
                 return LeftOut()
 
-    def _through(self, field: ir.Field, read: Expression) -> Expression:
-        """`read`, the value of `field` Django returns, through the class it is
-        read through, if any."""
-        match _ReadThrough.of(field):
-            case _ReadThrough(through=through):
+    def _through(
+        self,
+        through: _ThroughEnum | _ThroughRootModel | _ReadAsStored,
+        read: Expression,
+    ) -> Expression:
+        """`read`, a value Django returns, read as `through` says."""
+        match through:
+            case _ThroughEnum(enum_class=enum_class):
                 return Expression(
-                    f"{self.classes[through].qualified().root}({read.root})"
+                    f"{self.classes[enum_class].qualified().root}({read.root})"
                 )
+            case _ThroughRootModel(root_model=root_model):
+                validated = (
+                    f"{self.classes[root_model].qualified().root}.model_validate"
+                )
+                return Expression(f"{validated}({read.root}, strict=False)")
             case _ReadAsStored():
                 return read
 
