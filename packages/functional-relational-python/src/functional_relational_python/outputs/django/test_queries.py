@@ -56,6 +56,7 @@ from functional_relational_python.outputs.python.plan import (
     PythonLayout,
     PythonPlan,
     Scope,
+    Unimportable,
 )
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
@@ -163,10 +164,15 @@ class Rank(pydantic.RootModel[int | None], frozen=True):
         )
 
 
+class Stars(pydantic.RootModel[Rank], frozen=True, strict=True):
+    """Never `None` itself, but its column may be NULL through the Rank it wraps.
+    Strict, so only a non-strict validation takes a NULL for it."""
+
+
 class Badge(pydantic.BaseModel, frozen=True):
     """Followed backwards from the Employee wearing it. `label` and `caption` are
     both optional and of one type, so they can be compared with each other.
-    `rank` may be ordered, but its column may be NULL."""
+    `rank` may be ordered, but its column may be NULL, as may that of `stars`."""
 
     id: BadgeId
     employee_id: Annotated[EmployeeId, OneToOne()]
@@ -174,6 +180,7 @@ class Badge(pydantic.BaseModel, frozen=True):
     caption: Text | None
     level: Level
     rank: Rank
+    stars: Stars
 
 
 class Note(pydantic.BaseModel, frozen=True):
@@ -1149,6 +1156,7 @@ def badges(employees: Sequence[Employee]) -> tuple[Badge, ...]:
             caption=None if index % 2 == 0 else Text("label 1"),
             level=Level.GOLD if index % 2 else Level.BRONZE,
             rank=Rank(None if index % 4 == 0 else index),
+            stars=Stars(Rank(None if index % 3 == 1 else index)),
         )
         for index, employee in enumerate(employees[:-1])
     )
@@ -1273,6 +1281,18 @@ def read_views() -> list[View]:
             source=Employee,
             step=steps.pipeline(
                 steps.reverse(Badge, steps.project([FieldName("level")])),
+                steps.flatten(FieldName("badge")),
+            ),
+        ),
+        # A NULL rank of a Badge found is `Rank(None)`; one of no Badge, `None`.
+        # Likewise for stars, wrapping a Rank.
+        View(
+            name=ViewName("FlattenedRank"),
+            source=Employee,
+            step=steps.pipeline(
+                steps.reverse(
+                    Badge, steps.project([FieldName("rank"), FieldName("stars")])
+                ),
                 steps.flatten(FieldName("badge")),
             ),
         ),
@@ -1858,6 +1878,56 @@ def test_entities_with_one_name_are_left_to_the_django_models_to_report() -> Non
     assert isinstance(rendered, Ok)
 
 
+def plaque() -> type[pydantic.BaseModel]:
+    """An Entity on a Company, with a field of a RootModel defined in a function,
+    whose column may be NULL."""
+
+    class PlaqueId(Id[int]):
+        pass
+
+    class Score(pydantic.RootModel[int | None]):
+        pass
+
+    class Plaque(pydantic.BaseModel):
+        id: PlaqueId
+        company_id: Annotated[CompanyId, OneToOne()]
+        score: Score
+
+    return Plaque
+
+
+def test_an_unimportable_class_a_field_is_read_through_names_the_field() -> None:
+    plaque_entity = plaque()
+    graph = EntityGraph.build(
+        [Company, plaque_entity], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+    view = View(
+        name=ViewName("CompanyScore"),
+        source=Company,
+        step=steps.pipeline(
+            steps.reverse(plaque_entity, steps.project([FieldName("score")])),
+            steps.flatten(FieldName("plaque")),
+        ),
+    )
+    compiled = compiler.compile_views(graph, [view], []).unwrap()
+
+    rendered = DjangoQueriesRenderer.render(
+        graph, Modules.config(), compiled.views, placed_into(Generated.models, compiled)
+    )
+
+    assert isinstance(rendered, Err)
+    assert (
+        Unimportable(
+            view=view.name,
+            field=FieldName("score"),
+            annotation=AnnotationText.of(
+                plaque_entity.model_fields["score"].annotation
+            ),
+        )
+        in rendered.error.diagnostics
+    )
+
+
 # Differential test: for generated Entities and pipelines, the generated queries
 # and the InMemoryViewEngine give the same View results.
 
@@ -1922,9 +1992,8 @@ def entities(draw: st.DrawFn) -> tuple[pydantic.BaseModel, ...]:
             label=draw(st.none() | texts),
             caption=draw(st.none() | texts),
             level=draw(st.sampled_from(Level)),
-            # Never `None`: a View lifting an optional Rank reads a NULL one as
-            # `None`, not `Rank(None)`, which `read_views` avoids.
-            rank=Rank(draw(st.integers(min_value=0, max_value=2))),
+            rank=Rank(draw(st.none() | st.integers(min_value=0, max_value=2))),
+            stars=Stars(Rank(draw(st.none() | st.integers(min_value=0, max_value=2)))),
         )
         for index, employee_id in enumerate(worn_by)
     ]
@@ -1961,7 +2030,7 @@ def field_conditions(
         for entity in stored
         if type(entity) is source
         and (value := getattr(entity, name)) is not None
-        and value != Rank(None)
+        and value not in (Rank(None), Stars(Rank(None)))
     ]
     same_type = [
         other
