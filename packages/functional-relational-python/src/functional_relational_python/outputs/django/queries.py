@@ -600,8 +600,9 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     def _clashes(
         self, entities: Sequence[type[pydantic.BaseModel]]
     ) -> Iterator[NameClash]:
-        """Names bound twice. Entities named alike are left to the Django models
-        to report, so their QuerySets and Managers are counted once."""
+        """Names bound twice. Entities whose Django models are named alike are
+        left to the Django models to report, so their QuerySets and Managers are
+        counted once."""
         module = Namespace(Scope(self.config.queries.root))
         for query in self._read():
             for function, role in (
@@ -615,7 +616,9 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                         f"(the {role} of {query.describe().root})"
                     ),
                 )
-        named = {entity.__name__: entity for entity in reversed(entities)}
+        named = {
+            self.config.model_name_of(entity): entity for entity in reversed(entities)
+        }
         for entity in named.values():
             for symbol, role in (
                 (self.config.query_set_of(entity), "QuerySet"),
