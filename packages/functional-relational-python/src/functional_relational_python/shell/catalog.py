@@ -52,7 +52,8 @@ class Catalog(pydantic.BaseModel, frozen=True):
     Source or an Entity a View looks up, or a module named like a package other
     files are generated into (`app` when generating `app.views`). `django`
     generates a Django model per Entity, and Django queries for each View over
-    an Entity, see `DjangoModels`. `id_base` is `IdBase(Id)`, or an application's
+    an Entity, see `DjangoModels`. An Entity listed in `DjangoModels.existing`
+    gets no generated model, since the application already has one. `id_base` is `IdBase(Id)`, or an application's
     own base, and `one_to_one_marker` is `OneToOneMarker(OneToOne)`, or an
     application's own marker, so that the Entity modules, and with them the
     generated code, do not need frp installed.
