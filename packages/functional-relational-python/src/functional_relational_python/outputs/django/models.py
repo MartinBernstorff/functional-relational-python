@@ -2004,8 +2004,7 @@ class DjangoModelsRenderer:
     ) -> Result[GeneratedFiles, DiagnosticsError[DjangoDiagnostic]]:
         """The module of Django models, or every diagnostic.
 
-        Its imports of `first_party` packages, and of the packages of the Django
-        models and queries modules, are first party.
+        Its imports of `first_party` packages are first party.
 
         Models are in name order, and refer to each other by name, so the order of
         Entities does not matter.
@@ -2157,9 +2156,7 @@ class DjangoModelsRenderer:
                                         qualname=(DjangoModelsRenderer.models_import,),
                                     )
                                 },
-                                first_party=first_party.with_generated(
-                                    (config.module, config.queries)
-                                ),
+                                first_party=first_party,
                             ),
                             conditions.ConditionWriter(
                                 columns=DjangoModelsRenderer.columns(

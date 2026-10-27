@@ -18,14 +18,10 @@ class PythonRenderer:
     @staticmethod
     def render(plan: PythonPlan, first_party: FirstParty) -> GeneratedFiles:
         """The model modules, then the mapping function modules. Their imports
-        of `first_party` packages, and of the packages generated here, are first
-        party."""
-        generated = first_party.with_generated(
-            (*plan.model_modules(), *plan.function_modules())
-        )
+        of `first_party` packages are first party."""
         return GeneratedFiles(
             files=(
-                *ModelsRenderer.files(plan, generated),
-                *MappingsRenderer.files(plan, generated),
+                *ModelsRenderer.files(plan, first_party),
+                *MappingsRenderer.files(plan, first_party),
             )
         )

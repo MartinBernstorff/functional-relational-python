@@ -12,7 +12,6 @@ from pathlib import PurePosixPath
 import pydantic
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.outputs.python.symbols import FirstParty
 from functional_relational_python.shell.catalog import ImportPath
 from functional_relational_python.support.filesystem import (
     Directory,
@@ -64,9 +63,6 @@ class ProjectConfig(pydantic.BaseModel, frozen=True, extra="forbid"):
             output_dir=RelativePath(PurePosixPath(".")),
             known_first_party=(),
         )
-
-    def first_party(self) -> FirstParty:
-        return FirstParty(frozenset(self.known_first_party))
 
     @staticmethod
     def options() -> tuple[Option, ...]:

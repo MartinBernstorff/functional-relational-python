@@ -107,7 +107,10 @@ def generate(
         PythonLayout.models_only(layout),
     ):
         case Ok(plan):
-            return PythonRenderer.render(plan, first_party=FirstParty.fake())
+            return PythonRenderer.render(
+                plan,
+                first_party=FirstParty.fake().with_generated(plan.model_modules()),
+            )
         case Err(error):
             pytest.fail(f"expected generated files, got {error}")
 
@@ -706,7 +709,10 @@ def test_a_view_model_leaves_the_marker_out_wherever_it_marks_a_field(
         PythonLayout.models_only(single_module(ModulePath("app.views"))),
     ):
         case Ok(plan):
-            (file,) = PythonRenderer.render(plan, first_party=FirstParty.fake()).files
+            (file,) = PythonRenderer.render(
+                plan,
+                first_party=FirstParty.fake().with_generated(plan.model_modules()),
+            ).files
         case Err(error):
             pytest.fail(f"expected generated files, got {error}")
 

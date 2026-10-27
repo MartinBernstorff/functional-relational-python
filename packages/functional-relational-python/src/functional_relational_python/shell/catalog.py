@@ -94,9 +94,9 @@ class Catalog(pydantic.BaseModel, frozen=True):
     ) -> Result[GeneratedFiles, DiagnosticsError[Diagnostic]]:
         """Every generated file, or every diagnostic of every output.
 
-        Generated imports of `first_party` packages, and of the packages frp
-        generates, are first party; all others but the standard library are
-        third party.
+        Generated imports of `first_party` packages, and of the packages of the
+        modules frp generates, are first party; all others but the standard
+        library are third party.
         """
         match EntityGraph.build(self.entities, self.id_base, self.one_to_one_marker):
             case Err(graph_error):
@@ -130,21 +130,37 @@ class Catalog(pydantic.BaseModel, frozen=True):
         Django models need no compiled Views, so their diagnostics are reported
         even when compiling fails. The layout places every model once, for every
         output that refers to it.
+
+        Every output imports the packages of every generated module as first
+        party, so they sort alike in every file. When compiling or placing fails
+        nothing is written, and the Django models are rendered only for their
+        diagnostics.
         """
-        django_models = self._django_models(graph, first_party)
+        match self.django:
+            case WithoutDjangoModels():
+                django_modules: tuple[ModulePath, ...] = ()
+            case DjangoModels() as django:
+                django_modules = (django.module, django.queries)
+        match self.mappings:
+            case WithoutMappings():
+                mappings_modules: tuple[ModulePath, ...] = ()
+            case ModulePath() as mappings:
+                mappings_modules = (mappings,)
+        generated = first_party.with_generated((*django_modules, *mappings_modules))
         match compiler.compile_catalog(graph, self.views, self.payloads, self.unions):
             case Err(compile_error):
-                return [Err(compile_error), django_models]
+                return [Err(compile_error), self._django_models(graph, generated)]
             case Ok(compiled):
                 pass
         match PlacedModels.of_catalog(self.layout, compiled):
             case Err(layout_error):
-                return [Err(layout_error), django_models]
+                return [Err(layout_error), self._django_models(graph, generated)]
             case Ok(placed):
+                every = generated.with_generated(placed.modules.values())
                 return [
-                    self._python(compiled, placed, first_party),
-                    django_models,
-                    self._django_queries(graph, compiled, placed, first_party),
+                    self._python(compiled, placed, every),
+                    self._django_models(graph, every),
+                    self._django_queries(graph, compiled, placed, every),
                 ]
 
     def _python(

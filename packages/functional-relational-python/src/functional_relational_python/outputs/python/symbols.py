@@ -237,13 +237,14 @@ class FirstParty(pydantic.RootModel[frozenset[Identifier]], frozen=True):
         return FirstParty(self.root | {module.top_level() for module in modules})
 
     def section(self, module: ModulePath) -> ImportSection:
-        """The standard library by name, first party when its top-level package is
-        one of these, and third party otherwise."""
+        """First party when its top-level package is one of these, even one named
+        like a standard library module, as in ruff; otherwise the standard library
+        by name, and third party."""
         top = module.top_level()
-        if top.root in sys.stdlib_module_names:
-            return ImportSection.STANDARD_LIBRARY
         if top in self.root:
             return ImportSection.FIRST_PARTY
+        if top.root in sys.stdlib_module_names:
+            return ImportSection.STANDARD_LIBRARY
         return ImportSection.THIRD_PARTY
 
 

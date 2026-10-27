@@ -240,13 +240,18 @@ def existing_company(on_delete: Mapping[ReferenceKey, OnDelete]) -> DjangoModels
     return config({}, on_delete, {Company: ExistingDjangoModel.fake()})
 
 
+def generated_by(models: DjangoModels) -> FirstParty:
+    """What `Catalog.generate` has first party: the Django modules' packages."""
+    return FirstParty.fake().with_generated([models.module, models.queries])
+
+
 def render(
     entities: Iterable[type[pydantic.BaseModel]], models: DjangoModels
 ) -> FileText:
     match DjangoModelsRenderer.render(
         EntityGraph.build(entities, IdBase.fake(), OneToOneMarker.fake()).unwrap(),
         models,
-        first_party=FirstParty.fake(),
+        first_party=generated_by(models),
     ):
         case Ok(files):
             (file,) = files.files
@@ -261,7 +266,7 @@ def diagnostics(
     match DjangoModelsRenderer.render(
         EntityGraph.build(entities, IdBase.fake(), OneToOneMarker.fake()).unwrap(),
         models,
-        first_party=FirstParty.fake(),
+        first_party=generated_by(models),
     ):
         case Ok(files):
             pytest.fail(f"expected diagnostics, got {files}")
@@ -935,7 +940,7 @@ def test_the_id_of_a_reference_keyed_model_is_held_by_the_reference_column() -> 
     ).unwrap()
 
     _ = DjangoModelsRenderer.render(
-        graph, models, first_party=FirstParty.fake()
+        graph, models, first_party=generated_by(models)
     ).unwrap()
     assert DjangoModelsRenderer.columns(graph, models, FieldTypes(overrides={})).of(
         UnruledDetails, FieldName("id")
@@ -1150,7 +1155,7 @@ def test_the_module_is_written_where_the_catalog_names() -> None:
     models = config({}, {})
 
     files = DjangoModelsRenderer.render(
-        graph, models, first_party=FirstParty.fake()
+        graph, models, first_party=generated_by(models)
     ).unwrap()
 
     assert [file.path for file in files.files] == [models.module.file_path()]
@@ -1354,7 +1359,7 @@ def test_reverse_accessors_of_an_existing_model_are_checked_as_declared(
         [Company, CompanyDetails], IdBase.fake(), OneToOneMarker.fake()
     ).unwrap()
 
-    match DjangoModelsRenderer.render(graph, models, first_party=FirstParty.fake()):
+    match DjangoModelsRenderer.render(graph, models, first_party=generated_by(models)):
         case Ok():
             reported: tuple[DjangoDiagnostic, ...] = ()
         case Err(error):
@@ -1433,14 +1438,14 @@ def test_generated_models_referencing_an_existing_model_make_migrations(
     files = GeneratedFiles.merged(
         [
             DjangoModelsRenderer.render(
-                graph, models, first_party=FirstParty.fake()
+                graph, models, first_party=generated_by(models)
             ).unwrap(),
             DjangoQueriesRenderer.render(
                 graph,
                 models,
                 (),
                 PlacedModels(modules={}),
-                first_party=FirstParty.fake(),
+                first_party=generated_by(models),
             ).unwrap(),
         ]
     ).unwrap()
@@ -1670,7 +1675,7 @@ def test_generated_models_type_check_and_make_migrations(
     files = GeneratedFiles.merged(
         [
             DjangoModelsRenderer.render(
-                graph, models, first_party=FirstParty.fake()
+                graph, models, first_party=generated_by(models)
             ).unwrap(),
             # No Views, so only the QuerySets the models' managers use.
             DjangoQueriesRenderer.render(
@@ -1678,7 +1683,7 @@ def test_generated_models_type_check_and_make_migrations(
                 models,
                 (),
                 PlacedModels(modules={}),
-                first_party=FirstParty.fake(),
+                first_party=generated_by(models),
             ).unwrap(),
         ]
     ).unwrap()
@@ -2050,7 +2055,7 @@ def test_generated_models_are_as_ruff_formats_and_sorts_them(
     )
 
     assert [ruff_format_diff(text) for text in texts] == [FileText("")] * 3
-    first_party = FirstParty.fake().with_generated([models.module, models.queries])
+    first_party = generated_by(models)
     assert [test_symbols.ruff_import_diff(text, first_party) for text in texts] == [
         FileText("")
     ] * 3

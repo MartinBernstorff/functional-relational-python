@@ -21,13 +21,16 @@ from functional_relational_python.support.identifier import Identifier
         (ModulePath("collections.abc"), ImportSection.STANDARD_LIBRARY),
         (ModulePath("pydantic.types"), ImportSection.THIRD_PARTY),
         (ModulePath("app.views"), ImportSection.FIRST_PARTY),
+        (ModulePath("email.views"), ImportSection.FIRST_PARTY),
     ],
-    ids=["standard-library", "unlisted", "listed"],
+    ids=["standard-library", "unlisted", "listed", "listed-like-standard-library"],
 )
 def test_a_module_is_first_party_when_its_package_is_listed(
     module: ModulePath, section: ImportSection
 ) -> None:
-    first_party = FirstParty(frozenset({ModulePath.fake().top_level()}))
+    first_party = FirstParty(
+        frozenset({ModulePath.fake().top_level(), Identifier("email")})
+    )
 
     assert first_party.section(module) == section
 

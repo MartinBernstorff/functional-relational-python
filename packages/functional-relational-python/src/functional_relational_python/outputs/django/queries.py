@@ -445,7 +445,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     queries: tuple[ViewQueries, ...]
     unions: tuple[UnionQueries, ...]
     first_party: FirstParty
-    """The packages imported as first party, including those generated."""
+    """The packages imported as first party."""
     classes: Mapping[type, Symbol]
     """Every class the code refers to: the enum of a Filter's literal, and every
     class a field is read through."""
@@ -479,8 +479,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         over a Source that is not an Entity get no query code. QuerySets are in
         Entity name order.
 
-        Its imports of `first_party` packages, and of the packages of the modules
-        frp generates, are first party.
+        Its imports of `first_party` packages are first party.
         """
         definitions = tuple(definitions)
         views = tuple(
@@ -523,14 +522,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             config=config,
             queries=queries,
             unions=union_queries,
-            first_party=first_party.with_generated(
-                (
-                    config.module,
-                    config.queries,
-                    *(query.model.module for query in queries),
-                    *(union.model.module for union in union_queries),
-                )
-            ),
+            first_party=first_party,
             classes=classes,
             writer=conditions.ConditionWriter(
                 columns=DjangoModelsRenderer.columns(
