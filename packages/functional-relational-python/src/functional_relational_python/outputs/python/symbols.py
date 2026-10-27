@@ -4,6 +4,7 @@ it imports, and annotations as source text."""
 import enum
 import keyword
 import sys
+import typing
 from collections.abc import Iterable
 from pathlib import PurePosixPath
 from typing import Annotated
@@ -124,11 +125,20 @@ class Symbol(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def of(named: ir.RuntimeAnnotation) -> Result[Symbol, UnimportableError]:
-        """How source imports `named`, a class or `type` alias, by its module and
-        qualified name. That fails when `named` is not reachable that way, e.g. for
-        a class defined in a function."""
+        """How source imports `named`, a class, function or `type` alias, by its
+        module and qualified name. That fails when `named` is not reachable that
+        way, e.g. for a class defined in a function.
+
+        A `type` alias has no qualified name, only a name, so only one defined at
+        module level is reachable.
+        """
         module = getattr(named, "__module__", "")
-        parts = getattr(named, "__qualname__", "").split(".")
+        name = (
+            named.__name__
+            if isinstance(named, typing.TypeAliasType)
+            else getattr(named, "__qualname__", "")
+        )
+        parts = name.split(".")
         reachable = sys.modules.get(module)
         for part in parts:
             reachable = getattr(reachable, part, None)

@@ -34,12 +34,14 @@ def split(annotation: RuntimeAnnotation) -> SplitAnnotation:
 
 
 def without_none(annotation: RuntimeAnnotation) -> RuntimeAnnotation:
-    """`annotation` without `None`.
-
-    The metadata of an `Annotated` inside the union is left out, as the generated
-    model leaves it out.
-    """
-    return Optionality.of_aliased_annotation(annotation).required
+    """`annotation` without `None`, keeping the metadata of an `Annotated` inside
+    the union, e.g. `PastAwareDatetime | None` to `PastAwareDatetime`."""
+    split_off = Optionality.of_aliased_annotation(annotation)
+    if not split_off.metadata:
+        return split_off.required
+    return typing.cast("_SpecialForm", typing.Annotated)[
+        (split_off.required, *split_off.metadata)
+    ]
 
 
 class _SpecialForm(typing.Protocol):

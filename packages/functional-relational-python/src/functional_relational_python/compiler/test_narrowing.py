@@ -665,6 +665,36 @@ def test_narrowing_keeps_the_fields_constraints(step: steps.Step) -> None:
     assert label.info.metadata == Constrained.model_fields["label"].metadata != []
 
 
+PastMoment = Annotated[datetime.datetime, pydantic.AwareDatetime, pydantic.PastDatetime]
+
+
+class Stamped(pydantic.BaseModel):
+    id: CampaignId
+    stamped_at: PastMoment | None
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        steps.require(FieldName("stamped_at")),
+        steps.where(conditions.ne(conditions.field(FieldName("stamped_at")), None)),
+    ],
+    ids=["require", "where"],
+)
+def test_narrowing_an_optional_annotated_alias_keeps_its_metadata(
+    step: steps.Step,
+) -> None:
+    (compiled,) = (
+        compiler.compile_views(
+            graph(), [View(name=ViewName.fake(), source=Stamped, step=step)]
+        )
+        .unwrap()
+        .views
+    )
+
+    assert annotation_of(compiled, FieldName("stamped_at")) == PastMoment
+
+
 type MaybeObjective = Text | None
 
 
