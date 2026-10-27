@@ -40,6 +40,7 @@ from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.django.models import (
     AppLabel,
     CatalogModelOptions,
+    DefaultDjangoModelName,
     DjangoField,
     DjangoModelName,
     DjangoModels,
@@ -1679,6 +1680,20 @@ def test_a_view_reads_through_a_related_name_like_the_engine(view: View) -> None
     assert rows == engine_rows([compiled], entities)[view.name]
 
 
+def prefixed_model_name(entity: type[pydantic.BaseModel]) -> DjangoModelName:
+    """`Django<Entity>`."""
+    return DjangoModelName(f"Django{entity.__name__}")
+
+
+def entity_model_name(_: type[pydantic.BaseModel]) -> DefaultDjangoModelName:
+    return DefaultDjangoModelName()
+
+
+@pytest.mark.parametrize(
+    "model_name_of",
+    [entity_model_name, prefixed_model_name],
+    ids=["entity names", "model names"],
+)
 @pytest.mark.parametrize(
     "view",
     [
@@ -1697,9 +1712,13 @@ def test_a_view_reads_through_a_related_name_like_the_engine(view: View) -> None
 )
 def test_a_view_reads_a_model_keyed_by_its_reference_like_the_engine(
     view: View,
+    model_name_of: Callable[
+        [type[pydantic.BaseModel]], DjangoModelName | DefaultDjangoModelName
+    ],
 ) -> None:
     """A Badge's model has the Employee it is of as its primary key, so its `id`
-    is read from that column. Each Badge's `id` is its Employee's."""
+    is read from that column. Each Badge's `id` is its Employee's. A model named
+    unlike its Entity is referred to, and named after, by its own name."""
     entities = tuple(
         entity.model_copy(update={"id": BadgeId(entity.employee_id.root)})
         if isinstance(entity, Badge)
@@ -1707,52 +1726,17 @@ def test_a_view_reads_a_model_keyed_by_its_reference_like_the_engine(
         for entity in organisation()
     )
     (compiled,) = compile_all([view]).views
-    config = Modules.config().model_copy(
-        update={
-            "entity_model_options": {
-                Badge: EntityModelOptions.inherited().model_copy(
-                    update={
-                        "primary_key": ReferencePrimaryKey(
-                            reference=FieldName("employee_id")
-                        )
-                    }
-                )
-            }
-        }
-    )
-
-    with Database.of([view], (), config) as django_models:
-        Database.put(entities, config)
-        rows = Database.read(django_models, compiled, every_row)
-
-    assert rows == engine_rows([compiled], entities)[view.name]
-
-
-@pytest.mark.parametrize("view", read_views(), ids=lambda view: view.name.root)
-def test_a_view_reads_models_named_unlike_their_entities_like_the_engine(
-    view: View,
-) -> None:
-    """Each Entity's model is named `Django<Entity>`, so its table, the reverse
-    accessors frp generates and the queries' models are named so. A Badge's
-    model is keyed by its Employee, so each Badge's `id` is its Employee's."""
-    entities = tuple(
-        entity.model_copy(update={"id": BadgeId(entity.employee_id.root)})
-        if isinstance(entity, Badge)
-        else entity
-        for entity in organisation()
-    )
-    (compiled,) = compile_all([view]).views
-    renamed = {
+    named = {
         entity: EntityModelOptions.inherited().model_copy(
-            update={"model_name": DjangoModelName(f"Django{entity.__name__}")}
+            update={"model_name": model_name_of(entity)}
         )
         for entity in entity_graph().entities
     }
     config = Modules.config().model_copy(
         update={
             "entity_model_options": {
-                **renamed,
-                Badge: renamed[Badge].model_copy(
+                **named,
+                Badge: named[Badge].model_copy(
                     update={
                         "primary_key": ReferencePrimaryKey(
                             reference=FieldName("employee_id")

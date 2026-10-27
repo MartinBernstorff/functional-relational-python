@@ -781,7 +781,11 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
                 return name
             case None:
                 pass
-        own = self.entity_model_options.get(entity, EntityModelOptions.inherited())
+        match self.entity_model_options.get(entity):
+            case None:
+                return Identifier(entity.__name__)
+            case own:
+                pass
         match own.model_name:
             case DjangoModelName() as named:
                 return named.identifier()
@@ -820,7 +824,7 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
                 return declared[reference]
             case ExistingDjangoModel():
                 return DjangoModelsRenderer.reverse_accessor(
-                    self.model_name_of(entity), reference
+                    Identifier(entity.__name__), reference
                 )
             case None:
                 pass
@@ -1200,14 +1204,29 @@ class DjangoFieldNameClash(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class DjangoModelNameClash(pydantic.BaseModel, Diagnostic, frozen=True):
-    """Several Entities, or an Entity and an import, have one name in the module
-    their Django models are generated into."""
+    """Several Django models, or a Django model and an import, have one name in
+    the module the models are generated into. A model is named like its Entity
+    unless its options give it a `DjangoModelName`."""
 
     name: Identifier
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"Django models: several Entities or imports are named '{self.name.root}'."
+            f"Django models: several models or imports are named '{self.name.root}'."
+        )
+
+
+class DjangoModelNameCaseClash(pydantic.BaseModel, Diagnostic, frozen=True):
+    """Several Django models have names differing only in case, e.g. `Firm` and
+    `FIRM`, which Django does not tell apart within an app."""
+
+    names: tuple[Identifier, ...]
+
+    def describe(self) -> DiagnosticMessage:
+        names = ", ".join(f"'{name.root}'" for name in self.names)
+        return DiagnosticMessage(
+            f"Django models: {names} differ only in case, so Django takes them "
+            "for one model."
         )
 
 
@@ -1376,6 +1395,7 @@ type DjangoDiagnostic = (
     | ReverseAccessorOfNonOneToOne
     | DjangoFieldNameClash
     | DjangoModelNameClash
+    | DjangoModelNameCaseClash
     | ReverseAccessorClash
     | InvalidReverseAccessorName
     | ModelOptionsForNonEntity
@@ -2201,8 +2221,9 @@ class DjangoModelsRenderer:
             tables.setdefault(config.table_of(model.entity), []).append(model.entity)
             for index in model.options.meta.indexes:
                 indexes.setdefault(index.name, []).append(model.entity)
-        # Models whose tables Django names all alike are named alike, which
-        # `DjangoModelNameClash` reports.
+        # Models whose tables Django names all alike are named alike, but for
+        # case, which `DjangoModelNameClash` or `DjangoModelNameCaseClash`
+        # reports.
         yield from (
             SharedDbTable(table=table, entities=tuple(entities))
             for table, entities in tables.items()
@@ -2481,17 +2502,13 @@ class DjangoModelsRenderer:
                                     where=checked,
                                 )
                             )
-        planned.extend(
-            DjangoModelsRenderer._implied_bounds(
-                model, config.model_name_of(model), node, types
-            )
-        )
+        planned.extend(DjangoModelsRenderer._implied_bounds(config, model, node, types))
         return _ModelConstraints(planned=tuple(planned), diagnostics=tuple(reported))
 
     @staticmethod
     def _implied_bounds(
+        config: DjangoModels,
         model: type[pydantic.BaseModel],
-        model_name: Identifier,
         node: EntityNode,
         types: FieldTypes,
     ) -> Iterator[_ImpliedBound]:
@@ -2503,8 +2520,9 @@ class DjangoModelsRenderer:
 
         A bound that is not a finite `int` or `float`, e.g. a `Decimal` or a
         `datetime`, implies none, nor do other metadata, e.g. `MinLen`. Each is
-        named after the Django model, `model_name`.
+        named after the Django model.
         """
+        model_name = config.model_name_of(model)
         snake = model_names.PascalCase(model_name.root).snake_case().root
         references = {reference.field for reference in node.references}
         for name, info in model.model_fields.items():
@@ -2816,9 +2834,9 @@ class DjangoModelsRenderer:
                     case RelatedName() as related_name:
                         name = related_name.field_name()
                     case FieldName() as name:
-                        # A generated one is an identifier made of an Entity's and
-                        # a field's name, and no keyword, since it holds `_by_`;
-                        # but Django may reject it.
+                        # A generated one is an identifier made of a Django
+                        # model's and a field's name, and no keyword, since it
+                        # holds `_by_`; but Django may reject it.
                         if config.generates(entity) and (
                             name.root.endswith("_") or "__" in name.root
                         ):
@@ -2920,10 +2938,10 @@ class DjangoModelsRenderer:
     @staticmethod
     def _name_clashes(
         planned: list[_PlannedModel], imports: frozenset[Symbol]
-    ) -> Iterator[DjangoModelNameClash]:
+    ) -> Iterator[DjangoModelNameClash | DjangoModelNameCaseClash]:
         """`imports` are the Symbols the module imports by name: field classes,
         Managers, existing Django models, base classes, decorators and
-        defaults."""
+        defaults. Django also tells models apart by their lowercased names."""
         bound: dict[Identifier, list[Symbol | Identifier]] = {
             DjangoModelsRenderer.models_import: [DjangoModelsRenderer.models_import]
         }
@@ -2934,6 +2952,16 @@ class DjangoModelsRenderer:
         for name, origins in bound.items():
             if len(origins) > 1:
                 yield DjangoModelNameClash(name=name)
+        by_lowercase: dict[str, set[Identifier]] = {}
+        for model in planned:
+            by_lowercase.setdefault(model.name.root.lower(), set()).add(model.name)
+        yield from (
+            DjangoModelNameCaseClash(
+                names=tuple(sorted(names, key=lambda name: name.root))
+            )
+            for names in by_lowercase.values()
+            if len(names) > 1
+        )
 
     @staticmethod
     def _module(

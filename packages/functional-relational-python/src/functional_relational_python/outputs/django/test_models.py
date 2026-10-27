@@ -55,6 +55,7 @@ from functional_relational_python.outputs.django.models import (
     DjangoFieldNameClash,
     DjangoIndex,
     DjangoModelName,
+    DjangoModelNameCaseClash,
     DjangoModelNameClash,
     DjangoModels,
     DjangoModelsRenderer,
@@ -816,6 +817,29 @@ def test_models_named_alike_by_their_options_are_a_diagnostic() -> None:
 
     assert diagnostics([Company, Department], models) == (
         DjangoModelNameClash(name=Identifier("Firm")),
+    )
+
+
+def test_models_named_alike_but_for_case_are_a_diagnostic() -> None:
+    """Django tells models apart by their lowercased names."""
+    models = config({}, {}).model_copy(
+        update={
+            "entity_model_options": {
+                Department: named(
+                    DjangoModelName(Company.__name__.upper()),
+                    EntityModelOptions.inherited(),
+                )
+            }
+        }
+    )
+
+    assert diagnostics([Company, Department], models) == (
+        DjangoModelNameCaseClash(
+            names=(
+                Identifier(Company.__name__.upper()),
+                Identifier(Company.__name__),
+            )
+        ),
     )
 
 
