@@ -240,6 +240,7 @@ dev = [
 name = "functional-relational-python"
 source = { editable = "packages/functional-relational-python" }
 dependencies = [
+    { name = "annotated-types" },
     { name = "pydantic" },
     { name = "safe-result" },
     { name = "typer" },
@@ -247,6 +248,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "annotated-types", specifier = ">=0.7" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "safe-result", specifier = ">=4.0.3" },
     { name = "typer", specifier = ">=0.20" },

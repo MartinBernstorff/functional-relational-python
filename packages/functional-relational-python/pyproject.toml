@@ -10,6 +10,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "annotated-types>=0.7",
     "pydantic>=2.14.1",
     "safe-result>=4.0.3",
     "typer>=0.20",

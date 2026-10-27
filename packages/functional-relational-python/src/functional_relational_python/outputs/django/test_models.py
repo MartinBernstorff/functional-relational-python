@@ -160,6 +160,7 @@ def config(
         field_types=field_types,
         on_delete=on_delete,
         queries=ModulePath("app.queries"),
+        constraints={},
     )
 
 

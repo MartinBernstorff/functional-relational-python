@@ -14,7 +14,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     SplitAnnotation,
 )
 from functional_relational_python.pipeline import ir
-from functional_relational_python.pipeline.payloads import DefinitionName
+from functional_relational_python.pipeline.constraints import ConditionOwner
 
 
 class Defects(pydantic.BaseModel, frozen=True):
@@ -75,7 +75,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
     Every defective term is reported, not only the first.
     """
 
-    view: DefinitionName
+    view: ConditionOwner
     relation: ir.Relation
     subject: type[pydantic.BaseModel]
 

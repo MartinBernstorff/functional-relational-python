@@ -7,6 +7,7 @@ from functional_relational_python.entity_graph.entity_graph import (
 )
 from functional_relational_python.entity_graph.id import IdType, OneToOneMarker
 from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline.constraints import ConditionOwner
 from functional_relational_python.pipeline.payloads import DefinitionName, PayloadName
 from functional_relational_python.pipeline.unions import UnionName
 from functional_relational_python.pipeline.views import ViewName
@@ -19,7 +20,7 @@ from functional_relational_python.support.diagnostic import (
 class UnknownField(pydantic.BaseModel, Diagnostic, frozen=True):
     """A step names a field the relation does not have at that point."""
 
-    view: DefinitionName
+    view: ConditionOwner
     source: ir.SourceName
     field: FieldName
     valid: tuple[FieldName, ...]
@@ -394,7 +395,7 @@ class NotASourceColumn(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition names a field whose value is not one of the Source's own
     fields: a resolved or an added field."""
 
-    view: DefinitionName
+    view: ConditionOwner
     source: ir.SourceName
     field: FieldName
 
@@ -416,7 +417,7 @@ class LiteralText(pydantic.RootModel[str], frozen=True):
 class NonLiteralConditionValue(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition compares with a value that generated code cannot write out."""
 
-    view: DefinitionName
+    view: ConditionOwner
     value: LiteralText
 
     def describe(self) -> DiagnosticMessage:
@@ -431,7 +432,7 @@ class LiteralTypeMismatch(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition compares a field with a literal that is not an instance of the
     field's type, or with `None` when the field is not optional."""
 
-    view: DefinitionName
+    view: ConditionOwner
     source: ir.SourceName
     field: FieldName
     annotation: RuntimeAnnotation
@@ -449,7 +450,7 @@ class ComparedTypesDiffer(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition compares two fields of different types, apart from either being
     optional."""
 
-    view: DefinitionName
+    view: ConditionOwner
     source: ir.SourceName
     field: FieldName
     annotation: RuntimeAnnotation
@@ -468,7 +469,7 @@ class OrderingOnOptionalField(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition orders an optional field, which may be `None`, and `None` has
     no order."""
 
-    view: DefinitionName
+    view: ConditionOwner
     source: ir.SourceName
     field: FieldName
     operator: ir.ComparisonOperator
@@ -483,7 +484,7 @@ class OrderingOnOptionalField(pydantic.BaseModel, Diagnostic, frozen=True):
 class UnorderedFieldType(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition orders a field whose type defines no such ordering."""
 
-    view: DefinitionName
+    view: ConditionOwner
     source: ir.SourceName
     field: FieldName
     annotation: RuntimeAnnotation
