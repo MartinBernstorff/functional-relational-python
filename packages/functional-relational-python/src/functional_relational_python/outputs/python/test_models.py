@@ -749,14 +749,15 @@ from datetime import datetime
 from typing import Annotated
 
 from annotated_types import Gt
+from pydantic import BaseModel
+from pydantic.functional_validators import AfterValidator
+from pydantic.types import AwareDatetime, PastDatetime
+
 from functional_relational_python.outputs.python.test_models import (
     Ratio,
     Text,
     stripped,
 )
-from pydantic import BaseModel
-from pydantic.functional_validators import AfterValidator
-from pydantic.types import AwareDatetime, PastDatetime
 
 
 class StampedView(BaseModel, frozen=True):
