@@ -6,7 +6,7 @@ import textwrap
 import uuid
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, ClassVar
 
 import pydantic
 import pytest
@@ -26,18 +26,38 @@ from functional_relational_python.entity_graph.id import (
 from functional_relational_python.outputs.django.models import (
     AppLabel,
     AutoIncrementOnNonPrimaryKey,
+    AutoNow,
+    AutoNowAdd,
+    BareDecorator,
+    CalledDecorator,
+    DatabaseDefault,
+    DbTable,
+    Default,
+    DefaultForNonField,
     DjangoDiagnostic,
     DjangoField,
     DjangoFieldNameClash,
+    DjangoIndex,
+    DjangoMeta,
     DjangoModelNameClash,
+    DjangoModelOptions,
     DjangoModels,
     DjangoModelsRenderer,
+    FieldDefault,
+    ForeignKeyConstraint,
+    IndexField,
+    IndexName,
     InvalidDjangoFieldName,
     InvalidReverseAccessorName,
+    ModelGenericBase,
+    ModelOptionsForNonEntity,
     NoDjangoFieldRule,
     OnDelete,
     OnDeleteForNonReference,
+    OrderingTerm,
     ReferenceKey,
+    RelatedName,
+    RelatedNameForNonReference,
     ReverseAccessorClash,
     SetNullOnRequiredReference,
 )
@@ -160,6 +180,8 @@ def config(
         field_types=field_types,
         on_delete=on_delete,
         queries=ModulePath("app.queries"),
+        model_options=DjangoModelOptions.default(),
+        entity_model_options={},
     )
 
 
@@ -605,7 +627,133 @@ def test_entities_with_one_name_are_a_diagnostic() -> None:
     )
 
 
-def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None:
+class Person(pydantic.BaseModel):
+    id: ThingId
+    email: Email
+    nickname: Text | None
+    employer_id: CompanyId
+    previous_employer_id: CompanyId | None
+    department_id: DepartmentId
+    heads_id: Annotated[DepartmentId | None, OneToOne()]
+    born: Moment
+
+
+class ProjectBases:
+    """What `app.base` of the Django project defines, for its models to use."""
+
+    module: ClassVar[ModulePath] = ModulePath("app.base")
+    source: ClassVar[FileText] = FileText(
+        textwrap.dedent(
+            """\
+        import typing
+        from collections.abc import Callable
+
+        from django.db import models
+
+
+        class Stamped(models.Model):
+            created_at = models.DateTimeField(auto_now_add=True)
+
+            class Meta:
+                abstract = True
+
+
+        class Described:
+            def describe(self) -> str:
+                return type(self).__name__
+
+
+        def registered[M: type[models.Model]](model: M) -> M:
+            return model
+
+
+        def following[M: type[models.Model]](*, follow: list[str]) -> Callable[[M], M]:
+            return lambda model: model
+
+
+        class LiveQuerySet[T: models.Model](models.QuerySet[T]):
+            def newest_first(self) -> typing.Self:
+                return self.order_by("-pk")
+
+
+        class LiveManager[T: models.Model](models.Manager[T]):
+            @typing.override
+            def get_queryset(self) -> models.QuerySet[T]:
+                return super().get_queryset().exclude(pk=None)
+        """
+        )
+    )
+
+    @staticmethod
+    def symbol(name: Identifier) -> Symbol:
+        return Symbol(module=ProjectBases.module, qualname=(name,))
+
+
+def person_options() -> DjangoModelOptions:
+    """Every option, for the one Entity `Person`."""
+    return DjangoModelOptions(
+        bases=(
+            ProjectBases.symbol(Identifier("Described")),
+            ProjectBases.symbol(Identifier("Stamped")),
+        ),
+        decorators=(
+            BareDecorator(function=ProjectBases.symbol(Identifier("registered"))),
+            CalledDecorator(
+                function=ProjectBases.symbol(Identifier("following")),
+                arguments={Identifier("follow"): ValueExpression("['employer']")},
+            ),
+        ),
+        meta=DjangoMeta(
+            db_table=DbTable("people"),
+            ordering=(OrderingTerm("-created_at"), OrderingTerm("email")),
+            indexes=(
+                DjangoIndex(
+                    fields=(IndexField("born"), IndexField("-email")),
+                    name=IndexName("person_born"),
+                ),
+            ),
+        ),
+        defaults={
+            FieldName("nickname"): DatabaseDefault(value=ValueExpression("'anon'")),
+            FieldName("born"): AutoNowAdd(),
+        },
+        related_names={
+            FieldName("employer_id"): RelatedName("employees"),
+            FieldName("heads_id"): RelatedName("head"),
+        },
+        foreign_key_constraint=ForeignKeyConstraint.NOT_ENFORCED,
+        query_set_base=ModelGenericBase(
+            origin=ProjectBases.symbol(Identifier("LiveQuerySet"))
+        ),
+        manager_base=ModelGenericBase(
+            origin=ProjectBases.symbol(Identifier("LiveManager"))
+        ),
+    )
+
+
+def uuid_default() -> DjangoModelOptions:
+    return DjangoModelOptions.default().model_copy(
+        update={
+            "defaults": {
+                FieldName("id"): Default(
+                    value=Symbol(
+                        module=ModulePath("uuid"), qualname=(Identifier("uuid4"),)
+                    )
+                )
+            }
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "entity_model_options",
+    [{}, {Person: person_options(), Department: uuid_default()}],
+    ids=["django", "options"],
+)
+def test_generated_models_type_check_and_make_migrations(
+    tmp_path: Path,
+    entity_model_options: Mapping[type[pydantic.BaseModel], DjangoModelOptions],
+) -> None:
     """A Django project with the generated models, and the QuerySets their managers
     use, as its one app: they pass the type checker, Django's system checks,
     `makemigrations` and `migrate`."""
@@ -615,18 +763,7 @@ def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None
             Email: char_field(),
         },
         {ReferenceKey(entity=Company, field=FieldName("parent")): OnDelete.SET_NULL},
-    )
-
-    class Person(pydantic.BaseModel):
-        id: ThingId
-        email: Email
-        nickname: Text | None
-        employer_id: CompanyId
-        previous_employer_id: CompanyId | None
-        department_id: DepartmentId
-        heads_id: Annotated[DepartmentId | None, OneToOne()]
-        born: Moment
-
+    ).model_copy(update={"entity_model_options": entity_model_options})
     graph = EntityGraph.build(
         [Company, Department, Person], IdBase.fake(), OneToOneMarker.fake()
     ).unwrap()
@@ -641,6 +778,9 @@ def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None
     ).unwrap()
     files.write(LocalFileSystem(), Directory(tmp_path)).unwrap()
     _ = (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
+    _ = (tmp_path / "app" / "base.py").write_text(
+        ProjectBases.source.root, encoding="utf-8"
+    )
     _ = (tmp_path / "settings.py").write_text(
         textwrap.dedent(
             f"""\
@@ -799,3 +939,162 @@ def test_an_auto_increment_override_on_another_field_is_a_diagnostic() -> None:
     assert diagnostics([Counter], config({int: auto}, {})) == (
         AutoIncrementOnNonPrimaryKey(entity=Counter, field=FieldName("count")),
     )
+
+
+def test_golden_django_model_with_options() -> None:
+    """`Person`'s options replace the catalog's, which `Company` and `Department`
+    get."""
+    models = config({}, {}).model_copy(
+        update={"entity_model_options": {Person: person_options()}}
+    )
+
+    text = render([Company, Department, Person], models)
+
+    assert text == FileText(
+        textwrap.dedent(
+            """\
+        # Generated by functional-relational-python. Do not edit.
+        # Regenerate with `frp generate`; `frp check` fails when this is stale.
+        # Migrations are yours to make, e.g. with `makemigrations`.
+
+        from app.base import Described, Stamped, following, registered
+        from app.queries import CompanyManager, DepartmentManager, PersonManager
+        from django.db import models
+
+
+        class Company(models.Model):
+            objects = CompanyManager()
+            id = models.BigIntegerField(primary_key=True)
+            name = models.TextField()
+            parent = models.ForeignKey('Company', on_delete=models.PROTECT, related_name='+', null=True)
+
+            class Meta:
+                app_label = 'app'
+
+
+        class Department(models.Model):
+            objects = DepartmentManager()
+            id = models.UUIDField(primary_key=True)
+            company = models.ForeignKey('Company', on_delete=models.PROTECT, related_name='+')
+            founded = models.DateField()
+
+            class Meta:
+                app_label = 'app'
+
+
+        @registered
+        @following(follow=['employer'])
+        class Person(Described, Stamped):
+            objects = PersonManager()
+            id = models.BigIntegerField(primary_key=True)
+            email = models.TextField()
+            nickname = models.TextField(null=True, db_default='anon')
+            employer = models.ForeignKey('Company', on_delete=models.PROTECT, related_name='employees', db_constraint=False)
+            previous_employer = models.ForeignKey('Company', on_delete=models.PROTECT, related_name='+', null=True, db_constraint=False)
+            department = models.ForeignKey('Department', on_delete=models.PROTECT, related_name='+', db_constraint=False)
+            heads = models.OneToOneField('Department', on_delete=models.PROTECT, related_name='head', null=True, db_constraint=False)
+            born = models.DateTimeField(auto_now_add=True)
+
+            class Meta:
+                app_label = 'app'
+                db_table = 'people'
+                ordering = ['-created_at', 'email']
+                indexes = [models.Index(fields=['born', '-email'], name='person_born')]
+        """
+        )
+    )
+
+
+def test_a_default_symbol_is_imported() -> None:
+    models = config({}, {}).model_copy(
+        update={"entity_model_options": {Department: uuid_default()}}
+    )
+
+    text = render([Company, Department], models).root
+
+    assert "\nfrom uuid import uuid4\n" in text
+    assert "    id = models.UUIDField(primary_key=True, default=uuid4)\n" in text
+
+
+@pytest.mark.parametrize(
+    ("default", "expected"),
+    [
+        (Default(value=ValueExpression("'x'")), "default='x'"),
+        (DatabaseDefault(value=ValueExpression("'x'")), "db_default='x'"),
+        (AutoNow(), "auto_now=True"),
+        (AutoNowAdd(), "auto_now_add=True"),
+    ],
+)
+def test_a_default_is_a_keyword_argument(default: FieldDefault, expected: str) -> None:
+    models = all_rules_for_tags().model_copy(
+        update={
+            "model_options": DjangoModelOptions.default().model_copy(
+                update={"defaults": {FieldName("text"): default}}
+            )
+        }
+    )
+
+    assert field_line(FieldName("text"), models) == FileText(
+        f"text = models.TextField({expected})"
+    )
+
+
+def test_a_related_name_clashing_with_a_field_is_a_diagnostic() -> None:
+    """`Company.name` is a field, so it cannot be the reverse accessor of
+    `Department.company_id`."""
+    named = DjangoModelOptions.default().model_copy(
+        update={"related_names": {FieldName("company_id"): RelatedName("name")}}
+    )
+    models = config({}, {}).model_copy(
+        update={"entity_model_options": {Department: named}}
+    )
+
+    assert diagnostics([Company, Department], models) == (
+        ReverseAccessorClash(
+            entity=Company,
+            name=FieldName("name"),
+            references=(
+                ReferenceKey(entity=Department, field=FieldName("company_id")),
+            ),
+        ),
+    )
+
+
+def test_options_naming_what_is_not_there_are_diagnostics() -> None:
+    misplaced = DjangoModelOptions.default().model_copy(
+        update={
+            "defaults": {FieldName("missing"): AutoNow()},
+            "related_names": {FieldName("founded"): RelatedName.fake()},
+        }
+    )
+    models = config({}, {}).model_copy(
+        update={"entity_model_options": {Department: misplaced, Parent: misplaced}}
+    )
+
+    assert set(diagnostics([Company, Department], models)) == {
+        ModelOptionsForNonEntity(entity=Parent),
+        DefaultForNonField(entity=Department, field=FieldName("missing")),
+        RelatedNameForNonReference(entity=Department, field=FieldName("founded")),
+    }
+
+
+@pytest.mark.parametrize(
+    ("value_type", "value"),
+    [
+        (RelatedName, "ad_sets_"),
+        (RelatedName, "ad__sets"),
+        (RelatedName, "class"),
+        (RelatedName, "+"),
+        (DbTable, ""),
+        (OrderingTerm, "-"),
+        (OrderingTerm, "created at"),
+        (IndexField, "company__name"),
+        (IndexName, "_born"),
+        (IndexName, "a" * 31),
+    ],
+)
+def test_a_value_django_rejects_is_invalid(
+    value_type: type[pydantic.RootModel[str]], value: str
+) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = value_type(value)
