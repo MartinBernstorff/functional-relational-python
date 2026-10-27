@@ -7,7 +7,7 @@ import sys
 import types
 from collections.abc import Callable, Generator, Iterable, Sequence
 from pathlib import Path
-from typing import Annotated, ClassVar
+from typing import Annotated, ClassVar, Self, override
 
 import django
 import pydantic
@@ -15,7 +15,7 @@ import pytest
 from django.apps import AppConfig, apps
 from django.conf import settings as django_settings
 from django.db import IntegrityError, NotSupportedError, connection, transaction
-from django.db.models import Model, Q, QuerySet
+from django.db.models import Manager, Model, Q, QuerySet
 from django.test.utils import CaptureQueriesContext
 from hypothesis import event, given, settings
 from hypothesis import strategies as st
@@ -39,10 +39,15 @@ from functional_relational_python.entity_graph.id import (
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.django.models import (
     AppLabel,
+    CatalogModelOptions,
     DjangoField,
     DjangoModels,
     DjangoModelsRenderer,
+    EntityModelOptions,
     ExistingDjangoModel,
+    ModelGenericBase,
+    PlainBase,
+    RelatedName,
 )
 from functional_relational_python.outputs.django.queries import (
     DjangoQueriesDiagnostic,
@@ -63,6 +68,8 @@ from functional_relational_python.outputs.python.plan import (
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     ModulePath,
+    Symbol,
+    ValueExpression,
 )
 from functional_relational_python.outputs.python.test_mappings import (
     Executed,
@@ -196,6 +203,22 @@ class Note(pydantic.BaseModel, frozen=True):
     text: Text
 
 
+class NewestFirstQuerySet[T: Model](QuerySet[T]):
+    """A QuerySet base with a method of its own."""
+
+    def newest_first(self) -> Self:
+        return self.order_by("-pk")
+
+
+class WithoutFirstManager[T: Model](Manager[T]):
+    """Leaves out the row with ID 1, as a soft-delete Manager leaves out deleted
+    rows."""
+
+    @override
+    def get_queryset(self) -> QuerySet[T]:
+        return super().get_queryset().exclude(pk=1)
+
+
 def entity_graph() -> EntityGraph:
     return EntityGraph.build(
         [Company, Department, Employee, Badge], IdBase.fake(), OneToOneMarker.fake()
@@ -210,6 +233,41 @@ class Modules:
     queries: ClassVar[ModulePath] = ModulePath("frp_generated_queries")
 
     @staticmethod
+    def with_options(options: CatalogModelOptions) -> DjangoModels:
+        """Every Entity's model declared by `options`, and a Badge the `badge`
+        of the Employee wearing it."""
+        return Modules.config().model_copy(
+            update={
+                "model_options": options,
+                "entity_model_options": {
+                    Badge: EntityModelOptions.inherited().model_copy(
+                        update={
+                            "related_names": {
+                                FieldName("employee_id"): RelatedName("badge")
+                            }
+                        }
+                    )
+                },
+            }
+        )
+
+    @staticmethod
+    def with_bases() -> DjangoModels:
+        """Every Entity's QuerySet and Manager subclass this module's bases."""
+        return Modules.with_options(
+            CatalogModelOptions.default().model_copy(
+                update={
+                    "query_set_base": ModelGenericBase(
+                        origin=Symbol.of(NewestFirstQuerySet).unwrap()
+                    ),
+                    "manager_base": ModelGenericBase(
+                        origin=Symbol.of(WithoutFirstManager).unwrap()
+                    ),
+                }
+            )
+        )
+
+    @staticmethod
     def config() -> DjangoModels:
         return DjangoModels(
             module=Modules.django,
@@ -220,6 +278,8 @@ class Modules:
             },
             on_delete={},
             queries=Modules.queries,
+            model_options=CatalogModelOptions.default(),
+            entity_model_options={},
             constraints={},
             existing={},
         )
@@ -255,6 +315,8 @@ class ExistingCompany:
             field_types=generated.field_types,
             on_delete=generated.on_delete,
             queries=generated.queries,
+            model_options=CatalogModelOptions.default(),
+            entity_model_options={},
             constraints={},
             existing={
                 Company: ExistingDjangoModel(
@@ -528,14 +590,17 @@ class BadgeQuerySet(django.db.models.QuerySet["frp_generated_django.Badge"]):
 
 
 class BadgeManager(django.db.models.Manager["frp_generated_django.Badge"]):
+    _queryset_class = BadgeQuerySet
+
     @typing.override
     def get_queryset(
         self,
     ) -> BadgeQuerySet:
-        return BadgeQuerySet(
-            self.model,
-            using=self._db,
-        )
+        queryset = super().get_queryset()
+        if not isinstance(queryset, BadgeQuerySet):
+            message = f"{type(queryset).__name__} is not BadgeQuerySet"
+            raise TypeError(message)
+        return queryset
 
     @typing.override
     def all(
@@ -578,14 +643,17 @@ class CompanyQuerySet(django.db.models.QuerySet["frp_generated_django.Company"])
 
 
 class CompanyManager(django.db.models.Manager["frp_generated_django.Company"]):
+    _queryset_class = CompanyQuerySet
+
     @typing.override
     def get_queryset(
         self,
     ) -> CompanyQuerySet:
-        return CompanyQuerySet(
-            self.model,
-            using=self._db,
-        )
+        queryset = super().get_queryset()
+        if not isinstance(queryset, CompanyQuerySet):
+            message = f"{type(queryset).__name__} is not CompanyQuerySet"
+            raise TypeError(message)
+        return queryset
 
     @typing.override
     def all(
@@ -627,14 +695,17 @@ class DepartmentQuerySet(django.db.models.QuerySet["frp_generated_django.Departm
 
 
 class DepartmentManager(django.db.models.Manager["frp_generated_django.Department"]):
+    _queryset_class = DepartmentQuerySet
+
     @typing.override
     def get_queryset(
         self,
     ) -> DepartmentQuerySet:
-        return DepartmentQuerySet(
-            self.model,
-            using=self._db,
-        )
+        queryset = super().get_queryset()
+        if not isinstance(queryset, DepartmentQuerySet):
+            message = f"{type(queryset).__name__} is not DepartmentQuerySet"
+            raise TypeError(message)
+        return queryset
 
     @typing.override
     def all(
@@ -693,14 +764,17 @@ class EmployeeQuerySet(django.db.models.QuerySet["frp_generated_django.Employee"
 
 
 class EmployeeManager(django.db.models.Manager["frp_generated_django.Employee"]):
+    _queryset_class = EmployeeQuerySet
+
     @typing.override
     def get_queryset(
         self,
     ) -> EmployeeQuerySet:
-        return EmployeeQuerySet(
-            self.model,
-            using=self._db,
-        )
+        queryset = super().get_queryset()
+        if not isinstance(queryset, EmployeeQuerySet):
+            message = f"{type(queryset).__name__} is not EmployeeQuerySet"
+            raise TypeError(message)
+        return queryset
 
     @typing.override
     def all(
@@ -1517,6 +1591,8 @@ def test_a_query_follows_the_reverse_accessor_an_existing_model_declares() -> No
         field_types=generated.field_types,
         on_delete=generated.on_delete,
         queries=generated.queries,
+        model_options=CatalogModelOptions.default(),
+        entity_model_options={},
         constraints={},
         existing={
             Badge: ExistingDjangoModel(
@@ -1542,6 +1618,35 @@ def test_a_query_follows_the_reverse_accessor_an_existing_model_declares() -> No
 
     assert "badge_by_employee" not in file.text.root
     assert '"medal"' in file.text.root
+
+
+@pytest.mark.parametrize("view", read_views(), ids=lambda view: view.name.root)
+def test_a_view_reads_through_a_related_name_like_the_engine(view: View) -> None:
+    """A one-to-one Reference with a related name is followed backwards through
+    it."""
+    entities = organisation()
+    (compiled,) = compile_all([view]).views
+    config = Modules.with_options(CatalogModelOptions.default())
+
+    with Database.of([view], (), config) as django_models:
+        Database.put(entities, config)
+        rows = Database.read(django_models, compiled, every_row)
+
+    assert rows == engine_rows([compiled], entities)[view.name]
+
+
+def test_a_view_reads_the_rows_the_manager_base_keeps() -> None:
+    view = View(name=ViewName("Hydrated"), source=Employee, step=steps.hydrate())
+    entities = organisation()
+    (compiled,) = compile_all([view]).views
+    config = Modules.with_bases()
+
+    with Database.of([view], (), config) as django_models:
+        Database.put(entities, config)
+        rows = Database.read(django_models, compiled, every_row)
+
+    # The Manager base leaves out the Employee with the lowest ID.
+    assert rows == engine_rows([compiled], entities)[view.name][1:]
 
 
 def with_mentor_from_last(queryset: QuerySet[Model]) -> QuerySet[Model]:
@@ -1814,6 +1919,71 @@ class LongModules:
     )
 
 
+class PlainBases:
+    """`Employee`'s QuerySet and Manager bases as an application would write them
+    for it alone: not generic, so they are plain bases."""
+
+    module: ClassVar[ModulePath] = ModulePath("frp_plain_bases")
+    source: ClassVar[FileText] = FileText(
+        "import typing\n"
+        "\n"
+        "from django.db import models\n"
+        "\n"
+        "if typing.TYPE_CHECKING:\n"
+        "    import frp_generated_django\n"
+        "\n"
+        "\n"
+        "class EmployeeQuerySetBase(\n"
+        '    models.QuerySet["frp_generated_django.Employee"],\n'
+        "):\n"
+        "    def newest_first(self) -> typing.Self:\n"
+        '        return self.order_by("-pk")\n'
+        "\n"
+        "\n"
+        'class EmployeeManagerBase(models.Manager["frp_generated_django.Employee"]):\n'
+        "    pass\n"
+    )
+
+    @staticmethod
+    def config() -> DjangoModels:
+        return PlainBases.config_in(PlainBases.module)
+
+    @staticmethod
+    def long_config() -> DjangoModels:
+        """With bases whose names are long enough that ruff format splits the
+        class statements."""
+        return PlainBases.config_in(LongModules.views)
+
+    @staticmethod
+    def config_in(module: ModulePath) -> DjangoModels:
+        return Modules.config().model_copy(
+            update={
+                "entity_model_options": {
+                    Employee: EntityModelOptions.inherited().model_copy(
+                        update={
+                            "query_set_base": PlainBase(
+                                origin=Symbol(
+                                    module=module,
+                                    qualname=(Identifier("EmployeeQuerySetBase"),),
+                                )
+                            ),
+                            "manager_base": PlainBase(
+                                origin=Symbol(
+                                    module=module,
+                                    qualname=(Identifier("EmployeeManagerBase"),),
+                                )
+                            ),
+                        }
+                    )
+                }
+            }
+        )
+
+    @staticmethod
+    def sources() -> tuple[tuple[ModulePath, FileText], ...]:
+        return ((PlainBases.module, PlainBases.source),)
+
+
 def every_definition() -> tuple[list[View], list[Union]]:
     """Views and a Union generating every kind of query code."""
     return (
@@ -1831,8 +2001,11 @@ def every_definition() -> tuple[list[View], list[Union]]:
             LongModules.views,
         ),
         (ExistingCompany.config(), Generated.models),
+        (Modules.with_bases(), Generated.models),
+        (PlainBases.config(), Generated.models),
+        (PlainBases.long_config(), Generated.models),
     ],
-    ids=["short", "long", "existing"],
+    ids=["short", "long", "existing", "generic-bases", "plain-bases", "long-plain"],
 )
 def test_generated_queries_are_ruff_formatted(
     config: DjangoModels, views: ModulePath
@@ -2326,15 +2499,33 @@ type Existing = tuple[tuple[ModulePath, FileText], ...]
 """The modules of the existing Django models a config names, with their source."""
 
 
-type_checked_configs = pytest.mark.parametrize(
-    ("config", "existing"),
-    [(Modules.config(), ()), (ExistingCompany.config(), ExistingCompany.sources())],
-    ids=["generated", "existing"],
+newest_first_uses = (
+    ValueExpression("employees.filter(name='a').newest_first()"),
+    ValueExpression("employees.all().newest_first()[:2]"),
 )
+"""Calls of the QuerySet base's own method, after which `as_<view>()` type
+checks."""
+
+
+type_checked_configs = pytest.mark.parametrize(
+    ("config", "existing", "uses"),
+    [
+        (Modules.config(), (), ()),
+        (ExistingCompany.config(), ExistingCompany.sources(), ()),
+        (Modules.with_bases(), (), newest_first_uses),
+        (PlainBases.config(), PlainBases.sources(), newest_first_uses),
+    ],
+    ids=["generated", "existing", "generic-bases", "plain-bases"],
+)
+"""`existing` are modules the config refers to, with their source, and `uses`
+what a project calls on `Employee.objects` with the config."""
 
 
 def type_checked(
-    directory: Directory, config: DjangoModels, existing: Existing
+    directory: Directory,
+    config: DjangoModels,
+    existing: Existing,
+    uses: tuple[ValueExpression, ...],
 ) -> None:
     """Writes the generated code of `every_definition()` into `directory`, the
     `existing` Django models, and a project's use of it: the manager's QuerySet
@@ -2362,7 +2553,8 @@ def type_checked(
         "        *employees.order_by('-pk').as_employee_overview(),\n"
         "        *employees.all().as_employee_overview(),\n"
         "        *employees.as_employee_overview(),\n"
-        "    ]\n"
+        + "".join(f"        *{use.root}.as_employee_overview(),\n" for use in uses)
+        + "    ]\n"
         "\n"
         "\n"
         "def any_employees() -> list[frp_generated_models.AnyEmployee]:\n"
@@ -2374,11 +2566,14 @@ def type_checked(
 
 @type_checked_configs
 def test_generated_queries_pass_mypy_strict(
-    tmp_path: Path, config: DjangoModels, existing: Existing
+    tmp_path: Path,
+    config: DjangoModels,
+    existing: Existing,
+    uses: tuple[ValueExpression, ...],
 ) -> None:
     """With django-stubs' mypy plugin, which types Django models from a project's
     settings: here, an app whose models are the generated and existing ones."""
-    type_checked(Directory(tmp_path), config, existing)
+    type_checked(Directory(tmp_path), config, existing, uses)
     label = config.app_label.root
     (tmp_path / label).mkdir()
     _ = (tmp_path / label / "__init__.py").write_text("", encoding="utf-8")
@@ -2437,9 +2632,12 @@ def test_generated_queries_pass_mypy_strict(
 
 @type_checked_configs
 def test_generated_queries_pass_the_type_checker(
-    tmp_path: Path, config: DjangoModels, existing: Existing
+    tmp_path: Path,
+    config: DjangoModels,
+    existing: Existing,
+    uses: tuple[ValueExpression, ...],
 ) -> None:
-    type_checked(Directory(tmp_path), config, existing)
+    type_checked(Directory(tmp_path), config, existing, uses)
     source_root = Path(__file__).parents[3]
     _ = (tmp_path / "pyrefly.toml").write_text(
         'project-includes = ["frp_generated_*.py"]\n'

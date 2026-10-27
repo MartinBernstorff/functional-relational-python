@@ -32,7 +32,10 @@ rows are not model instances; Django raises when it is called after them.
 
 The Manager overrides the Manager methods that return a QuerySet (`all`, `filter`,
 `exclude`, `order_by`) to return the Entity's QuerySet, so a type checker sees
-`as_<view>()` on `Model.objects.filter(...)`.
+`as_<view>()` on `Model.objects.filter(...)`. The QuerySet and Manager subclass
+the bases the Entity's `DjangoModelOptions` name, Django's by default. The
+Manager does not have the QuerySet base's methods, unless its base is made with
+`Manager.from_queryset()`; `Model.objects.all().<method>()` has them.
 
 A row is validated non-strictly, so a View model with a strict base accepts what
 Django returns, e.g. a `str` for an enum field. A field typed by a `Literal` of
@@ -79,9 +82,12 @@ from functional_relational_python.entity_graph.entity_graph import (
 )
 from functional_relational_python.outputs.django import conditions
 from functional_relational_python.outputs.django.models import (
+    DjangoClassBase,
     DjangoModels,
     DjangoModelsRenderer,
     FieldTypes,
+    ModelGenericBase,
+    PlainBase,
 )
 from functional_relational_python.outputs.python.mappings import (
     Expression,
@@ -415,6 +421,8 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     """The QuerySet a queryset function filters, once it has prepared it."""
     row_parameter: typing.ClassVar[Identifier] = Identifier("row")
     as_manager: typing.ClassVar[Identifier] = Identifier("as_manager")
+    queryset_class: typing.ClassVar[Identifier] = Identifier("_queryset_class")
+    """The attribute of a Django Manager naming the class of its QuerySets."""
     map_builtin: typing.ClassVar[Identifier] = Identifier("map")
     vars_builtin: typing.ClassVar[Identifier] = Identifier("vars")
     required_helper: typing.ClassVar[Identifier] = FunctionPlan.required_helper
@@ -563,6 +571,15 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             *((DjangoQueriesRenderer.iterator_module,) if self._read() else ()),
             *(query.model.module for query in self._read()),
             *(symbol.module for symbol in self.classes.values()),
+            *(
+                base.origin.module
+                for entity in self.graph.entities
+                if self.config.generates(entity)
+                for base in (
+                    self.config.options_of(entity).query_set_base,
+                    self.config.options_of(entity).manager_base,
+                )
+            ),
         )
 
     def _django_model_modules(self) -> tuple[ModulePath, ...]:
@@ -938,13 +955,28 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             f"            return {last.names().from_row_function().root}({row})\n"
         )
 
-    def _class_statement(self, name: Identifier, base: Expression) -> FileText:
-        """`class <name>(<base>):`, where `base` subscripts a Django class with the
-        quoted Django model, split over lines like ruff format does."""
-        statement = f"class {name.root}({base.root}):\n"
+    def _class_statement(
+        self, name: Identifier, base: DjangoClassBase, entity: type[pydantic.BaseModel]
+    ) -> FileText:
+        """`class <name>(<base>):`, where a base generic in the Django model is
+        subscripted with `entity`'s, quoted, split over lines like ruff format
+        does."""
+        match base:
+            case ModelGenericBase(origin=origin):
+                model = self.config.model_of(entity).qualified().root
+                written = Expression(f'{origin.qualified().root}["{model}"]')
+            case PlainBase(origin=origin):
+                written = Expression(origin.qualified().root)
+        statement = f"class {name.root}({written.root}):\n"
         if len(statement) - 1 <= LineLength.default().root:
             return FileText(statement)
-        split = DjangoQueriesRenderer._subscript(Indent(4), base, Expression(","))
+        match base:
+            case ModelGenericBase():
+                split = DjangoQueriesRenderer._subscript(
+                    Indent(4), written, Expression(",")
+                )
+            case PlainBase():
+                split = Expression(f"{Indent(4).pad().root}{written.root},")
         return FileText(f"class {name.root}(\n{split.root}\n):\n")
 
     @staticmethod
@@ -993,12 +1025,10 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                 )
 
     def _query_set(self, entity: type[pydantic.BaseModel]) -> FileText:
-        model = self.config.model_of(entity).qualified().root
         statement = self._class_statement(
             self.config.query_set_of(entity).bound_name(),
-            Expression(
-                f'{DjangoQueriesRenderer.django_models.root}.QuerySet["{model}"]'
-            ),
+            self.config.options_of(entity).query_set_base,
+            entity,
         )
         methods = "\n".join(
             f"    def {query.names().method().root}(\n"
@@ -1017,26 +1047,33 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
 
     def _manager(self, entity: type[pydantic.BaseModel]) -> FileText:
         """The Manager, with the Manager methods returning a QuerySet typed to
-        return the Entity's QuerySet, and its `as_<view>()` methods."""
-        model = self.config.model_of(entity).qualified().root
+        return the Entity's QuerySet, and its `as_<view>()` methods.
+
+        Django's `get_queryset()` builds the class `_queryset_class`, so a base's
+        `get_queryset()` that builds on it, e.g. filtering out deleted rows,
+        returns the Entity's QuerySet. It raises `TypeError` for one that does
+        not."""
         query_set = self.config.query_set_of(entity).bound_name().root
         statement = self._class_statement(
             self.config.manager_of(entity).bound_name(),
-            Expression(
-                f'{DjangoQueriesRenderer.django_models.root}.Manager["{model}"]'
-            ),
+            self.config.options_of(entity).manager_base,
+            entity,
         )
         combinable = f"{DjangoQueriesRenderer.expressions.root}.Combinable"
         methods = [
             (
+                f"    {DjangoQueriesRenderer.queryset_class.root} = {query_set}\n"
+                "\n"
                 "    @typing.override\n"
                 "    def get_queryset(\n"
                 "        self,\n"
                 f"    ) -> {query_set}:\n"
-                f"        return {query_set}(\n"
-                "            self.model,\n"
-                "            using=self._db,\n"
-                "        )\n"
+                "        queryset = super().get_queryset()\n"
+                f"        if not isinstance(queryset, {query_set}):\n"
+                "            message = "
+                f'f"{{type(queryset).__name__}} is not {query_set}"\n'
+                "            raise TypeError(message)\n"
+                "        return queryset\n"
             ),
             (
                 "    @typing.override\n"
