@@ -12,7 +12,9 @@ up, and annotates each row with the name of the first Variant that keeps it;
 QuerySet with a method `as_<view>()` per View and Union over the Entity, and a
 Manager, which is the Entity's Django model's manager `objects`. The method yields
 View models from the QuerySet as filtered, ordered and sliced so far, so a list
-costs one query.
+costs one query. An Entity whose Django model the application already has, see
+`ExistingDjangoModel`, gets no QuerySet or Manager, since its model's manager is
+its own; its Views and Unions still get their two functions.
 
 The View's Filters apply before a slice the QuerySet has taken: `[:10]` gives the
 first ten rows the View keeps, not those of the first ten rows it keeps. A Filter
@@ -212,7 +214,6 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
     view: compiler.CompiledView
     model: Symbol
     source: Symbol
-    config: DjangoModels
 
     @staticmethod
     def of(
@@ -223,7 +224,6 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
             view=view,
             model=Symbol(module=module, qualname=(view.names.model.name.identifier(),)),
             source=config.model_of(view.source),
-            config=config,
         )
 
     def entity(self) -> type[pydantic.BaseModel]:
@@ -235,23 +235,27 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
     def names(self) -> QueryNames:
         return QueryNames(function=self.view.names.function)
 
-    def related_paths(self) -> tuple[RelatedPath, ...]:
+    def related_paths(self, config: DjangoModels) -> tuple[RelatedPath, ...]:
         """Every chain of relations to the Entities the View looks up, in the
         order they are first looked up."""
         return tuple(
             dict.fromkeys(
                 RelatedPath.of(path)
-                for path in self._paths(
-                    self.view.relation, _Trail.start(self.view.source), ((),)
+                for path in ViewQueries._paths(
+                    self.view.relation,
+                    _Trail.start(self.view.source),
+                    ((),),
+                    config,
                 )
             )
         )
 
+    @staticmethod
     def _paths(
-        self,
         relation: ir.Relation,
         trail: _Trail,
         paths: tuple[tuple[FieldName, ...], ...],
+        config: DjangoModels,
     ) -> Iterator[tuple[FieldName, ...]]:
         """`trail` is the way to the subject of `relation`, and `paths` the chain
         of relations to each Entity on it, the subject's last. A Hop back needs
@@ -264,7 +268,7 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
                     case _Follow():
                         path = (
                             *here[-1],
-                            DjangoQueriesRenderer.related(self.config, lookup),
+                            DjangoQueriesRenderer.related(lookup, config),
                         )
                         yield path
                         here = (*here, path)
@@ -274,7 +278,7 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
                 case ir.Field():
                     pass
                 case ir.NestedField(relation=nested):
-                    yield from self._paths(nested, at, here)
+                    yield from ViewQueries._paths(nested, at, here, config)
 
 
 class UnionQueries(pydantic.BaseModel, frozen=True):
@@ -317,10 +321,12 @@ class UnionQueries(pydantic.BaseModel, frozen=True):
     def names(self) -> QueryNames:
         return QueryNames(function=self.union.names.function)
 
-    def related_paths(self) -> tuple[RelatedPath, ...]:
+    def related_paths(self, config: DjangoModels) -> tuple[RelatedPath, ...]:
         """Every Variant's chains of relations, each once, in Variant order."""
         return tuple(
-            dict.fromkeys(path for leaf in self.leaves for path in leaf.related_paths())
+            dict.fromkeys(
+                path for leaf in self.leaves for path in leaf.related_paths(config)
+            )
         )
 
 
@@ -441,7 +447,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     class a field is read through."""
 
     @staticmethod
-    def related(config: DjangoModels, lookup: ir.EntityLookup) -> FieldName:
+    def related(lookup: ir.EntityLookup, config: DjangoModels) -> FieldName:
         """The relation `select_related` follows for `lookup`: the foreign key of
         its Reference, or for a ReverseLookup that Reference's reverse
         accessor."""
@@ -449,7 +455,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             case ir.Lookup():
                 return DjangoModelsRenderer.foreign_key_name(lookup.reference.field)
             case ir.ReverseLookup():
-                return config.one_to_one_accessor(lookup.target, lookup.via)
+                return config.reverse_accessor_of(lookup.target, lookup.via)
 
     @staticmethod
     def render(
@@ -503,7 +509,10 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             ),
             classes=classes,
         )
-        entities = sorted(graph.entities, key=lambda entity: entity.__name__)
+        entities = sorted(
+            (entity for entity in graph.entities if config.generates(entity)),
+            key=lambda entity: entity.__name__,
+        )
         return DiagnosticsError.or_ok(
             (
                 *DjangoQueriesRenderer._modules(config, (*views, *unions), placed),
@@ -552,11 +561,26 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             *(
                 base.origin.module
                 for entity in self.graph.entities
+                if self.config.generates(entity)
                 for base in (
                     self.config.options_of(entity).query_set_base,
                     self.config.options_of(entity).manager_base,
                 )
             ),
+        )
+
+    def _django_model_modules(self) -> tuple[ModulePath, ...]:
+        """The modules of the Django models, generated and existing, imported only
+        for type checking."""
+        return ModulePath.ordered(
+            (
+                self.config.module,
+                *(
+                    existing.module
+                    for entity, existing in self.config.existing.items()
+                    if entity in self.graph.entities
+                ),
+            )
         )
 
     def _clashes(
@@ -590,7 +614,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                         f"{entity.__qualname__})"
                     ),
                 )
-        for imported in (*self._imports(), self.config.module):
+        for imported in (*self._imports(), *self._django_model_modules()):
             module.refer_to_module(imported)
         module.refer(
             DjangoQueriesRenderer.map_builtin, AnnotationText("the built-in map")
@@ -676,9 +700,14 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             "".join(f"import {module.root}\n" for module in section)
             for section in ModulePath.import_sections(self._imports())
         )
-        type_checking = (
-            f"\nif {DjangoQueriesRenderer.typing_module.root}.TYPE_CHECKING:\n"
-            f"    import {self.config.module.root}\n"
+        type_checking = "".join(
+            (
+                f"\nif {DjangoQueriesRenderer.typing_module.root}.TYPE_CHECKING:\n",
+                *(
+                    f"    import {module.root}\n"
+                    for module in self._django_model_modules()
+                ),
+            )
         )
         functions = "".join(
             f"\n\n{self._queryset_function(query).root}"
@@ -713,12 +742,11 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             f'[{query.source.qualified().root}]"'
         )
 
-    @staticmethod
-    def _prepared(query: ReadQueries) -> Expression:
+    def _prepared(self, query: ReadQueries) -> Expression:
         """The QuerySet loading every field and every Entity `query` reads, at the
         indentation of a function body."""
         prepared = f"{DjangoQueriesRenderer.queryset_parameter.root}.defer(None)"
-        paths = query.related_paths()
+        paths = query.related_paths(self.config)
         if not paths:
             return Expression(prepared)
         return Indent(4).exploded(
@@ -737,7 +765,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         )
 
     def _queryset_function(self, query: ViewQueries) -> FileText:
-        prepared = DjangoQueriesRenderer._prepared(query)
+        prepared = self._prepared(query)
         signature = DjangoQueriesRenderer._queryset_signature(query).root
         conditions = self._conditions()
         match conditions.of_view(query.view):
@@ -831,7 +859,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         )
         return FileText(
             f"{DjangoQueriesRenderer._queryset_signature(union).root}"
-            f"    {kept} = {DjangoQueriesRenderer._prepared(union).root}\n"
+            f"    {kept} = {self._prepared(union).root}\n"
             f"    {kept} = {annotated.root}\n"
             f"{added}"
             f"    return {kept}\n"
@@ -1022,7 +1050,8 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                 f"    ) -> {query_set}:\n"
                 "        queryset = super().get_queryset()\n"
                 f"        if not isinstance(queryset, {query_set}):\n"
-                f'            message = f"{{type(queryset).__name__}} is not {query_set}"\n'
+                "            message = "
+                f'f"{{type(queryset).__name__}} is not {query_set}"\n'
                 "            raise TypeError(message)\n"
                 "        return queryset\n"
             ),
@@ -1721,7 +1750,7 @@ class _RowReader(pydantic.BaseModel, frozen=True):
     def _found(self, lookup: ir.EntityLookup, row: Expression) -> Expression:
         """The row `lookup` finds from `row`: through `_required` if the View
         requires it."""
-        related = DjangoQueriesRenderer.related(self.config, lookup).root
+        related = DjangoQueriesRenderer.related(lookup, self.config).root
         name = PythonString(related).literal()
         cast = DjangoQueriesRenderer.typing_module.root
         model = self.config.model_of(lookup.target).qualified().root
@@ -1750,7 +1779,7 @@ class _RowReader(pydantic.BaseModel, frozen=True):
     def _absent(self, lookup: ir.EntityLookup, row: Expression) -> Expression:
         """The condition under which an optional `lookup` finds no row from
         `row`."""
-        name = DjangoQueriesRenderer.related(self.config, lookup).root
+        name = DjangoQueriesRenderer.related(lookup, self.config).root
         match lookup:
             case ir.Lookup():
                 return Expression(f"{row.root}.{name} is None")
