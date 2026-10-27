@@ -1,4 +1,6 @@
 import datetime
+import enum
+import math
 import os
 import subprocess
 import sys
@@ -7,8 +9,9 @@ import types
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
+import django.db.models
 import pydantic
 import pytest
 from safe_result import Err, Ok
@@ -38,6 +41,7 @@ from functional_relational_python.outputs.django.models import (
     ExistingModelOfNonEntity,
     InvalidDjangoFieldName,
     InvalidReverseAccessorName,
+    MixedDjangoChoiceTypes,
     NoDjangoFieldRule,
     OnDelete,
     OnDeleteForNonReference,
@@ -47,6 +51,8 @@ from functional_relational_python.outputs.django.models import (
     ReverseAccessorOfNonOneToOne,
     SetNullOnRequiredReference,
     UndeclaredReverseAccessor,
+    UnimportableDjangoChoices,
+    UnwritableDjangoChoices,
 )
 from functional_relational_python.outputs.django.queries import DjangoQueriesRenderer
 from functional_relational_python.outputs.python.plan import PlacedModels
@@ -206,11 +212,13 @@ def diagnostics(
             return error.diagnostics
 
 
-def field_line(field: FieldName, models: DjangoModels) -> FileText:
-    """The line declaring `field` of `Thing`."""
+def field_line(
+    entity: type[pydantic.BaseModel], field: FieldName, models: DjangoModels
+) -> FileText:
+    """The line declaring `field` of `entity`."""
     (line,) = (
         FileText(line.strip())
-        for line in render([Thing], models).root.splitlines()
+        for line in render([entity], models).root.splitlines()
         if line.strip().startswith(f"{field.root} = ")
     )
     return line
@@ -240,7 +248,7 @@ def all_rules_for_tags() -> DjangoModels:
     ],
 )
 def test_builtin_rule_for_the_wrapped_type(field: str, expected: str) -> None:
-    assert field_line(FieldName(field), all_rules_for_tags()) == FileText(
+    assert field_line(Thing, FieldName(field), all_rules_for_tags()) == FileText(
         f"{field} = {expected}"
     )
 
@@ -270,7 +278,7 @@ def test_the_catalog_overrides_the_rule_for_a_type(
         {tuple[Text, ...]: DjangoField.fake(), overridden: char_field()}, {}
     )
 
-    assert field_line(FieldName(field), models) == FileText(
+    assert field_line(Thing, FieldName(field), models) == FileText(
         f"{field} = models.CharField(max_length=254)"
     )
 
@@ -296,7 +304,7 @@ def test_an_overridden_field_class_outside_django_is_imported() -> None:
 def test_an_optional_overridden_field_is_nullable() -> None:
     models = config({tuple[Text, ...]: DjangoField.fake(), Text: char_field()}, {})
 
-    assert field_line(FieldName("optional"), models) == FileText(
+    assert field_line(Thing, FieldName("optional"), models) == FileText(
         "optional = models.CharField(max_length=254, null=True)"
     )
 
@@ -312,13 +320,313 @@ def test_every_type_without_a_rule_is_a_diagnostic() -> None:
             entity=Untyped,
             field=FieldName("tags"),
             annotation=AnnotationText.of(tuple[Text, ...]),
+            unruled=AnnotationText.of(tuple[Text, ...]),
         ),
         NoDjangoFieldRule(
             entity=Untyped,
             field=FieldName("labels"),
             annotation=AnnotationText.of(frozenset[Text]),
+            unruled=AnnotationText.of(frozenset[Text]),
         ),
     }
+
+
+class Name(pydantic.RootModel[Annotated[str, pydantic.Field(min_length=1)]]):
+    pass
+
+
+class Budget(pydantic.RootModel[pydantic.PositiveInt]):
+    pass
+
+
+PastMoment = Annotated[datetime.datetime, pydantic.AwareDatetime, pydantic.PastDatetime]
+
+
+type AliasedMoment = PastMoment
+
+
+class Shade(enum.StrEnum):
+    LIGHT = "light"
+    DARK = "dark"
+
+
+class Size(enum.IntEnum):
+    SMALL = 1
+    LARGE = 2
+
+
+class Channel(django.db.models.TextChoices):
+    META = "meta", "Meta"
+    GOOGLE = "google", "Google"
+
+
+class Status(django.db.models.TextChoices):
+    """With `__empty__`, its choices hold `None`."""
+
+    ACTIVE = "active", "Active"
+    __empty__ = "Unknown"
+
+
+class Permission(enum.IntFlag):
+    READ = 1
+    WRITE = 2
+
+
+class Count(pydantic.RootModel[Annotated[int, {"unit": "count"}]]):
+    """Its root's metadata, a dict, cannot be hashed."""
+
+
+class RuledId(Id[int]):
+    pass
+
+
+class Ruled(pydantic.BaseModel):
+    """An Entity with a field of each kind of type a built-in rule looks into."""
+
+    id: RuledId
+    name: Name
+    budget: Budget
+    moment: PastMoment
+    maybe_moment: AliasedMoment | None
+    unhashable: Count
+    unhashables: list[Annotated[Integer, {"unit": "count"}]]
+    shade: Shade
+    size: Size
+    channel: Channel
+    status: Status
+    permissions: Permission
+    kind: Literal["area", "money"]
+    maybe_kind: Literal["area", None]
+    member: Literal[Shade.DARK]
+    shades: list[Shade]
+    maybe_texts: list[Text | None] | None
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        # `Annotated` metadata is left out, even when it cannot be hashed.
+        ("name", "models.TextField()"),
+        ("budget", "models.BigIntegerField()"),
+        ("moment", "models.DateTimeField()"),
+        ("maybe_moment", "models.DateTimeField(null=True)"),
+        ("unhashable", "models.BigIntegerField()"),
+        ("unhashables", "ArrayField(base_field=models.BigIntegerField())"),
+        # An enum is the field of its values' type, with its values as choices.
+        (
+            "shade",
+            "models.TextField(choices=[('light', 'light'), ('dark', 'dark')])",
+        ),
+        ("size", "models.BigIntegerField(choices=[(1, 1), (2, 2)])"),
+        # A Django Choices enum's own choices keep its labels.
+        ("channel", "models.TextField(choices=Channel.choices)"),
+        # Its choices hold `None`, so its column may be NULL.
+        ("status", "models.TextField(choices=Status.choices, null=True)"),
+        # A Flag's members combine, so they are no choices.
+        ("permissions", "models.BigIntegerField()"),
+        # A Literal is the field of its values' type, with them as choices.
+        (
+            "kind",
+            "models.TextField(choices=[('area', 'area'), ('money', 'money')])",
+        ),
+        (
+            "maybe_kind",
+            "models.TextField(choices=[('area', 'area')], null=True)",
+        ),
+        ("member", "models.TextField(choices=[('dark', 'dark')])"),
+        # A list is an array of the field of its items.
+        (
+            "shades",
+            (
+                "ArrayField(base_field=models.TextField("
+                "choices=[('light', 'light'), ('dark', 'dark')]))"
+            ),
+        ),
+        (
+            "maybe_texts",
+            "ArrayField(base_field=models.TextField(null=True), null=True)",
+        ),
+    ],
+)
+def test_builtin_rule_for_a_type_it_looks_into(field: str, expected: str) -> None:
+    assert field_line(Ruled, FieldName(field), config({}, {})) == FileText(
+        f"{field} = {expected}"
+    )
+
+
+def test_a_django_choices_enum_and_the_array_field_are_imported() -> None:
+    text = render([Ruled], config({}, {})).root
+
+    assert "\nfrom django.contrib.postgres.fields import ArrayField\n" in text
+    assert f"\nfrom {Channel.__module__} import Channel, Status\n" in text
+
+
+@pytest.mark.parametrize(
+    ("field", "overridden", "expected"),
+    [
+        # The rule for an annotated type wins over the rule for what it annotates.
+        ("budget", pydantic.PositiveInt, "models.CharField(max_length=254)"),
+        # An enum takes the rule for its values' type.
+        (
+            "channel",
+            str,
+            "models.CharField(max_length=254, choices=Channel.choices)",
+        ),
+    ],
+)
+def test_the_catalog_overrides_the_rule_inside_a_type(
+    field: str, overridden: RuntimeAnnotation, expected: str
+) -> None:
+    models = config({overridden: char_field()}, {})
+
+    assert field_line(Ruled, FieldName(field), models) == FileText(
+        f"{field} = {expected}"
+    )
+
+
+def test_override_arguments_import_the_symbols_and_fields_they_name() -> None:
+    colour = Symbol(
+        module=ModulePath("app.choices"),
+        qualname=(Identifier("Colour"), Identifier("choices")),
+    )
+    fields = ModulePath("app.fields")
+    array = DjangoField(
+        field_class=Symbol(module=fields, qualname=(Identifier("ListField"),)),
+        arguments={
+            Identifier("base_field"): DjangoField(
+                field_class=Symbol(
+                    module=fields, qualname=(Identifier("ColourField"),)
+                ),
+                arguments={Identifier("choices"): colour},
+            ),
+            Identifier("size"): ValueExpression("3"),
+        },
+    )
+
+    text = render([Thing], config({tuple[Text, ...]: array}, {})).root
+
+    assert (
+        "\n\nfrom app.choices import Colour\n"
+        "from app.fields import ColourField, ListField\n"
+    ) in text
+    assert (
+        "    tags = ListField(base_field=ColourField(choices=Colour.choices), size=3)\n"
+    ) in text
+
+
+class Mixed(enum.Enum):
+    TEXT = "text"
+    NUMBER = 1
+
+
+def test_values_of_several_types_are_a_diagnostic() -> None:
+    class HasMixed(pydantic.BaseModel):
+        id: ThingId
+        enum_values: Mixed
+        literal_values: Literal["a", 1]
+
+    assert set(diagnostics([HasMixed], config({}, {}))) == {
+        MixedDjangoChoiceTypes(
+            entity=HasMixed,
+            field=FieldName(field),
+            values_of=AnnotationText.of(values_of),
+            value_types=(int, str),
+        )
+        for field, values_of in (
+            ("enum_values", Mixed),
+            ("literal_values", Literal["a", 1]),
+        )
+    }
+
+
+def test_a_list_of_a_type_without_a_rule_is_a_diagnostic() -> None:
+    class Unruled(pydantic.BaseModel):
+        id: ThingId
+        items: list[frozenset[Text]]
+
+    assert diagnostics([Unruled], config({}, {})) == (
+        NoDjangoFieldRule(
+            entity=Unruled,
+            field=FieldName("items"),
+            annotation=AnnotationText.of(list[frozenset[Text]]),
+            unruled=AnnotationText.of(frozenset[Text]),
+        ),
+    )
+
+
+class Holiday(enum.Enum):
+    NEW_YEAR = datetime.date(2026, 1, 1)
+
+
+class Ratio(enum.Enum):
+    UNBOUNDED = math.inf
+
+
+@pytest.mark.parametrize(
+    ("values_of", "value"),
+    [(Holiday, datetime.date(2026, 1, 1)), (Ratio, math.inf)],
+)
+def test_choices_generated_code_cannot_write_are_a_diagnostic(
+    values_of: type[enum.Enum], value: object
+) -> None:
+    unwritable = pydantic.create_model(
+        "HasUnwritable", id=(ThingId, ...), value=(values_of, ...)
+    )
+
+    assert diagnostics([unwritable], config({}, {})) == (
+        UnwritableDjangoChoices(
+            entity=unwritable,
+            field=FieldName("value"),
+            values_of=AnnotationText.of(values_of),
+            values=(value,),
+        ),
+    )
+
+
+class Tree(pydantic.RootModel[list["Tree"]]):
+    pass
+
+
+def test_a_recursive_type_has_no_rule() -> None:
+    class Forest(pydantic.BaseModel):
+        id: ThingId
+        tree: Tree
+
+    assert diagnostics([Forest], config({}, {})) == (
+        NoDjangoFieldRule(
+            entity=Forest,
+            field=FieldName("tree"),
+            annotation=AnnotationText.of(Tree),
+            unruled=AnnotationText.of(Tree),
+        ),
+    )
+
+
+def test_an_auto_increment_override_nested_in_a_field_is_a_diagnostic() -> None:
+    class Counts(pydantic.BaseModel):
+        id: CompanyId
+        counts: list[Integer]
+
+    auto = DjangoField.builtin(Identifier("BigAutoField"), {})
+
+    assert diagnostics([Counts], config({int: auto}, {})) == (
+        AutoIncrementOnNonPrimaryKey(entity=Counts, field=FieldName("counts")),
+    )
+
+
+def test_a_django_choices_enum_that_cannot_be_imported_is_a_diagnostic() -> None:
+    class Local(django.db.models.TextChoices):
+        ONE = "one", "One"
+
+    class HasLocal(pydantic.BaseModel):
+        id: ThingId
+        local: Local
+
+    assert diagnostics([HasLocal], config({}, {})) == (
+        UnimportableDjangoChoices(
+            entity=HasLocal, field=FieldName("local"), enum_class=Local
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -770,13 +1078,15 @@ def django_project_passes_checks(
 ) -> None:
     """The Django project in `project`, with `apps` installed, passes the type
     checker over `migrated`, Django's system checks, `makemigrations` of
-    `migrated`, and `migrate`."""
+    `migrated`, and `migrate`. `django.contrib.postgres` is installed too, for
+    the `ArrayField` of a list."""
     directory = project.root
+    installed = ["django.contrib.postgres", *(app.root for app in apps)]
     _ = (directory / "settings.py").write_text(
         textwrap.dedent(
             f"""\
             SECRET_KEY = "test"
-            INSTALLED_APPS = {[app.root for app in apps]!r}
+            INSTALLED_APPS = {installed!r}
             DATABASES = {{
                 "default": {{
                     "ENGINE": "django.db.backends.sqlite3",
@@ -918,7 +1228,7 @@ def test_generated_models_type_check_and_make_migrations(tmp_path: Path) -> None
         born: Moment
 
     graph = EntityGraph.build(
-        [Company, Department, Person], IdBase.fake(), OneToOneMarker.fake()
+        [Company, Department, Person, Ruled], IdBase.fake(), OneToOneMarker.fake()
     ).unwrap()
     files = GeneratedFiles.merged(
         [
@@ -1030,7 +1340,10 @@ class Article(pydantic.BaseModel):
 def test_a_primary_key_wrapping_str_needs_an_override() -> None:
     assert diagnostics([Article], config({}, {})) == (
         NoDjangoFieldRule(
-            entity=Article, field=FieldName("id"), annotation=AnnotationText.of(SlugId)
+            entity=Article,
+            field=FieldName("id"),
+            annotation=AnnotationText.of(SlugId),
+            unruled=AnnotationText.of(str),
         ),
     )
 
