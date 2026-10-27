@@ -2871,18 +2871,20 @@ def test_generated_queries_pass_the_type_checker(
     existing: Existing,
     uses: tuple[ValueExpression, ...],
 ) -> None:
-    """A manager overriding one a model base declares is an attribute, which
-    `@override` cannot decorate, so that error is off."""
+    """Where a model base declares the manager, the manager overriding it is an
+    attribute, which `@override` cannot decorate, so that error is off."""
     type_checked(Directory(tmp_path), config, existing, uses)
     source_root = Path(__file__).parents[3]
+    undecoratable = (
+        "\n[errors]\nmissing-override-decorator = false\n"
+        if existing == DeclaredManager.sources()
+        else ""
+    )
     _ = (tmp_path / "pyrefly.toml").write_text(
         'project-includes = ["frp_generated_*.py"]\n'
         f'search-path = ["{tmp_path}", "{source_root}"]\n'
         f'python-interpreter-path = "{sys.executable}"\n'
-        'preset = "all"\n'
-        "\n"
-        "[errors]\n"
-        "missing-override-decorator = false\n",
+        f'preset = "all"\n{undecoratable}',
         encoding="utf-8",
     )
 

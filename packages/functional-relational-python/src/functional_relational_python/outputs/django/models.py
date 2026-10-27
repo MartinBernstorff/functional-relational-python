@@ -64,7 +64,6 @@ from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     FirstParty,
     ImportBlock,
-    LineLength,
     ModulePath,
     PythonString,
     Symbol,
@@ -1957,9 +1956,19 @@ class _PlannedModel(pydantic.BaseModel, frozen=True):
         statement = top.fitted(
             Expression(f"class {self.name.root}({bases}):"), Expression("")
         )
+        # Annotated, so a type checker types `objects` as the Manager rather
+        # than as a base declares it, e.g. older django-stubs' `Manager[Self]`.
+        manager = self.manager.bound_name().root
+        objects = Indent(4).assigned(
+            Expression(
+                f"{DjangoModelsRenderer.manager.root}: "
+                f"{DjangoModelsRenderer.class_var.bound_name().root}[{manager}]"
+            ),
+            Expression(f"{manager}()"),
+        )
         return FileText(
             f"{decorators}{statement.root}\n"
-            f"    {self._manager_line().root}\n"
+            f"    {objects.root}\n"
             + "".join(declaration.line().root for declaration in self.declarations)
             + "\n    class Meta:\n"
             + "".join(
@@ -1968,26 +1977,6 @@ class _PlannedModel(pydantic.BaseModel, frozen=True):
                 for name, value in options.items()
             )
             + constraints.root
-        )
-
-    def _manager_line(self) -> Expression:
-        """`objects: ClassVar[<Manager>] = <Manager>()`. The annotation types
-        `objects` as the Manager, where a type checker would otherwise keep the
-        type a base declares, e.g. the `Manager[Self]` older django-stubs declare.
-        Split as ruff format splits it: the value parenthesized, or else the
-        annotation."""
-        manager = self.manager.bound_name().root
-        target = Expression(
-            f"{DjangoModelsRenderer.manager.root}: "
-            f"{DjangoModelsRenderer.class_var.bound_name().root}[{manager}]"
-        )
-        indent = Indent(4)
-        if len(f"{indent.pad().root}{target.root} = (") <= LineLength.default().root:
-            return indent.assigned(target, Expression(f"{manager}()"))
-        origin, _, _ = target.root.partition("[")
-        return Expression(
-            f"{origin}[\n{indent.deeper().pad().root}{manager}\n"
-            f"{indent.pad().root}] = {manager}()"
         )
 
     @staticmethod

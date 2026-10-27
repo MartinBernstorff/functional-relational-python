@@ -131,9 +131,18 @@ class Indent(pydantic.RootModel[int], frozen=True):
         format splits it: as `fitted` splits it, unless the line up to the
         value's last opening bracket does not fit, and `<target> = (` does. Then
         the value is parenthesized on lines of its own, split as `fitted` splits
-        it."""
+        it. When not even `<target> = (` fits, a bracketed target, e.g. the
+        annotation of `x: ClassVar[T] = T()`, is split as `fitted` splits it."""
         line = Expression(f"{target.root} = {value.root}")
         pad = self.pad().root
+        assigning = Expression(f" = {value.root}")
+        if (
+            len(f"{pad}{line.root}") > LineLength.default().root
+            and len(f"{pad}{target.root} = (") > LineLength.default().root
+            and isinstance(_Bracketed.of(target), _Bracketed)
+        ):
+            split = self.fitted(target, assigning).root
+            return Expression(f"{split}{assigning.root}")
         match _Bracketed.of(value):
             case _Bracketed(head=head) if (
                 len(f"{pad}{line.root}") > LineLength.default().root
