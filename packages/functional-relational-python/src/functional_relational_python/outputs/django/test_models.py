@@ -23,6 +23,7 @@ from functional_relational_python.compiler.diagnostics import UnknownField
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
+    Optionality,
     RuntimeAnnotation,
 )
 from functional_relational_python.entity_graph.id import (
@@ -31,6 +32,7 @@ from functional_relational_python.entity_graph.id import (
     OneToOne,
     OneToOneMarker,
 )
+from functional_relational_python.outputs.django.conditions import DjangoColumn
 from functional_relational_python.outputs.django.models import (
     AppLabel,
     AutoIncrementOnNonPrimaryKey,
@@ -46,6 +48,7 @@ from functional_relational_python.outputs.django.models import (
     DbTable,
     Default,
     DefaultForNonField,
+    DefaultForReferencePrimaryKey,
     DjangoDiagnostic,
     DjangoField,
     DjangoFieldNameClash,
@@ -58,6 +61,7 @@ from functional_relational_python.outputs.django.models import (
     ExistingModelInGeneratedModule,
     ExistingModelOfNonEntity,
     FieldDefault,
+    FieldTypes,
     ForeignKeyConstraint,
     IndexField,
     IndexName,
@@ -71,8 +75,12 @@ from functional_relational_python.outputs.django.models import (
     OnDelete,
     OnDeleteForNonReference,
     OnDeleteOnExistingModel,
+    OptionalPrimaryKeyReference,
     OrderingTerm,
+    OwnPrimaryKey,
+    PrimaryKeyOfNonOneToOne,
     ReferenceKey,
+    ReferencePrimaryKey,
     RelatedName,
     RelatedNameForNonReference,
     ReverseAccessorClash,
@@ -257,13 +265,14 @@ def diagnostics(
 def field_line(
     entity: type[pydantic.BaseModel], field: FieldName, models: DjangoModels
 ) -> FileText:
-    """The line declaring `field` of `entity`."""
-    (line,) = (
-        FileText(line.strip())
-        for line in render([entity], models).root.splitlines()
-        if line.strip().startswith(f"{field.root} = ")
+    """The statement declaring `field` of `entity`, dedented: a line, or the
+    lines it is split over."""
+    (statement,) = re.findall(
+        rf"^    {field.root} = .*?\n(?=    \w|\n)",
+        render([entity], models).root,
+        flags=re.MULTILINE | re.DOTALL,
     )
-    return line
+    return FileText(textwrap.dedent(statement).removesuffix("\n"))
 
 
 def all_rules_for_tags() -> DjangoModels:
@@ -457,7 +466,7 @@ class Ruled(pydantic.BaseModel):
         # An enum is the field of its values' type, with its values as choices.
         (
             "shade",
-            "models.TextField(choices=[('light', 'light'), ('dark', 'dark')])",
+            'models.TextField(choices=[("light", "light"), ("dark", "dark")])',
         ),
         ("size", "models.BigIntegerField(choices=[(1, 1), (2, 2)])"),
         # A Django Choices enum's own choices keep its labels.
@@ -469,19 +478,21 @@ class Ruled(pydantic.BaseModel):
         # A Literal is the field of its values' type, with them as choices.
         (
             "kind",
-            "models.TextField(choices=[('area', 'area'), ('money', 'money')])",
+            'models.TextField(choices=[("area", "area"), ("money", "money")])',
         ),
         (
             "maybe_kind",
-            "models.TextField(choices=[('area', 'area')], null=True)",
+            'models.TextField(choices=[("area", "area")], null=True)',
         ),
-        ("member", "models.TextField(choices=[('dark', 'dark')])"),
+        ("member", 'models.TextField(choices=[("dark", "dark")])'),
         # A list is an array of the field of its items.
         (
             "shades",
+            # Split as ruff format splits it, since it does not fit on a line.
             (
-                "ArrayField(base_field=models.TextField("
-                "choices=[('light', 'light'), ('dark', 'dark')]))"
+                "ArrayField(\n"
+                '    base_field=models.TextField(choices=[("light", "light"), ("dark", "dark")])\n'
+                ")"
             ),
         ),
         (
@@ -674,10 +685,10 @@ def test_a_django_choices_enum_that_cannot_be_imported_is_a_diagnostic() -> None
 @pytest.mark.parametrize(
     ("on_delete", "expected"),
     [
-        ({}, "company = models.ForeignKey('Company', on_delete=models.PROTECT, related_name='+')"),
+        ({}, 'company = models.ForeignKey("Company", on_delete=models.PROTECT, related_name="+")'),
         (
             {ReferenceKey(entity=Department, field=FieldName("company_id")): OnDelete.CASCADE},
-            "company = models.ForeignKey('Company', on_delete=models.CASCADE, related_name='+')",
+            'company = models.ForeignKey("Company", on_delete=models.CASCADE, related_name="+")',
         ),
     ],
 )  # fmt: skip
@@ -693,8 +704,9 @@ def test_an_optional_reference_is_a_nullable_foreign_key() -> None:
     text = render([Company], config({}, {})).root
 
     assert (
-        "    parent = models.ForeignKey('Company', on_delete=models.PROTECT, "
-        "related_name='+', null=True)\n"
+        "    parent = models.ForeignKey(\n"
+        '        "Company", on_delete=models.PROTECT, related_name="+", null=True\n'
+        "    )\n"
     ) in text
 
 
@@ -714,11 +726,145 @@ def test_a_one_to_one_reference_is_a_one_to_one_field_with_a_reverse_accessor() 
     text = render([Company, CompanyDetails], config({}, {})).root
 
     assert (
-        "    company = models.OneToOneField('Company', on_delete=models.PROTECT, "
-        "related_name='company_details_by_company')\n"
-        "    successor = models.OneToOneField('Company', on_delete=models.PROTECT, "
-        "related_name='company_details_by_successor', null=True)\n"
+        textwrap.indent(
+            textwrap.dedent(
+                """\
+                company = models.OneToOneField(
+                    "Company", on_delete=models.PROTECT, related_name="company_details_by_company"
+                )
+                successor = models.OneToOneField(
+                    "Company",
+                    on_delete=models.PROTECT,
+                    related_name="company_details_by_successor",
+                    null=True,
+                )
+                """
+            ),
+            "    ",
+        )
+        in text
+    )
+
+
+def keyed_by(reference: FieldName) -> EntityModelOptions:
+    """The Entity's model has `reference` as its primary key."""
+    return EntityModelOptions.inherited().model_copy(
+        update={"primary_key": ReferencePrimaryKey(reference=reference)}
+    )
+
+
+def test_a_one_to_one_reference_can_be_the_primary_key_in_place_of_the_id() -> None:
+    models = config({}, {}).model_copy(
+        update={
+            "entity_model_options": {CompanyDetails: keyed_by(FieldName("company_id"))}
+        }
+    )
+
+    text = render([Company, CompanyDetails], models).root
+
+    assert (
+        "class CompanyDetails(models.Model):\n"
+        "    objects = CompanyDetailsManager()\n"
+        "    company = models.OneToOneField(\n"
+        '        "Company",\n'
+        "        on_delete=models.PROTECT,\n"
+        '        related_name="company_details_by_company",\n'
+        "        primary_key=True,\n"
+        "    )\n"
+        "    successor = "
     ) in text
+
+
+@pytest.mark.parametrize(
+    ("entity", "options", "expected"),
+    [
+        (
+            Department,
+            keyed_by(FieldName("company_id")),
+            PrimaryKeyOfNonOneToOne(entity=Department, field=FieldName("company_id")),
+        ),
+        (
+            Department,
+            keyed_by(FieldName("founded")),
+            PrimaryKeyOfNonOneToOne(entity=Department, field=FieldName("founded")),
+        ),
+        (
+            CompanyDetails,
+            keyed_by(FieldName("successor_id")),
+            OptionalPrimaryKeyReference(
+                entity=CompanyDetails, field=FieldName("successor_id")
+            ),
+        ),
+        (
+            CompanyDetails,
+            keyed_by(FieldName("company_id")).model_copy(
+                update={"defaults": {FieldName("id"): AutoNow()}}
+            ),
+            DefaultForReferencePrimaryKey(
+                entity=CompanyDetails, reference=FieldName("company_id")
+            ),
+        ),
+    ],
+    ids=["many-to-one", "not a reference", "optional", "default for the id"],
+)
+def test_a_primary_key_reference_django_cannot_key_by_is_a_diagnostic(
+    entity: type[pydantic.BaseModel],
+    options: EntityModelOptions,
+    expected: DjangoDiagnostic,
+) -> None:
+    models = config({}, {}).model_copy(
+        update={"entity_model_options": {entity: options}}
+    )
+
+    assert diagnostics([Company, Department, CompanyDetails], models) == (expected,)
+
+
+class UnruledId(Id[complex]):
+    """No Django field rule holds a `complex`."""
+
+
+class UnruledDetails(pydantic.BaseModel):
+    id: UnruledId
+    company_id: Annotated[CompanyId, OneToOne()]
+
+
+def test_the_id_of_a_reference_keyed_model_is_held_by_the_reference_column() -> None:
+    """The `id` needs no Django field rule, and its column is the Reference's,
+    which is never NULL."""
+    models = config({}, {}).model_copy(
+        update={
+            "entity_model_options": {UnruledDetails: keyed_by(FieldName("company_id"))}
+        }
+    )
+    graph = EntityGraph.build(
+        [Company, UnruledDetails], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+
+    _ = DjangoModelsRenderer.render(graph, models).unwrap()
+    assert DjangoModelsRenderer.columns(graph, models, FieldTypes(overrides={})).of(
+        UnruledDetails, FieldName("id")
+    ) == DjangoColumn(
+        attribute=FieldName("company_id"), optionality=Optionality.REQUIRED
+    )
+
+
+def test_a_catalog_wide_default_for_the_id_of_a_reference_keyed_model_is_left_out() -> (
+    None
+):
+    """The `id` has no column of its own, so the default has no field to go on."""
+    models = config({}, {}).model_copy(
+        update={
+            "model_options": CatalogModelOptions.default().model_copy(
+                update={"defaults": {FieldName("id"): Default(value=uuid4())}}
+            ),
+            "entity_model_options": {CompanyDetails: keyed_by(FieldName("company_id"))},
+        }
+    )
+
+    text = render([Company, CompanyDetails], models).root
+
+    assert "class CompanyDetails(models.Model):\n    objects" in text
+    assert text.count("default=uuid4") == 1
 
 
 class HolderId(Id[int]):
@@ -881,20 +1027,22 @@ def test_golden_django_models() -> None:
             objects = CompanyManager()
             id = models.BigAutoField(primary_key=True)
             name = models.TextField()
-            parent = models.ForeignKey('Company', on_delete=models.SET_NULL, related_name='+', null=True)
+            parent = models.ForeignKey(
+                "Company", on_delete=models.SET_NULL, related_name="+", null=True
+            )
 
             class Meta:
-                app_label = 'app'
+                app_label = "app"
 
 
         class Department(models.Model):
             objects = DepartmentManager()
             id = models.UUIDField(primary_key=True)
-            company = models.ForeignKey('Company', on_delete=models.PROTECT, related_name='+')
+            company = models.ForeignKey("Company", on_delete=models.PROTECT, related_name="+")
             founded = models.DateField()
 
             class Meta:
-                app_label = 'app'
+                app_label = "app"
         """
         )
     )
@@ -994,21 +1142,28 @@ def test_an_entity_with_an_existing_model_gets_none_and_is_imported() -> None:
         class CompanyDetails(models.Model):
             objects = CompanyDetailsManager()
             id = models.BigIntegerField(primary_key=True)
-            company = models.OneToOneField(Company, on_delete=models.PROTECT, related_name='company_details_by_company')
-            successor = models.OneToOneField(Company, on_delete=models.PROTECT, related_name='company_details_by_successor', null=True)
+            company = models.OneToOneField(
+                Company, on_delete=models.PROTECT, related_name="company_details_by_company"
+            )
+            successor = models.OneToOneField(
+                Company,
+                on_delete=models.PROTECT,
+                related_name="company_details_by_successor",
+                null=True,
+            )
 
             class Meta:
-                app_label = 'app'
+                app_label = "app"
 
 
         class Department(models.Model):
             objects = DepartmentManager()
             id = models.UUIDField(primary_key=True)
-            company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name='+')
+            company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="+")
             founded = models.DateField()
 
             class Meta:
-                app_label = 'app'
+                app_label = "app"
         """
         )
     )
@@ -1322,12 +1477,12 @@ def person_options() -> EntityModelOptions:
             BareDecorator(function=ProjectBases.symbol(Identifier("registered"))),
             CalledDecorator(
                 function=ProjectBases.symbol(Identifier("following")),
-                arguments={Identifier("follow"): ValueExpression("['employer']")},
+                arguments={Identifier("follow"): ValueExpression('["employer"]')},
             ),
         ),
         ordering=(OrderingTerm("-created_at"), OrderingTerm("email")),
         defaults={
-            FieldName("nickname"): DatabaseDefault(value=ValueExpression("'anon'")),
+            FieldName("nickname"): DatabaseDefault(value=ValueExpression('"anon"')),
             FieldName("born"): AutoNowAdd(),
         },
         foreign_key_constraint=ForeignKeyConstraint.NOT_ENFORCED,
@@ -1348,6 +1503,7 @@ def person_options() -> EntityModelOptions:
             FieldName("employer_id"): RelatedName("employees"),
             FieldName("heads_id"): RelatedName("head"),
         },
+        primary_key=OwnPrimaryKey(),
     )
 
 
@@ -1363,7 +1519,14 @@ def uuid_default() -> EntityModelOptions:
 
 @pytest.mark.parametrize(
     "entity_model_options",
-    [{}, {Person: person_options(), Department: uuid_default()}],
+    [
+        {},
+        {
+            Person: person_options(),
+            Department: uuid_default(),
+            CompanyDetails: keyed_by(FieldName("company_id")),
+        },
+    ],
     ids=["django", "options"],
 )
 def test_generated_models_type_check_and_make_migrations(
@@ -1390,7 +1553,7 @@ def test_generated_models_type_check_and_make_migrations(
         }
     )
     graph = EntityGraph.build(
-        [Company, Department, Person, Ruled, Campaign],
+        [Company, CompanyDetails, Department, Person, Ruled, Campaign],
         IdBase.fake(),
         OneToOneMarker.fake(),
     ).unwrap()
@@ -1622,10 +1785,7 @@ def test_an_auto_increment_override_on_another_field_is_a_diagnostic() -> None:
 
 def test_golden_django_model_with_options() -> None:
     """`Person`'s options apply over the catalog's, which `Company` and
-    `Department` get.
-
-    The generated module is not yet ruff-formatted (MB-246), so the expected
-    lines are as long as generated: E501 is off for the repository."""
+    `Department` get."""
     models = config({}, {}).model_copy(
         update={"entity_model_options": {Person: person_options()}}
     )
@@ -1648,43 +1808,143 @@ def test_golden_django_model_with_options() -> None:
             objects = CompanyManager()
             id = models.BigIntegerField(primary_key=True)
             name = models.TextField()
-            parent = models.ForeignKey('Company', on_delete=models.PROTECT, related_name='+', null=True)
+            parent = models.ForeignKey(
+                "Company", on_delete=models.PROTECT, related_name="+", null=True
+            )
 
             class Meta:
-                app_label = 'app'
+                app_label = "app"
 
 
         class Department(models.Model):
             objects = DepartmentManager()
             id = models.UUIDField(primary_key=True)
-            company = models.ForeignKey('Company', on_delete=models.PROTECT, related_name='+')
+            company = models.ForeignKey("Company", on_delete=models.PROTECT, related_name="+")
             founded = models.DateField()
 
             class Meta:
-                app_label = 'app'
+                app_label = "app"
 
 
         @registered
-        @following(follow=['employer'])
+        @following(follow=["employer"])
         class Person(Described, Stamped):
             objects = PersonManager()
             id = models.BigIntegerField(primary_key=True)
             email = models.TextField()
-            nickname = models.TextField(null=True, db_default='anon')
-            employer = models.ForeignKey('Company', on_delete=models.PROTECT, related_name='employees', db_constraint=False)
-            previous_employer = models.ForeignKey('Company', on_delete=models.PROTECT, related_name='+', null=True, db_constraint=False)
-            department = models.ForeignKey('Department', on_delete=models.PROTECT, related_name='+', db_constraint=False)
-            heads = models.OneToOneField('Department', on_delete=models.PROTECT, related_name='head', null=True, db_constraint=False)
+            nickname = models.TextField(null=True, db_default="anon")
+            employer = models.ForeignKey(
+                "Company",
+                on_delete=models.PROTECT,
+                related_name="employees",
+                db_constraint=False,
+            )
+            previous_employer = models.ForeignKey(
+                "Company",
+                on_delete=models.PROTECT,
+                related_name="+",
+                null=True,
+                db_constraint=False,
+            )
+            department = models.ForeignKey(
+                "Department", on_delete=models.PROTECT, related_name="+", db_constraint=False
+            )
+            heads = models.OneToOneField(
+                "Department",
+                on_delete=models.PROTECT,
+                related_name="head",
+                null=True,
+                db_constraint=False,
+            )
             born = models.DateTimeField(auto_now_add=True)
 
             class Meta:
-                app_label = 'app'
-                db_table = 'people'
-                ordering = ['-created_at', 'email']
-                indexes = [models.Index(fields=['born', '-email'], name='person_born')]
+                app_label = "app"
+                db_table = "people"
+                ordering = ["-created_at", "email"]
+                indexes = [models.Index(fields=["born", "-email"], name="person_born")]
         """
         )
     )
+
+
+class QuotedId(Id[int]):
+    pass
+
+
+class Rate(float, enum.Enum):
+    BIG = 1e16
+
+
+Vast = Annotated[float, annotated_types.Gt(1e20)]
+
+
+class Quoted(pydantic.BaseModel):
+    """Choices that hold quotes, bytes and floats with exponents, and names long
+    enough that a line of the model does not fit."""
+
+    id: QuotedId
+    said: Literal["it's", 'say "hi"', "plain"]
+    raw: Literal[b"it's", b"plain"]
+    rate: Rate
+    bounded: Vast
+    a_reference_with_a_name_long_enough_that_its_line_does_not_fit_id: CompanyId
+    an_optional_reference_whose_line_does_not_fit_even_split_over_lines_id: (
+        CompanyId | None
+    )
+    a_reference_named_so_long_that_even_its_line_up_to_an_opening_parenthesis_does_not_fit_id: CompanyId
+    a_text_named_so_long_that_its_line_does_not_fit_and_has_nothing_to_split_or_to_be_parenthesized_in: Text
+    choices_too_many_for_one_line: Literal[
+        "first choice",
+        "second choice",
+        "third choice",
+        "fourth choice",
+        "fifth choice",
+    ]
+
+
+@pytest.mark.parametrize(
+    "entity_model_options",
+    [{}, {Person: person_options(), Department: uuid_default()}],
+    ids=["django", "options"],
+)
+def test_generated_models_are_as_ruff_formats_them(
+    entity_model_options: Mapping[type[pydantic.BaseModel], EntityModelOptions],
+) -> None:
+    models = config(
+        {
+            CompanyId: DjangoField.builtin(Identifier("BigAutoField"), {}),
+            Kind: DjangoField.builtin(Identifier("TextField"), {}),
+            SubmitState: DjangoField.builtin(Identifier("TextField"), {}),
+        },
+        {ReferenceKey(entity=Company, field=FieldName("parent")): OnDelete.SET_NULL},
+    ).model_copy(
+        update={
+            "entity_model_options": entity_model_options,
+            "constraints": {Campaign: campaign_constraints()},
+        }
+    )
+
+    texts = (
+        render([Company, Department, Person, Ruled, Campaign, Quoted], models),
+        # Their primary keys are of the type `Person`'s is.
+        render([Thing], all_rules_for_tags()),
+        render([Bounded], config({}, {})),
+    )
+
+    assert [ruff_format_diff(text) for text in texts] == [FileText("")] * 3
+
+
+def ruff_format_diff(text: FileText) -> FileText:
+    """How ruff would reformat `text`: empty when it is formatted already."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ruff", "format", "--diff", "-"],
+        input=text.root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return FileText(result.stdout + result.stderr)
 
 
 def test_an_entitys_options_apply_over_the_catalogs() -> None:
@@ -1956,7 +2216,7 @@ def test_golden_constraints() -> None:
             textwrap.dedent(
                 """\
                 class Meta:
-                    app_label = 'app'
+                    app_label = "app"
                     constraints = [
                         models.CheckConstraint(
                             condition=~(
@@ -1972,7 +2232,7 @@ def test_golden_constraints() -> None:
                                     )
                                 )
                             ),
-                            name='campaign_template_is_never_submitted',
+                            name="campaign_template_is_never_submitted",
                         ),
                         models.CheckConstraint(
                             condition=~(
@@ -1983,20 +2243,20 @@ def test_golden_constraints() -> None:
                                     submitted_at__isnull=True,
                                 )
                             ),
-                            name='campaign_submitted_is_stamped',
+                            name="campaign_submitted_is_stamped",
                         ),
                         models.UniqueConstraint(
-                            fields=['company', 'name'],
+                            fields=["company", "name"],
                             condition=models.Q(
                                 deleted_at__isnull=True,
                             ),
-                            name='campaign_unique_live_name',
+                            name="campaign_unique_live_name",
                         ),
                         models.CheckConstraint(
                             condition=models.Q(
                                 lifetime_budget__gt=0,
                             ),
-                            name='campaign_lifetime_budget_gt',
+                            name="campaign_lifetime_budget_gt",
                         ),
                     ]
                 """
@@ -2018,8 +2278,8 @@ def test_a_unique_over_every_row_has_no_condition() -> None:
 
     assert (
         "            models.UniqueConstraint(\n"
-        "                fields=['name'],\n"
-        "                name='campaign_unique_name',\n"
+        '                fields=["name"],\n'
+        '                name="campaign_unique_name",\n'
         "            ),\n"
     ) in text
 
@@ -2087,7 +2347,7 @@ def test_numeric_bounds_of_a_fields_type_are_check_constraints() -> None:
         "int_enum_bound__gt=1",
         "aliased__gte=2",
     ]
-    assert re.findall(r"name='(\w+)'", text) == [
+    assert re.findall(r'name="(\w+)"', text) == [
         "bounded_positive_gt",
         "bounded_optional_positive_gt",
         "bounded_wrapped_gt",

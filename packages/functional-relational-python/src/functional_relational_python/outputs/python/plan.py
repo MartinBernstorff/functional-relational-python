@@ -34,7 +34,6 @@ from functional_relational_python.entity_graph.id import OneToOneMarker
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     ModulePath,
-    PythonString,
     Symbol,
     TypeExpression,
     ValueExpression,
@@ -834,10 +833,8 @@ class _AnnotationRenderer:
         match default:
             case ir.NoDefault():
                 return default
-            case ir.ScalarDefault(root=str() as text):
-                return PythonString(text).literal()
             case ir.ScalarDefault(root=value):
-                written = repr(value)
+                return ValueExpression.of_scalar(value)
             case ir.MissingDefault():
                 self.symbols.add(_AnnotationRenderer.missing)
                 written = _AnnotationRenderer.missing.reference().root
@@ -928,8 +925,8 @@ class _AnnotationRenderer:
         return TypeExpression(f"{UnionPlan.annotated.reference().root}[{arguments}]")
 
     def _value(self, value: MetadataValue) -> Result[ValueExpression, UnwritableError]:
-        """`value` as an expression: a string, a finite number, a boolean or
-        `None`; an enum member named by an identifier; a class, function or `type`
+        """`value` as an expression: a string, bytes, a finite number, a boolean
+        or `None`, as ruff formats it; an enum member named by an identifier; a class, function or `type`
         alias, by name; or a dataclass instance as a call of its class."""
         match value:
             case enum.Enum() if narrowing.nameable(value):
@@ -938,16 +935,14 @@ class _AnnotationRenderer:
                 )
             case type() | typing.TypeAliasType() | types.FunctionType():
                 return Ok(ValueExpression(self._named(value).root))
-            case str() if type(value) is str:
-                return Ok(PythonString(value).literal())
             case _ if dataclasses.is_dataclass(value) and not isinstance(value, type):
                 return self._dataclass_call(value)
             case _ if (
                 value is None
-                or type(value) in (bool, int)
+                or type(value) in (str, bytes, bool, int)
                 or (type(value) is float and math.isfinite(value))
             ):
-                return Ok(ValueExpression(repr(value)))
+                return Ok(ValueExpression.of_scalar(value))
             case _:
                 return Err(UnwritableError(value))
 
