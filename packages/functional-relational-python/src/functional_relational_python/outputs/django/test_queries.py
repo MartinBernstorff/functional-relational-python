@@ -1201,6 +1201,15 @@ def read_views() -> list[View]:
                 steps.flatten(FieldName("badge")),
             ),
         ),
+        # A NULL rank of a Badge found is `Rank(None)`; one of no Badge, `None`.
+        View(
+            name=ViewName("FlattenedRank"),
+            source=Employee,
+            step=steps.pipeline(
+                steps.reverse(Badge, steps.project([FieldName("rank")])),
+                steps.flatten(FieldName("badge")),
+            ),
+        ),
         View(
             name=ViewName("Lead"),
             source=Employee,
@@ -1742,9 +1751,7 @@ def entities(draw: st.DrawFn) -> tuple[pydantic.BaseModel, ...]:
             label=draw(st.none() | texts),
             caption=draw(st.none() | texts),
             level=draw(st.sampled_from(Level)),
-            # Never `None`: a View lifting an optional Rank reads a NULL one as
-            # `None`, not `Rank(None)`, which `read_views` avoids.
-            rank=Rank(draw(st.integers(min_value=0, max_value=2))),
+            rank=Rank(draw(st.none() | st.integers(min_value=0, max_value=2))),
         )
         for index, employee_id in enumerate(worn_by)
     ]
