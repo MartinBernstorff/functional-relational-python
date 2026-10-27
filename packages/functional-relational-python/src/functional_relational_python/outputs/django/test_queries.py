@@ -41,6 +41,7 @@ from functional_relational_python.outputs.django.models import (
     AppLabel,
     CatalogModelOptions,
     DjangoField,
+    DjangoModelName,
     DjangoModels,
     DjangoModelsRenderer,
     EntityModelOptions,
@@ -1205,11 +1206,14 @@ class Database:
 
     @staticmethod
     def read(
-        django_models: types.ModuleType, view: compiler.CompiledView, query: Query
+        django_models: types.ModuleType,
+        view: compiler.CompiledView,
+        query: Query,
+        config: DjangoModels = generated,
     ) -> tuple[engine.ViewRow, ...]:
         """The View's results, from `query` of the Source's QuerySet, checking
         they took one database query."""
-        model = getattr(django_models, view.source.__name__)
+        model = getattr(django_models, config.model_name_of(view.source).root)
         method = f"as_{view.names.function.root}"
         with CaptureQueriesContext(connection) as captured:
             rows = tuple(
@@ -1683,6 +1687,48 @@ def test_a_view_reads_a_model_keyed_by_its_reference_like_the_engine(
     with Database.of([view], (), config) as django_models:
         Database.put(entities, config)
         rows = Database.read(django_models, compiled, every_row)
+
+    assert rows == engine_rows([compiled], entities)[view.name]
+
+
+@pytest.mark.parametrize("view", read_views(), ids=lambda view: view.name.root)
+def test_a_view_reads_models_named_unlike_their_entities_like_the_engine(
+    view: View,
+) -> None:
+    """Each Entity's model is named `Django<Entity>`, so its table, the reverse
+    accessors frp generates and the queries' models are named so. A Badge's
+    model is keyed by its Employee, so each Badge's `id` is its Employee's."""
+    entities = tuple(
+        entity.model_copy(update={"id": BadgeId(entity.employee_id.root)})
+        if isinstance(entity, Badge)
+        else entity
+        for entity in organisation()
+    )
+    (compiled,) = compile_all([view]).views
+    renamed = {
+        entity: EntityModelOptions.inherited().model_copy(
+            update={"model_name": DjangoModelName(f"Django{entity.__name__}")}
+        )
+        for entity in entity_graph().entities
+    }
+    config = Modules.config().model_copy(
+        update={
+            "entity_model_options": {
+                **renamed,
+                Badge: renamed[Badge].model_copy(
+                    update={
+                        "primary_key": ReferencePrimaryKey(
+                            reference=FieldName("employee_id")
+                        )
+                    }
+                ),
+            }
+        }
+    )
+
+    with Database.of([view], (), config) as django_models:
+        Database.put(entities, config)
+        rows = Database.read(django_models, compiled, every_row, config)
 
     assert rows == engine_rows([compiled], entities)[view.name]
 

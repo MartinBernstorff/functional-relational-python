@@ -47,12 +47,14 @@ from functional_relational_python.outputs.django.models import (
     DatabaseDefault,
     DbTable,
     Default,
+    DefaultDjangoModelName,
     DefaultForNonField,
     DefaultForReferencePrimaryKey,
     DjangoDiagnostic,
     DjangoField,
     DjangoFieldNameClash,
     DjangoIndex,
+    DjangoModelName,
     DjangoModelNameClash,
     DjangoModels,
     DjangoModelsRenderer,
@@ -733,6 +735,68 @@ def keyed_by(reference: FieldName) -> EntityModelOptions:
     """The Entity's model has `reference` as its primary key."""
     return EntityModelOptions.inherited().model_copy(
         update={"primary_key": ReferencePrimaryKey(reference=reference)}
+    )
+
+
+def named(name: DjangoModelName, options: EntityModelOptions) -> EntityModelOptions:
+    """`options`, with the model named `name`."""
+    return options.model_copy(update={"model_name": name})
+
+
+def prefixed(
+    *entities: type[pydantic.BaseModel],
+) -> Mapping[type[pydantic.BaseModel], EntityModelOptions]:
+    """Each Entity's model named `Django<Entity>`."""
+    return {
+        entity: named(
+            DjangoModelName(f"Django{entity.__name__}"),
+            EntityModelOptions.inherited(),
+        )
+        for entity in entities
+    }
+
+
+def test_a_model_named_by_its_options_is_referred_to_by_that_name() -> None:
+    """References to it, reverse accessors named after it, and its table."""
+    models = config({}, {}).model_copy(
+        update={"entity_model_options": prefixed(Company, CompanyDetails)}
+    )
+
+    text = render([Company, CompanyDetails], models).root
+
+    assert "class Company(" not in text
+    assert "\nclass DjangoCompany(models.Model):\n" in text
+    assert (
+        "\nclass DjangoCompanyDetails(models.Model):\n"
+        "    objects = CompanyDetailsManager()\n"
+        "    id = models.BigIntegerField(primary_key=True)\n"
+        "    company = models.OneToOneField('DjangoCompany', "
+        "on_delete=models.PROTECT, "
+        "related_name='django_company_details_by_company')\n"
+    ) in text
+    assert models.model_of(Company) == Symbol(
+        module=models.module, qualname=(Identifier("DjangoCompany"),)
+    )
+    assert models.table_of(Company) == DbTable("app_djangocompany")
+    assert models.reverse_accessor_of(
+        CompanyDetails, FieldName("company_id")
+    ) == FieldName("django_company_details_by_company")
+
+
+def test_models_named_alike_by_their_options_are_a_diagnostic() -> None:
+    models = config({}, {}).model_copy(
+        update={
+            "entity_model_options": {
+                Company: named(DjangoModelName("Firm"), EntityModelOptions.inherited()),
+                Department: named(
+                    DjangoModelName("Firm"), EntityModelOptions.inherited()
+                ),
+            }
+        }
+    )
+
+    assert diagnostics([Company, Department], models) == (
+        DjangoModelNameClash(name=Identifier("Firm")),
     )
 
 
@@ -1474,6 +1538,7 @@ def person_options() -> EntityModelOptions:
             FieldName("heads_id"): RelatedName("head"),
         },
         primary_key=OwnPrimaryKey(),
+        model_name=DefaultDjangoModelName(),
     )
 
 
@@ -1493,8 +1558,11 @@ def uuid_default() -> EntityModelOptions:
         {},
         {
             Person: person_options(),
-            Department: uuid_default(),
-            CompanyDetails: keyed_by(FieldName("company_id")),
+            Department: named(DjangoModelName("Unit"), uuid_default()),
+            CompanyDetails: named(
+                DjangoModelName("DjangoCompanyDetails"),
+                keyed_by(FieldName("company_id")),
+            ),
         },
     ],
     ids=["django", "options"],
@@ -2232,6 +2300,16 @@ def test_numeric_bounds_of_a_fields_type_are_check_constraints() -> None:
         "bounded_int_enum_bound_gt",
         "bounded_aliased_gte",
     ]
+
+
+def test_an_implied_bound_is_named_after_the_model() -> None:
+    models = config({}, {}).model_copy(
+        update={"entity_model_options": prefixed(Bounded)}
+    )
+
+    text = render([Bounded], models).root
+
+    assert "name='django_bounded_positive_gt'" in text
 
 
 def test_a_bound_on_a_field_without_a_numeric_column_implies_no_constraint() -> None:
