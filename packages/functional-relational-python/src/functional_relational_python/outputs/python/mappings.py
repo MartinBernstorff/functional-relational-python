@@ -38,6 +38,8 @@ from functional_relational_python.outputs.python.plan import (
     UnionFunctionPlan,
 )
 from functional_relational_python.outputs.python.symbols import (
+    FirstParty,
+    ImportBlock,
     LineLength,
     ModulePath,
     PythonString,
@@ -361,7 +363,7 @@ class MappingsRenderer:
     )
 
     @staticmethod
-    def files(plan: PythonPlan) -> tuple[GeneratedFile, ...]:
+    def files(plan: PythonPlan, first_party: FirstParty) -> tuple[GeneratedFile, ...]:
         """One file per module, in module order, with its View functions in View
         order, then its Union functions, each after those of the Unions nested in
         it.
@@ -371,23 +373,30 @@ class MappingsRenderer:
         return tuple(
             GeneratedFile(
                 path=module.file_path(),
-                text=MappingsRenderer._module(plan, module),
+                text=MappingsRenderer._module(plan, module, first_party),
             )
             for module in plan.function_modules()
         )
 
     @staticmethod
-    def _module(plan: PythonPlan, module: ModulePath) -> FileText:
+    def _module(
+        plan: PythonPlan, module: ModulePath, first_party: FirstParty
+    ) -> FileText:
         """The mapping functions of `module`, and `_required` if they need it."""
         functions = plan.functions.get(module, ())
         union_functions = plan.union_functions.get(module, ())
-        imports = "\n".join(
-            "".join(f"import {imported.root}\n" for imported in section)
-            for section in ModulePath.import_sections(
-                imported
-                for function in (*functions, *union_functions)
-                for imported in function.imports()
+        imports = (
+            ImportBlock(
+                modules=frozenset(
+                    imported
+                    for function in (*functions, *union_functions)
+                    for imported in function.imports()
+                ),
+                symbols=frozenset(),
+                first_party=first_party,
             )
+            .text()
+            .root
         )
         helper = (
             f"\n\n{MappingsRenderer.required_function().root}"

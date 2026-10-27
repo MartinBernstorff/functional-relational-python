@@ -97,9 +97,11 @@ from functional_relational_python.outputs.django.models import (
     UnwritableDjangoChoices,
 )
 from functional_relational_python.outputs.django.queries import DjangoQueriesRenderer
+from functional_relational_python.outputs.python import test_symbols
 from functional_relational_python.outputs.python.plan import PlacedModels
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
+    FirstParty,
     ModulePath,
     Symbol,
     ValueExpression,
@@ -238,12 +240,18 @@ def existing_company(on_delete: Mapping[ReferenceKey, OnDelete]) -> DjangoModels
     return config({}, on_delete, {Company: ExistingDjangoModel.fake()})
 
 
+def generated_by(models: DjangoModels) -> FirstParty:
+    """What `Catalog.generate` has first party: the Django modules' packages."""
+    return FirstParty.fake().with_generated([models.module, models.queries])
+
+
 def render(
     entities: Iterable[type[pydantic.BaseModel]], models: DjangoModels
 ) -> FileText:
     match DjangoModelsRenderer.render(
         EntityGraph.build(entities, IdBase.fake(), OneToOneMarker.fake()).unwrap(),
         models,
+        first_party=generated_by(models),
     ):
         case Ok(files):
             (file,) = files.files
@@ -258,6 +266,7 @@ def diagnostics(
     match DjangoModelsRenderer.render(
         EntityGraph.build(entities, IdBase.fake(), OneToOneMarker.fake()).unwrap(),
         models,
+        first_party=generated_by(models),
     ):
         case Ok(files):
             pytest.fail(f"expected diagnostics, got {files}")
@@ -348,9 +357,9 @@ def test_an_overridden_field_class_outside_django_is_imported() -> None:
     text = render([Thing], config({tuple[Text, ...]: money}, {})).root
 
     assert (
-        "\n\nfrom app.fields import MoneyField\n"
-        "from app.queries import ThingManager\n"
-        "from django.db import models\n\n\n"
+        "\n\nfrom django.db import models\n\n"
+        "from app.fields import MoneyField\n"
+        "from app.queries import ThingManager\n\n\n"
     ) in text
     assert "    tags = MoneyField()\n" in text
 
@@ -930,7 +939,9 @@ def test_the_id_of_a_reference_keyed_model_is_held_by_the_reference_column() -> 
         [Company, UnruledDetails], IdBase.fake(), OneToOneMarker.fake()
     ).unwrap()
 
-    _ = DjangoModelsRenderer.render(graph, models).unwrap()
+    _ = DjangoModelsRenderer.render(
+        graph, models, first_party=generated_by(models)
+    ).unwrap()
     assert DjangoModelsRenderer.columns(graph, models, FieldTypes(overrides={})).of(
         UnruledDetails, FieldName("id")
     ) == DjangoColumn(
@@ -1109,8 +1120,9 @@ def test_golden_django_models() -> None:
         # Regenerate with `frp generate`; `frp check` fails when this is stale.
         # Migrations are yours to make, e.g. with `makemigrations`.
 
-        from app.queries import CompanyManager, DepartmentManager
         from django.db import models
+
+        from app.queries import CompanyManager, DepartmentManager
 
 
         class Company(models.Model):
@@ -1142,7 +1154,9 @@ def test_the_module_is_written_where_the_catalog_names() -> None:
     graph = EntityGraph.build([Company], IdBase.fake(), OneToOneMarker.fake()).unwrap()
     models = config({}, {})
 
-    files = DjangoModelsRenderer.render(graph, models).unwrap()
+    files = DjangoModelsRenderer.render(
+        graph, models, first_party=generated_by(models)
+    ).unwrap()
 
     assert [file.path for file in files.files] == [models.module.file_path()]
     assert GeneratedFiles.is_generated(files.files[0].text)
@@ -1224,9 +1238,10 @@ def test_an_entity_with_an_existing_model_gets_none_and_is_imported() -> None:
         # Regenerate with `frp generate`; `frp check` fails when this is stale.
         # Migrations are yours to make, e.g. with `makemigrations`.
 
-        from app.queries import CompanyDetailsManager, DepartmentManager
         from crm.models import Company
         from django.db import models
+
+        from app.queries import CompanyDetailsManager, DepartmentManager
 
 
         class CompanyDetails(models.Model):
@@ -1344,7 +1359,7 @@ def test_reverse_accessors_of_an_existing_model_are_checked_as_declared(
         [Company, CompanyDetails], IdBase.fake(), OneToOneMarker.fake()
     ).unwrap()
 
-    match DjangoModelsRenderer.render(graph, models):
+    match DjangoModelsRenderer.render(graph, models, first_party=generated_by(models)):
         case Ok():
             reported: tuple[DjangoDiagnostic, ...] = ()
         case Err(error):
@@ -1422,9 +1437,15 @@ def test_generated_models_referencing_an_existing_model_make_migrations(
     ).unwrap()
     files = GeneratedFiles.merged(
         [
-            DjangoModelsRenderer.render(graph, models).unwrap(),
+            DjangoModelsRenderer.render(
+                graph, models, first_party=generated_by(models)
+            ).unwrap(),
             DjangoQueriesRenderer.render(
-                graph, models, (), PlacedModels(modules={})
+                graph,
+                models,
+                (),
+                PlacedModels(modules={}),
+                first_party=generated_by(models),
             ).unwrap(),
         ]
     ).unwrap()
@@ -1653,10 +1674,16 @@ def test_generated_models_type_check_and_make_migrations(
     ).unwrap()
     files = GeneratedFiles.merged(
         [
-            DjangoModelsRenderer.render(graph, models).unwrap(),
+            DjangoModelsRenderer.render(
+                graph, models, first_party=generated_by(models)
+            ).unwrap(),
             # No Views, so only the QuerySets the models' managers use.
             DjangoQueriesRenderer.render(
-                graph, models, (), PlacedModels(modules={})
+                graph,
+                models,
+                (),
+                PlacedModels(modules={}),
+                first_party=generated_by(models),
             ).unwrap(),
         ]
     ).unwrap()
@@ -1893,9 +1920,10 @@ def test_golden_django_model_with_options() -> None:
         # Regenerate with `frp generate`; `frp check` fails when this is stale.
         # Migrations are yours to make, e.g. with `makemigrations`.
 
+        from django.db import models
+
         from app.base import Described, Stamped, following, registered
         from app.queries import CompanyManager, DepartmentManager, PersonManager
-        from django.db import models
 
 
         class Company(models.Model):
@@ -2002,7 +2030,7 @@ class Quoted(pydantic.BaseModel):
     [{}, {Person: person_options(), Department: uuid_default()}],
     ids=["django", "options"],
 )
-def test_generated_models_are_as_ruff_formats_them(
+def test_generated_models_are_as_ruff_formats_and_sorts_them(
     entity_model_options: Mapping[type[pydantic.BaseModel], EntityModelOptions],
 ) -> None:
     models = config(
@@ -2027,6 +2055,10 @@ def test_generated_models_are_as_ruff_formats_them(
     )
 
     assert [ruff_format_diff(text) for text in texts] == [FileText("")] * 3
+    first_party = generated_by(models)
+    assert [test_symbols.ruff_import_diff(text, first_party) for text in texts] == [
+        FileText("")
+    ] * 3
 
 
 def ruff_format_diff(text: FileText) -> FileText:

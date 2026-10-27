@@ -166,6 +166,30 @@ def test_generate_writes_files_that_check_accepts() -> None:
     assert commands.check(filesystem, root) == Ok(None)
 
 
+def test_generate_imports_the_configured_packages_as_first_party() -> None:
+    """The Entities of the generated View models are in this module's package,
+    which is first party only when configured so."""
+    filesystem, root = project(in_this_module(Text("catalog")))
+    path = root.file(ModulePath("app.cards").file_path())
+    _ = commands.generate(filesystem, root).unwrap()
+    unlisted = filesystem.files[path].root
+    package = ModulePath(__name__).top_level()
+    config = ProjectConfig.default().model_copy(
+        update={
+            "catalog": in_this_module(Text("catalog")),
+            "known_first_party": (package,),
+        }
+    )
+    filesystem.write(root.file(ConfigFile.name), config.to_toml())
+    _ = commands.generate(filesystem, root).unwrap()
+
+    imported = f"from {__name__} import CompanyId, Text\n"
+    assert f"{imported}from pydantic import BaseModel\n" in unlisted
+    assert f"from pydantic import BaseModel\n\n{imported}" in (
+        filesystem.files[path].root
+    )
+
+
 def test_generate_writes_the_mapping_functions_into_the_mappings_module() -> None:
     filesystem, root = project(in_this_module(Text("catalog")))
     _ = commands.generate(filesystem, root).unwrap()

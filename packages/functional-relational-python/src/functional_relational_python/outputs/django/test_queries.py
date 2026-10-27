@@ -59,6 +59,7 @@ from functional_relational_python.outputs.django.queries import (
     ViewModelIntoDjangoModelsModule,
     ViewModelIntoQueriesModule,
 )
+from functional_relational_python.outputs.python import test_symbols
 from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import (
     NameClash,
@@ -70,6 +71,7 @@ from functional_relational_python.outputs.python.plan import (
 )
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
+    FirstParty,
     ModulePath,
     Symbol,
     ValueExpression,
@@ -351,6 +353,14 @@ def placed_into(module: ModulePath, compiled: compiler.CompiledViews) -> PlacedM
     return PlacedModels.of(into(module), (*compiled.views, *compiled.unions)).unwrap()
 
 
+def generated_by(config: DjangoModels, placed: PlacedModels) -> FirstParty:
+    """What `Catalog.generate` has first party: the packages of the Django
+    modules and of the placed models."""
+    return FirstParty.fake().with_generated(
+        [config.module, config.queries, *placed.modules.values()]
+    )
+
+
 def queries_of(views: Iterable[View]) -> FileText:
     compiled = compile_all(views)
     files = DjangoQueriesRenderer.render(
@@ -358,6 +368,9 @@ def queries_of(views: Iterable[View]) -> FileText:
         Modules.config(),
         compiled.views,
         placed_into(Generated.models, compiled),
+        first_party=generated_by(
+            Modules.config(), placed_into(Generated.models, compiled)
+        ),
     ).unwrap()
     (file,) = files.files
     return file.text
@@ -466,6 +479,7 @@ import typing
 
 import django.db.models
 import django.db.models.expressions
+
 import frp_generated_models
 
 if typing.TYPE_CHECKING:
@@ -899,7 +913,11 @@ def test_a_union_model_into_a_django_module_is_a_diagnostic(
     )
 
     match DjangoQueriesRenderer.render(
-        entity_graph(), Modules.config(), compiled.views, placed, compiled.unions
+        entity_graph(),
+        Modules.config(),
+        (*compiled.views, *compiled.unions),
+        placed,
+        first_party=generated_by(Modules.config(), placed),
     ):
         case Ok(files):
             pytest.fail(f"expected diagnostics, got {files}")
@@ -984,6 +1002,9 @@ def test_a_view_named_like_a_query_set_method_is_a_diagnostic() -> None:
         Modules.config(),
         compiled.views,
         placed_into(Generated.models, compiled),
+        first_party=generated_by(
+            Modules.config(), placed_into(Generated.models, compiled)
+        ),
     ):
         case Ok(files):
             pytest.fail(f"expected diagnostics, got {files}")
@@ -1029,7 +1050,13 @@ def test_entities_named_alike_are_a_clash_though_their_models_are_not() -> None:
         [Company, Firm.Company], IdBase.fake(), OneToOneMarker.fake()
     ).unwrap()
 
-    match DjangoQueriesRenderer.render(graph, config, (), PlacedModels(modules={})):
+    match DjangoQueriesRenderer.render(
+        graph,
+        config,
+        (),
+        PlacedModels(modules={}),
+        first_party=generated_by(config, PlacedModels(modules={})),
+    ):
         case Ok(files):
             pytest.fail(f"expected diagnostics, got {files}")
         case Err(error):
@@ -1108,14 +1135,29 @@ class Database:
         ).unwrap()
         return GeneratedFiles.merged(
             [
-                GeneratedFiles(files=ModelsRenderer.files(plan)),
-                DjangoModelsRenderer.render(entity_graph(), config).unwrap(),
+                GeneratedFiles(
+                    files=ModelsRenderer.files(
+                        plan,
+                        first_party=generated_by(
+                            config, placed_into(Generated.models, compiled)
+                        ),
+                    )
+                ),
+                DjangoModelsRenderer.render(
+                    entity_graph(),
+                    config,
+                    first_party=generated_by(
+                        config, placed_into(Generated.models, compiled)
+                    ),
+                ).unwrap(),
                 DjangoQueriesRenderer.render(
                     entity_graph(),
                     config,
-                    compiled.views,
+                    (*compiled.views, *compiled.unions),
                     placed_into(Generated.models, compiled),
-                    compiled.unions,
+                    first_party=generated_by(
+                        config, placed_into(Generated.models, compiled)
+                    ),
                 ).unwrap(),
             ]
         ).unwrap()
@@ -1610,6 +1652,9 @@ def test_an_existing_model_gets_no_query_set_and_is_imported_for_type_checking()
         ExistingCompany.config(),
         compiled.views,
         placed_into(Generated.models, compiled),
+        first_party=generated_by(
+            ExistingCompany.config(), placed_into(Generated.models, compiled)
+        ),
     ).unwrap()
 
     (file,) = text.files
@@ -1618,6 +1663,7 @@ def test_an_existing_model_gets_no_query_set_and_is_imported_for_type_checking()
     assert (
         "if typing.TYPE_CHECKING:\n"
         "    import frp_existing_django\n"
+        "\n"
         "    import frp_generated_django\n"
     ) in file.text.root
     assert (
@@ -1656,6 +1702,7 @@ def test_a_query_follows_the_reverse_accessor_an_existing_model_declares() -> No
             config,
             compiled.views,
             placed_into(Generated.models, compiled),
+            first_party=generated_by(config, placed_into(Generated.models, compiled)),
         )
         .unwrap()
         .files
@@ -2126,7 +2173,7 @@ def every_definition() -> tuple[list[View], list[Union]]:
     ],
     ids=["short", "long", "existing", "generic-bases", "plain-bases", "long-plain"],
 )
-def test_generated_queries_are_ruff_formatted(
+def test_generated_queries_are_ruff_formatted_and_sorted(
     config: DjangoModels, views: ModulePath
 ) -> None:
     compiled = compile_all(*every_definition())
@@ -2134,9 +2181,9 @@ def test_generated_queries_are_ruff_formatted(
         DjangoQueriesRenderer.render(
             entity_graph(),
             config,
-            compiled.views,
+            (*compiled.views, *compiled.unions),
             placed_into(views, compiled),
-            compiled.unions,
+            first_party=generated_by(config, placed_into(views, compiled)),
         )
         .unwrap()
         .files
@@ -2151,6 +2198,10 @@ def test_generated_queries_are_ruff_formatted(
     ).stdout
 
     assert formatted == file.text.root
+    first_party = FirstParty.fake().with_generated(
+        [config.module, config.queries, views]
+    )
+    assert test_symbols.ruff_import_diff(file.text, first_party) == FileText("")
 
 
 def render_diagnostics(
@@ -2159,7 +2210,11 @@ def render_diagnostics(
     view = View(name=ViewName("CompanyFull"), source=Company, step=steps.pipeline())
     compiled = compile_all([view])
     match DjangoQueriesRenderer.render(
-        entity_graph(), config, compiled.views, placed_into(views, compiled)
+        entity_graph(),
+        config,
+        compiled.views,
+        placed_into(views, compiled),
+        first_party=generated_by(config, placed_into(views, compiled)),
     ):
         case Ok(files):
             pytest.fail(f"expected diagnostics, got {files}")
@@ -2209,7 +2264,11 @@ def test_entities_with_one_name_are_left_to_the_django_models_to_report() -> Non
     ).unwrap()
 
     rendered = DjangoQueriesRenderer.render(
-        graph, Modules.config(), (), PlacedModels(modules={})
+        graph,
+        Modules.config(),
+        (),
+        PlacedModels(modules={}),
+        first_party=generated_by(Modules.config(), PlacedModels(modules={})),
     )
 
     assert isinstance(rendered, Ok)
@@ -2249,7 +2308,13 @@ def test_an_unimportable_class_a_field_is_read_through_names_the_field() -> None
     compiled = compiler.compile_views(graph, [view], []).unwrap()
 
     rendered = DjangoQueriesRenderer.render(
-        graph, Modules.config(), compiled.views, placed_into(Generated.models, compiled)
+        graph,
+        Modules.config(),
+        compiled.views,
+        placed_into(Generated.models, compiled),
+        first_party=generated_by(
+            Modules.config(), placed_into(Generated.models, compiled)
+        ),
     )
 
     assert isinstance(rendered, Err)

@@ -3,6 +3,7 @@
 import pydantic
 from safe_result import Err, Ok, Result
 
+from functional_relational_python.outputs.python.symbols import FirstParty
 from functional_relational_python.shell.catalog import CatalogLoadError
 from functional_relational_python.shell.project_config import (
     ConfigFile,
@@ -45,7 +46,7 @@ def _generated(
             return Err(load_error)
         case Ok(catalog):
             pass
-    match catalog.generate():
+    match catalog.generate(FirstParty(frozenset(config_file.config.known_first_party))):
         case Err(generate_error):
             return Err(generate_error)
         case Ok(files):

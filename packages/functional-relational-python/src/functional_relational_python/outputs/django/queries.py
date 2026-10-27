@@ -106,6 +106,8 @@ from functional_relational_python.outputs.python.plan import (
 )
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
+    FirstParty,
+    ImportBlock,
     LineLength,
     ModulePath,
     PythonString,
@@ -442,6 +444,8 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     config: DjangoModels
     queries: tuple[ViewQueries, ...]
     unions: tuple[UnionQueries, ...]
+    first_party: FirstParty
+    """The packages imported as first party."""
     classes: Mapping[type, Symbol]
     """Every class the code refers to: the enum of a Filter's literal, and every
     class a field is read through."""
@@ -463,19 +467,27 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     def render(
         graph: EntityGraph,
         config: DjangoModels,
-        views: Iterable[compiler.CompiledView],
+        definitions: Iterable[compiler.CompiledView | compiler.CompiledUnion],
         placed: PlacedModels,
-        unions: Iterable[compiler.CompiledUnion] = (),
+        first_party: FirstParty,
     ) -> Result[GeneratedFiles, DiagnosticsError[DjangoQueriesDiagnostic]]:
-        """The module of query code, or every diagnostic.
+        """The module of query code for the Views and Unions of `definitions`, or
+        every diagnostic.
 
-        `placed` has the module of each View's and Union's model, and `views`
-        has every View a Union has as a Variant. Views and Unions over a Source
-        that is not an Entity get no query code. QuerySets are in Entity name
-        order.
+        `placed` has the module of each View's and Union's model, and
+        `definitions` has every View a Union has as a Variant. Views and Unions
+        over a Source that is not an Entity get no query code. QuerySets are in
+        Entity name order.
+
+        Its imports of `first_party` packages are first party.
         """
-        views = tuple(views)
-        unions = tuple(unions)
+        definitions = tuple(definitions)
+        views = tuple(
+            view for view in definitions if isinstance(view, compiler.CompiledView)
+        )
+        unions = tuple(
+            union for union in definitions if isinstance(union, compiler.CompiledUnion)
+        )
         queries = tuple(
             ViewQueries.of(view, config, placed.module_of(view))
             for view in views
@@ -500,15 +512,17 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                                 annotation=AnnotationText.of(used),
                             )
                         )
+        union_queries = tuple(
+            UnionQueries.of(union, config, placed)
+            for union in unions
+            if union.source in graph.entities
+        )
         renderer = DjangoQueriesRenderer(
             graph=graph,
             config=config,
             queries=queries,
-            unions=tuple(
-                UnionQueries.of(union, config, placed)
-                for union in unions
-                if union.source in graph.entities
-            ),
+            unions=union_queries,
+            first_party=first_party,
             classes=classes,
             writer=conditions.ConditionWriter(
                 columns=DjangoModelsRenderer.columns(
@@ -712,16 +726,32 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         return (query for query in self._read() if query.entity() is entity)
 
     def _module(self, entities: Sequence[type[pydantic.BaseModel]]) -> FileText:
-        imports = "\n".join(
-            "".join(f"import {module.root}\n" for module in section)
-            for section in ModulePath.import_sections(self._imports())
+        imports = (
+            ImportBlock(
+                modules=frozenset(self._imports()),
+                symbols=frozenset(),
+                first_party=self.first_party,
+            )
+            .text()
+            .root
+        )
+        checked = (
+            ImportBlock(
+                modules=frozenset(self._django_model_modules()),
+                symbols=frozenset(),
+                first_party=self.first_party,
+            )
+            .text()
+            .root
         )
         type_checking = "".join(
             (
                 f"\nif {DjangoQueriesRenderer.typing_module.root}.TYPE_CHECKING:\n",
+                # Only `import` statements, which are never split, so indenting
+                # each line keeps them as ruff writes them.
                 *(
-                    f"    import {module.root}\n"
-                    for module in self._django_model_modules()
+                    f"    {line}" if line != "\n" else line
+                    for line in checked.splitlines(keepends=True)
                 ),
             )
         )
