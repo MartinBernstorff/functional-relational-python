@@ -1002,6 +1002,43 @@ def test_a_view_named_like_a_query_set_method_is_a_diagnostic() -> None:
             )
 
 
+class FirmId(Id[int]):
+    pass
+
+
+class Firm:
+    """Holds an Entity named like `Company`."""
+
+    class Company(pydantic.BaseModel, frozen=True):
+        id: FirmId
+
+
+def test_entities_named_alike_are_a_clash_though_their_models_are_not() -> None:
+    """Their QuerySets and Managers are named after the Entities."""
+    config = Modules.config().model_copy(
+        update={
+            "entity_model_options": {
+                Firm.Company: EntityModelOptions.inherited().model_copy(
+                    update={"model_name": DjangoModelName("Firm")}
+                )
+            }
+        }
+    )
+    graph = EntityGraph.build(
+        [Company, Firm.Company], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+
+    match DjangoQueriesRenderer.render(graph, config, (), PlacedModels(modules={})):
+        case Ok(files):
+            pytest.fail(f"expected diagnostics, got {files}")
+        case Err(error):
+            assert {
+                diagnostic.name
+                for diagnostic in error.diagnostics
+                if isinstance(diagnostic, NameClash)
+            } == {Identifier("CompanyQuerySet"), Identifier("CompanyManager")}
+
+
 type Query = Callable[[QuerySet[Model]], QuerySet[Model]]
 """Filters, orders or slices a QuerySet before it is read as a View."""
 
