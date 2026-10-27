@@ -1903,6 +1903,7 @@ class _PlannedModel(pydantic.BaseModel, frozen=True):
         """Every Symbol the model refers to by name, besides its fields',
         `django.db.models` ones too."""
         yield self.manager
+        yield DjangoModelsRenderer.class_var
         yield from self.options.bases
         for decorator in self.options.decorators:
             yield decorator.function
@@ -1955,10 +1956,19 @@ class _PlannedModel(pydantic.BaseModel, frozen=True):
         statement = top.fitted(
             Expression(f"class {self.name.root}({bases}):"), Expression("")
         )
+        # Annotated, so a type checker types `objects` as the Manager rather
+        # than as a base declares it, e.g. older django-stubs' `Manager[Self]`.
+        manager = self.manager.bound_name().root
+        objects = Indent(4).assigned(
+            Expression(
+                f"{DjangoModelsRenderer.manager.root}: "
+                f"{DjangoModelsRenderer.class_var.bound_name().root}[{manager}]"
+            ),
+            Expression(f"{manager}()"),
+        )
         return FileText(
             f"{decorators}{statement.root}\n"
-            f"    {DjangoModelsRenderer.manager.root} = "
-            f"{self.manager.bound_name().root}()\n"
+            f"    {objects.root}\n"
             + "".join(declaration.line().root for declaration in self.declarations)
             + "\n    class Meta:\n"
             + "".join(
@@ -1992,6 +2002,10 @@ class DjangoModelsRenderer:
     )
     models_import: typing.ClassVar[Identifier] = Identifier("models")
     manager: typing.ClassVar[FieldName] = FieldName("objects")
+    class_var: typing.ClassVar[Symbol] = Symbol(
+        module=ModulePath("typing"), qualname=(Identifier("ClassVar"),)
+    )
+    """What annotates the manager, so a type checker types it as the Manager."""
     reserved: typing.ClassVar[frozenset[FieldName]] = frozenset(
         {FieldName("pk"), FieldName("Meta"), FieldName("models"), manager}
     )
@@ -2953,7 +2967,7 @@ class DjangoModelsRenderer:
         planned: list[_PlannedModel], imports: frozenset[Symbol]
     ) -> Iterator[DjangoModelNameClash | DjangoModelNameCaseClash]:
         """`imports` are the Symbols the module imports by name: field classes,
-        Managers, existing Django models, base classes, decorators and
+        `ClassVar`, Managers, existing Django models, base classes, decorators and
         defaults. Django also tells models apart by their lowercased names."""
         bound: dict[Identifier, list[Symbol | Identifier]] = {
             DjangoModelsRenderer.models_import: [DjangoModelsRenderer.models_import]

@@ -2150,6 +2150,45 @@ class PlainBases:
         return ((PlainBases.module, PlainBases.source),)
 
 
+class DeclaredManager:
+    """A model base declaring every model's manager, as older django-stubs
+    declare it on `Model`: a type checker types a model's `objects` as declared
+    there unless the model annotates it."""
+
+    module: ClassVar[ModulePath] = ModulePath("frp_declared_manager")
+    source: ClassVar[FileText] = FileText(
+        "import typing\n"
+        "\n"
+        "from django.db import models\n"
+        "\n"
+        "\n"
+        "class DeclaredManagerModel(models.Model):\n"
+        "    objects: typing.ClassVar[models.Manager[typing.Self]]\n"
+        "\n"
+        "    class Meta:\n"
+        "        abstract = True\n"
+    )
+
+    @staticmethod
+    def config() -> DjangoModels:
+        return Modules.with_options(
+            CatalogModelOptions.default().model_copy(
+                update={
+                    "bases": (
+                        Symbol(
+                            module=DeclaredManager.module,
+                            qualname=(Identifier("DeclaredManagerModel"),),
+                        ),
+                    )
+                }
+            )
+        )
+
+    @staticmethod
+    def sources() -> tuple[tuple[ModulePath, FileText], ...]:
+        return ((DeclaredManager.module, DeclaredManager.source),)
+
+
 def every_definition() -> tuple[list[View], list[Union]]:
     """Views and a Union generating every kind of query code."""
     return (
@@ -2698,8 +2737,9 @@ type_checked_configs = pytest.mark.parametrize(
         (ExistingCompany.config(), ExistingCompany.sources(), ()),
         (Modules.with_bases(), (), newest_first_uses),
         (PlainBases.config(), PlainBases.sources(), newest_first_uses),
+        (DeclaredManager.config(), DeclaredManager.sources(), ()),
     ],
-    ids=["generated", "existing", "generic-bases", "plain-bases"],
+    ids=["generated", "existing", "generic-bases", "plain-bases", "declared-manager"],
 )
 """`existing` are modules the config refers to, with their source, and `uses`
 what a project calls on `Employee.objects` with the config."""
@@ -2712,9 +2752,9 @@ def type_checked(
     uses: tuple[ValueExpression, ...],
 ) -> None:
     """Writes the generated code of `every_definition()` into `directory`, the
-    `existing` Django models, and a project's use of it: the manager's QuerySet
-    methods return the Entity's QuerySet, so `as_<view>()` type checks after
-    them."""
+    `existing` Django models, and a project's use of it: `objects` is the
+    Entity's Manager, whose QuerySet methods return the Entity's QuerySet, so
+    `as_<view>()` type checks after them."""
     views, unions = every_definition()
     Database.files(views, unions, constrained(config)).write(
         LocalFileSystem(), directory
@@ -2724,8 +2764,18 @@ def type_checked(
             source.root, encoding="utf-8"
         )
     _ = (directory.root / "frp_generated_use.py").write_text(
+        "import typing\n"
+        "\n"
         "import frp_generated_django\n"
         "import frp_generated_models\n"
+        "import frp_generated_queries\n"
+        "\n"
+        "\n"
+        "def manager() -> frp_generated_queries.EmployeeManager:\n"
+        "    return typing.assert_type(\n"
+        "        frp_generated_django.Employee.objects,\n"
+        "        frp_generated_queries.EmployeeManager,\n"
+        "    )\n"
         "\n"
         "\n"
         "def overviews() -> list[frp_generated_models.EmployeeOverview]:\n"
@@ -2821,13 +2871,20 @@ def test_generated_queries_pass_the_type_checker(
     existing: Existing,
     uses: tuple[ValueExpression, ...],
 ) -> None:
+    """Where a model base declares the manager, the manager overriding it is an
+    attribute, which `@override` cannot decorate, so that error is off."""
     type_checked(Directory(tmp_path), config, existing, uses)
     source_root = Path(__file__).parents[3]
+    undecoratable = (
+        "\n[errors]\nmissing-override-decorator = false\n"
+        if existing == DeclaredManager.sources()
+        else ""
+    )
     _ = (tmp_path / "pyrefly.toml").write_text(
         'project-includes = ["frp_generated_*.py"]\n'
         f'search-path = ["{tmp_path}", "{source_root}"]\n'
         f'python-interpreter-path = "{sys.executable}"\n'
-        'preset = "all"\n',
+        f'preset = "all"\n{undecoratable}',
         encoding="utf-8",
     )
 

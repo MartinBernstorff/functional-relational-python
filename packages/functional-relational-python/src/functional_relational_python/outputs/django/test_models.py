@@ -795,7 +795,7 @@ def test_a_model_named_by_its_options_is_referred_to_by_that_name() -> None:
     assert "\nclass DjangoCompany(models.Model):\n" in text
     assert (
         "\nclass DjangoCompanyDetails(models.Model):\n"
-        "    objects = CompanyDetailsManager()\n"
+        "    objects: ClassVar[CompanyDetailsManager] = CompanyDetailsManager()\n"
         "    id = models.BigIntegerField(primary_key=True)\n"
         "    company = models.OneToOneField(\n"
         '        "DjangoCompany",\n'
@@ -863,7 +863,7 @@ def test_a_one_to_one_reference_can_be_the_primary_key_in_place_of_the_id() -> N
 
     assert (
         "class CompanyDetails(models.Model):\n"
-        "    objects = CompanyDetailsManager()\n"
+        "    objects: ClassVar[CompanyDetailsManager] = CompanyDetailsManager()\n"
         "    company = models.OneToOneField(\n"
         '        "Company",\n'
         "        on_delete=models.PROTECT,\n"
@@ -1120,13 +1120,15 @@ def test_golden_django_models() -> None:
         # Regenerate with `frp generate`; `frp check` fails when this is stale.
         # Migrations are yours to make, e.g. with `makemigrations`.
 
+        from typing import ClassVar
+
         from django.db import models
 
         from app.queries import CompanyManager, DepartmentManager
 
 
         class Company(models.Model):
-            objects = CompanyManager()
+            objects: ClassVar[CompanyManager] = CompanyManager()
             id = models.BigAutoField(primary_key=True)
             name = models.TextField()
             parent = models.ForeignKey(
@@ -1138,7 +1140,7 @@ def test_golden_django_models() -> None:
 
 
         class Department(models.Model):
-            objects = DepartmentManager()
+            objects: ClassVar[DepartmentManager] = DepartmentManager()
             id = models.UUIDField(primary_key=True)
             company = models.ForeignKey("Company", on_delete=models.PROTECT, related_name="+")
             founded = models.DateField()
@@ -1238,6 +1240,8 @@ def test_an_entity_with_an_existing_model_gets_none_and_is_imported() -> None:
         # Regenerate with `frp generate`; `frp check` fails when this is stale.
         # Migrations are yours to make, e.g. with `makemigrations`.
 
+        from typing import ClassVar
+
         from crm.models import Company
         from django.db import models
 
@@ -1245,7 +1249,7 @@ def test_an_entity_with_an_existing_model_gets_none_and_is_imported() -> None:
 
 
         class CompanyDetails(models.Model):
-            objects = CompanyDetailsManager()
+            objects: ClassVar[CompanyDetailsManager] = CompanyDetailsManager()
             id = models.BigIntegerField(primary_key=True)
             company = models.OneToOneField(
                 Company, on_delete=models.PROTECT, related_name="company_details_by_company"
@@ -1262,7 +1266,7 @@ def test_an_entity_with_an_existing_model_gets_none_and_is_imported() -> None:
 
 
         class Department(models.Model):
-            objects = DepartmentManager()
+            objects: ClassVar[DepartmentManager] = DepartmentManager()
             id = models.UUIDField(primary_key=True)
             company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="+")
             founded = models.DateField()
@@ -1920,6 +1924,8 @@ def test_golden_django_model_with_options() -> None:
         # Regenerate with `frp generate`; `frp check` fails when this is stale.
         # Migrations are yours to make, e.g. with `makemigrations`.
 
+        from typing import ClassVar
+
         from django.db import models
 
         from app.base import Described, Stamped, following, registered
@@ -1927,7 +1933,7 @@ def test_golden_django_model_with_options() -> None:
 
 
         class Company(models.Model):
-            objects = CompanyManager()
+            objects: ClassVar[CompanyManager] = CompanyManager()
             id = models.BigIntegerField(primary_key=True)
             name = models.TextField()
             parent = models.ForeignKey(
@@ -1939,7 +1945,7 @@ def test_golden_django_model_with_options() -> None:
 
 
         class Department(models.Model):
-            objects = DepartmentManager()
+            objects: ClassVar[DepartmentManager] = DepartmentManager()
             id = models.UUIDField(primary_key=True)
             company = models.ForeignKey("Company", on_delete=models.PROTECT, related_name="+")
             founded = models.DateField()
@@ -1951,7 +1957,7 @@ def test_golden_django_model_with_options() -> None:
         @registered
         @following(follow=["employer"])
         class Person(Described, Stamped):
-            objects = PersonManager()
+            objects: ClassVar[PersonManager] = PersonManager()
             id = models.BigIntegerField(primary_key=True)
             email = models.TextField()
             nickname = models.TextField(null=True, db_default="anon")
@@ -2025,6 +2031,28 @@ class Quoted(pydantic.BaseModel):
     ]
 
 
+class AnEntityWithAManagerTooLongId(Id[int]):
+    pass
+
+
+class AnEntityWithAManagerTooLong(pydantic.BaseModel):
+    """Named so that the line of its manager does not fit, but does with its
+    value parenthesized."""
+
+    id: AnEntityWithAManagerTooLongId
+
+
+class AnEntityNamedSoLongThatEvenItsManagerUpToTheValueDoesNotFitId(Id[int]):
+    pass
+
+
+class AnEntityNamedSoLongThatEvenItsManagerUpToTheValueDoesNotFit(pydantic.BaseModel):
+    """Named so that the line of its manager does not fit even with its value
+    parenthesized."""
+
+    id: AnEntityNamedSoLongThatEvenItsManagerUpToTheValueDoesNotFitId
+
+
 @pytest.mark.parametrize(
     "entity_model_options",
     [{}, {Person: person_options(), Department: uuid_default()}],
@@ -2048,7 +2076,19 @@ def test_generated_models_are_as_ruff_formats_and_sorts_them(
     )
 
     texts = (
-        render([Company, Department, Person, Ruled, Campaign, Quoted], models),
+        render(
+            [
+                Company,
+                Department,
+                Person,
+                Ruled,
+                Campaign,
+                Quoted,
+                AnEntityWithAManagerTooLong,
+                AnEntityNamedSoLongThatEvenItsManagerUpToTheValueDoesNotFit,
+            ],
+            models,
+        ),
         # Their primary keys are of the type `Person`'s is.
         render([Thing], all_rules_for_tags()),
         render([Bounded], config({}, {})),
