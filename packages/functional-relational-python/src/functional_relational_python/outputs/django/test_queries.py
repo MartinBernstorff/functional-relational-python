@@ -40,7 +40,9 @@ from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.django.models import (
     AppLabel,
     CatalogModelOptions,
+    DefaultDjangoModelName,
     DjangoField,
+    DjangoModelName,
     DjangoModels,
     DjangoModelsRenderer,
     EntityModelOptions,
@@ -1001,6 +1003,43 @@ def test_a_view_named_like_a_query_set_method_is_a_diagnostic() -> None:
             )
 
 
+class FirmId(Id[int]):
+    pass
+
+
+class Firm:
+    """Holds an Entity named like `Company`."""
+
+    class Company(pydantic.BaseModel, frozen=True):
+        id: FirmId
+
+
+def test_entities_named_alike_are_a_clash_though_their_models_are_not() -> None:
+    """Their QuerySets and Managers are named after the Entities."""
+    config = Modules.config().model_copy(
+        update={
+            "entity_model_options": {
+                Firm.Company: EntityModelOptions.inherited().model_copy(
+                    update={"model_name": DjangoModelName("Firm")}
+                )
+            }
+        }
+    )
+    graph = EntityGraph.build(
+        [Company, Firm.Company], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+
+    match DjangoQueriesRenderer.render(graph, config, (), PlacedModels(modules={})):
+        case Ok(files):
+            pytest.fail(f"expected diagnostics, got {files}")
+        case Err(error):
+            assert {
+                diagnostic.name
+                for diagnostic in error.diagnostics
+                if isinstance(diagnostic, NameClash)
+            } == {Identifier("CompanyQuerySet"), Identifier("CompanyManager")}
+
+
 type Query = Callable[[QuerySet[Model]], QuerySet[Model]]
 """Filters, orders or slices a QuerySet before it is read as a View."""
 
@@ -1205,11 +1244,14 @@ class Database:
 
     @staticmethod
     def read(
-        django_models: types.ModuleType, view: compiler.CompiledView, query: Query
+        django_models: types.ModuleType,
+        view: compiler.CompiledView,
+        query: Query,
+        config: DjangoModels = generated,
     ) -> tuple[engine.ViewRow, ...]:
         """The View's results, from `query` of the Source's QuerySet, checking
         they took one database query."""
-        model = getattr(django_models, view.source.__name__)
+        model = getattr(django_models, config.model_name_of(view.source).root)
         method = f"as_{view.names.function.root}"
         with CaptureQueriesContext(connection) as captured:
             rows = tuple(
@@ -1638,6 +1680,20 @@ def test_a_view_reads_through_a_related_name_like_the_engine(view: View) -> None
     assert rows == engine_rows([compiled], entities)[view.name]
 
 
+def prefixed_model_name(entity: type[pydantic.BaseModel]) -> DjangoModelName:
+    """`Django<Entity>`."""
+    return DjangoModelName(f"Django{entity.__name__}")
+
+
+def entity_model_name(_: type[pydantic.BaseModel]) -> DefaultDjangoModelName:
+    return DefaultDjangoModelName()
+
+
+@pytest.mark.parametrize(
+    "model_name_of",
+    [entity_model_name, prefixed_model_name],
+    ids=["entity names", "model names"],
+)
 @pytest.mark.parametrize(
     "view",
     [
@@ -1656,9 +1712,13 @@ def test_a_view_reads_through_a_related_name_like_the_engine(view: View) -> None
 )
 def test_a_view_reads_a_model_keyed_by_its_reference_like_the_engine(
     view: View,
+    model_name_of: Callable[
+        [type[pydantic.BaseModel]], DjangoModelName | DefaultDjangoModelName
+    ],
 ) -> None:
     """A Badge's model has the Employee it is of as its primary key, so its `id`
-    is read from that column. Each Badge's `id` is its Employee's."""
+    is read from that column. Each Badge's `id` is its Employee's. A model named
+    unlike its Entity is referred to, and named after, by its own name."""
     entities = tuple(
         entity.model_copy(update={"id": BadgeId(entity.employee_id.root)})
         if isinstance(entity, Badge)
@@ -1666,23 +1726,30 @@ def test_a_view_reads_a_model_keyed_by_its_reference_like_the_engine(
         for entity in organisation()
     )
     (compiled,) = compile_all([view]).views
+    named = {
+        entity: EntityModelOptions.inherited().model_copy(
+            update={"model_name": model_name_of(entity)}
+        )
+        for entity in entity_graph().entities
+    }
     config = Modules.config().model_copy(
         update={
             "entity_model_options": {
-                Badge: EntityModelOptions.inherited().model_copy(
+                **named,
+                Badge: named[Badge].model_copy(
                     update={
                         "primary_key": ReferencePrimaryKey(
                             reference=FieldName("employee_id")
                         )
                     }
-                )
+                ),
             }
         }
     )
 
     with Database.of([view], (), config) as django_models:
         Database.put(entities, config)
-        rows = Database.read(django_models, compiled, every_row)
+        rows = Database.read(django_models, compiled, every_row, config)
 
     assert rows == engine_rows([compiled], entities)[view.name]
 
