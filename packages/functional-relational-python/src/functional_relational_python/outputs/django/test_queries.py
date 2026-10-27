@@ -244,6 +244,7 @@ class ExistingCompany:
                 Company: ExistingDjangoModel(
                     module=ExistingCompany.module,
                     name=Identifier("Firm"),
+                    reverse_accessors={},
                 )
             },
         )
@@ -1440,6 +1441,42 @@ def test_an_existing_model_gets_no_query_set_and_is_imported_for_type_checking()
         "def company_full_queryset(\n"
         '    queryset: "django.db.models.QuerySet[frp_existing_django.Firm]",\n'
     ) in file.text.root
+
+
+def test_a_query_follows_the_reverse_accessor_an_existing_model_declares() -> None:
+    """`Badge`'s existing model names its one-to-one Reference to the Employee
+    `medal`, where a generated model would name it `badge_by_employee`."""
+    generated = Modules.config()
+    config = DjangoModels(
+        module=generated.module,
+        app_label=generated.app_label,
+        field_types=generated.field_types,
+        on_delete=generated.on_delete,
+        queries=generated.queries,
+        existing={
+            Badge: ExistingDjangoModel(
+                module=ModulePath("frp_existing_badges"),
+                name=Identifier("Medal"),
+                reverse_accessors={FieldName("employee_id"): FieldName("medal")},
+            )
+        },
+    )
+    view = View(name=ViewName("Decorated"), source=Employee, step=steps.reverse(Badge))
+    compiled = compile_all([view])
+
+    (file,) = (
+        DjangoQueriesRenderer.render(
+            entity_graph(),
+            config,
+            compiled.views,
+            placed_into(Generated.models, compiled),
+        )
+        .unwrap()
+        .files
+    )
+
+    assert "badge_by_employee" not in file.text.root
+    assert '"medal"' in file.text.root
 
 
 def with_mentor_from_last(queryset: QuerySet[Model]) -> QuerySet[Model]:

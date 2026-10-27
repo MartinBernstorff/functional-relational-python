@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import types
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -33,6 +34,7 @@ from functional_relational_python.outputs.django.models import (
     DjangoModels,
     DjangoModelsRenderer,
     ExistingDjangoModel,
+    ExistingModelInGeneratedModule,
     ExistingModelOfNonEntity,
     InvalidDjangoFieldName,
     InvalidReverseAccessorName,
@@ -42,7 +44,9 @@ from functional_relational_python.outputs.django.models import (
     OnDeleteOnExistingModel,
     ReferenceKey,
     ReverseAccessorClash,
+    ReverseAccessorOfNonOneToOne,
     SetNullOnRequiredReference,
+    UndeclaredReverseAccessor,
 )
 from functional_relational_python.outputs.django.queries import DjangoQueriesRenderer
 from functional_relational_python.outputs.python.plan import PlacedModels
@@ -156,6 +160,9 @@ class Thing(pydantic.BaseModel):
 def config(
     field_types: Mapping[RuntimeAnnotation, DjangoField],
     on_delete: Mapping[ReferenceKey, OnDelete],
+    existing: Mapping[
+        type[pydantic.BaseModel], ExistingDjangoModel
+    ] = types.MappingProxyType({}),
 ) -> DjangoModels:
     return DjangoModels(
         module=ModulePath("app.models"),
@@ -163,20 +170,13 @@ def config(
         field_types=field_types,
         on_delete=on_delete,
         queries=ModulePath("app.queries"),
-        existing={},
+        existing=existing,
     )
 
 
 def existing_company(on_delete: Mapping[ReferenceKey, OnDelete]) -> DjangoModels:
     """`Company` has an existing Django model, `Company` of `crm.models`."""
-    return DjangoModels(
-        module=ModulePath("app.models"),
-        app_label=AppLabel("app"),
-        field_types={},
-        on_delete=on_delete,
-        queries=ModulePath("app.queries"),
-        existing={Company: ExistingDjangoModel.fake()},
-    )
+    return config({}, on_delete, {Company: ExistingDjangoModel.fake()})
 
 
 def render(
@@ -665,16 +665,96 @@ def test_an_entity_with_an_existing_model_gets_none_and_is_imported() -> None:
 
 
 def test_an_existing_model_of_a_non_entity_is_a_diagnostic() -> None:
-    models = DjangoModels(
-        module=ModulePath("app.models"),
-        app_label=AppLabel("app"),
-        field_types={},
-        on_delete={},
-        queries=ModulePath("app.queries"),
-        existing={Thing: ExistingDjangoModel.fake()},
-    )
+    models = config({}, {}, {Thing: ExistingDjangoModel.fake()})
 
     assert diagnostics([Company], models) == (ExistingModelOfNonEntity(model=Thing),)
+
+
+@pytest.mark.parametrize("module", ["app.models", "app.queries"])
+def test_an_existing_model_in_a_generated_module_is_a_diagnostic(module: str) -> None:
+    existing = ExistingDjangoModel(
+        module=ModulePath(module), name=Identifier("Firm"), reverse_accessors={}
+    )
+
+    assert diagnostics([Company], config({}, {}, {Company: existing})) == (
+        ExistingModelInGeneratedModule(entity=Company, module=ModulePath(module)),
+    )
+
+
+def existing_details(
+    reverse_accessors: Mapping[FieldName, FieldName],
+) -> DjangoModels:
+    """`CompanyDetails`, whose References are one-to-one, has an existing Django
+    model declaring `reverse_accessors`."""
+    existing = ExistingDjangoModel(
+        module=ModulePath("crm.models"),
+        name=Identifier("CompanyDetails"),
+        reverse_accessors=reverse_accessors,
+    )
+    return config({}, {}, {CompanyDetails: existing})
+
+
+def test_reverse_accessors_an_existing_model_declares_amiss_are_diagnostics() -> None:
+    models = existing_details(
+        {
+            FieldName("company_id"): FieldName("details"),
+            FieldName("id"): FieldName("details_by_id"),
+        }
+    )
+
+    assert diagnostics([Company, CompanyDetails], models) == (
+        ReverseAccessorOfNonOneToOne(entity=CompanyDetails, field=FieldName("id")),
+        UndeclaredReverseAccessor(
+            entity=CompanyDetails, field=FieldName("successor_id")
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        ("details", ()),
+        # Django checks the existing model's names, not frp.
+        ("details__", ()),
+        (
+            "name",
+            (
+                ReverseAccessorClash(
+                    entity=Company,
+                    name=FieldName("name"),
+                    references=(
+                        ReferenceKey(
+                            entity=CompanyDetails, field=FieldName("company_id")
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    ],
+    ids=["free", "invalid-for-frp", "clashing"],
+)
+def test_reverse_accessors_of_an_existing_model_are_checked_as_declared(
+    declared: str, expected: tuple[ReverseAccessorClash, ...]
+) -> None:
+    """An existing model's one-to-one Reference to a generated model binds the
+    reverse accessor it declares, not the one frp would generate."""
+    models = existing_details(
+        {
+            FieldName("company_id"): FieldName(declared),
+            FieldName("successor_id"): FieldName("successor_details"),
+        }
+    )
+
+    graph = EntityGraph.build(
+        [Company, CompanyDetails], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+
+    match DjangoModelsRenderer.render(graph, models):
+        case Ok():
+            reported: tuple[DjangoDiagnostic, ...] = ()
+        case Err(error):
+            reported = error.diagnostics
+    assert reported == expected
 
 
 def test_on_delete_for_a_reference_of_an_existing_model_is_a_diagnostic() -> None:
@@ -786,7 +866,12 @@ def test_generated_models_referencing_an_existing_model_make_migrations(
                     migrations.CreateModel(
                         name="Company",
                         fields=[
-                            ("id", models.BigIntegerField(primary_key=True, serialize=False)),
+                            (
+                                "id",
+                                models.BigIntegerField(
+                                    primary_key=True, serialize=False
+                                ),
+                            ),
                             ("name", models.TextField()),
                             (
                                 "parent",

@@ -159,15 +159,21 @@ class ExistingDjangoModel(pydantic.BaseModel, frozen=True):
     The model holds each field of the Entity under the attribute a generated
     model would, so that a query reads it: a field under its name, and a
     Reference `x_id` as the foreign key `x`. Its manager is its own.
+    `reverse_accessors` is the `related_name` its model gives each one-to-one
+    Reference of the Entity, e.g. `meta_detail` for `channel_campaign_id`, which a
+    query follows backwards. frp checks none of this against the model.
     """
 
     module: ModulePath
     name: Identifier
+    reverse_accessors: Mapping[FieldName, FieldName]
 
     @staticmethod
     def fake() -> ExistingDjangoModel:
         return ExistingDjangoModel(
-            module=ModulePath("crm.models"), name=Identifier("Company")
+            module=ModulePath("crm.models"),
+            name=Identifier("Company"),
+            reverse_accessors={},
         )
 
     def symbol(self) -> Symbol:
@@ -220,6 +226,22 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
         unless the application has its own model for it."""
         return entity not in self.existing
 
+    def reverse_accessor_of(
+        self, entity: type[pydantic.BaseModel], reference: FieldName
+    ) -> FieldName:
+        """The attribute of the referenced Entity's Django model holding the
+        `entity` whose one-to-one Reference `reference` points to it: the one an
+        existing model declares, else the one frp generates, see
+        `DjangoModelsRenderer.reverse_accessor`. An existing model declaring none
+        is a diagnostic of the Django models."""
+        match self.existing.get(entity):
+            case ExistingDjangoModel(reverse_accessors=declared) if (
+                reference in declared
+            ):
+                return declared[reference]
+            case ExistingDjangoModel() | None:
+                return DjangoModelsRenderer.reverse_accessor(entity, reference)
+
     def query_set_of(self, entity: type[pydantic.BaseModel]) -> Symbol:
         """The QuerySet of `entity`'s Django model, e.g. `CompanyQuerySet`."""
         return Symbol(
@@ -262,6 +284,51 @@ class ExistingModelOfNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
         return DiagnosticMessage(
             f"{self.model.__qualname__}: DjangoModels.existing names a Django model "
             "for it, but it is not an Entity."
+        )
+
+
+class ExistingModelInGeneratedModule(pydantic.BaseModel, Diagnostic, frozen=True):
+    """An existing Django model is in the module frp generates the Django models
+    or queries into, which would overwrite it."""
+
+    entity: type[pydantic.BaseModel]
+    module: ModulePath
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}: its existing Django model is in "
+            f"'{self.module.root}', which frp generates."
+        )
+
+
+class UndeclaredReverseAccessor(pydantic.BaseModel, Diagnostic, frozen=True):
+    """An Entity with an existing Django model has a one-to-one Reference whose
+    reverse accessor its `ExistingDjangoModel.reverse_accessors` does not
+    declare."""
+
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}.{self.field.root}: a one-to-one Reference "
+            "of an existing Django model, but its reverse_accessors does not name "
+            "the related_name."
+        )
+
+
+class ReverseAccessorOfNonOneToOne(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`ExistingDjangoModel.reverse_accessors` names a field that is not a
+    one-to-one Reference of its Entity."""
+
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}.{self.field.root}: its existing Django "
+            "model's reverse_accessors names it, but it is not a one-to-one "
+            "Reference."
         )
 
 
@@ -422,6 +489,9 @@ type DjangoDiagnostic = (
     | OnDeleteOnExistingModel
     | SetNullOnRequiredReference
     | ExistingModelOfNonEntity
+    | ExistingModelInGeneratedModule
+    | UndeclaredReverseAccessor
+    | ReverseAccessorOfNonOneToOne
     | DjangoFieldNameClash
     | DjangoModelNameClash
     | ReverseAccessorClash
@@ -596,11 +666,7 @@ class DjangoModelsRenderer:
             for model, node in graph.entities.items()
             for reference in node.references
         }
-        reported.extend(
-            ExistingModelOfNonEntity(model=model)
-            for model in config.existing
-            if model not in graph.entities
-        )
+        reported.extend(DjangoModelsRenderer._existing_misconfigured(graph, config))
         for key, on_delete in config.on_delete.items():
             match references.get(key):
                 case None:
@@ -625,7 +691,7 @@ class DjangoModelsRenderer:
             if not config.generates(model):
                 # Its fields are unknown, but reverse accessors may still clash.
                 reported.extend(
-                    DjangoModelsRenderer._accessor_clashes(graph, model, ())
+                    DjangoModelsRenderer._accessor_clashes(graph, config, model, ())
                 )
                 continue
             declarations: list[_Declaration] = []
@@ -639,7 +705,9 @@ class DjangoModelsRenderer:
                         reported.append(declared)
             reported.extend(DjangoModelsRenderer._field_clashes(model, declarations))
             reported.extend(
-                DjangoModelsRenderer._accessor_clashes(graph, model, declarations)
+                DjangoModelsRenderer._accessor_clashes(
+                    graph, config, model, declarations
+                )
             )
             planned.append(
                 _PlannedModel(
@@ -659,7 +727,7 @@ class DjangoModelsRenderer:
                 ),
                 *(model.manager for model in planned),
                 *(
-                    config.existing[reference.target].symbol()
+                    config.model_of(reference.target)
                     for model in planned
                     for reference in graph.entities[model.entity].references
                     if not config.generates(reference.target)
@@ -788,14 +856,55 @@ class DjangoModelsRenderer:
                 return Optionality.OPTIONAL
 
     @staticmethod
+    def _existing_misconfigured(
+        graph: EntityGraph, config: DjangoModels
+    ) -> Iterator[
+        ExistingModelOfNonEntity
+        | ExistingModelInGeneratedModule
+        | UndeclaredReverseAccessor
+        | ReverseAccessorOfNonOneToOne
+    ]:
+        """Existing Django models named for a non-Entity, or in a generated
+        module, or declaring other reverse accessors than their Entity's
+        one-to-one References have."""
+        for entity, existing in config.existing.items():
+            if existing.module in (config.module, config.queries):
+                yield ExistingModelInGeneratedModule(
+                    entity=entity, module=existing.module
+                )
+            match graph.entities.get(entity):
+                case None:
+                    yield ExistingModelOfNonEntity(model=entity)
+                    continue
+                case EntityNode() as node:
+                    pass
+            one_to_one = [
+                reference.field
+                for reference in node.references
+                if reference.cardinality == Cardinality.ONE_TO_ONE
+            ]
+            yield from (
+                UndeclaredReverseAccessor(entity=entity, field=field)
+                for field in one_to_one
+                if field not in existing.reverse_accessors
+            )
+            yield from (
+                ReverseAccessorOfNonOneToOne(entity=entity, field=field)
+                for field in existing.reverse_accessors
+                if field not in one_to_one
+            )
+
+    @staticmethod
     def _accessor_clashes(
         graph: EntityGraph,
+        config: DjangoModels,
         model: type[pydantic.BaseModel],
         declarations: Iterable[_Declaration],
     ) -> Iterator[ReverseAccessorClash | InvalidReverseAccessorName]:
         """Reverse accessors on `model`'s Django model named like another one, or
-        like a name the model binds or reserves, or named as Django forbids.
-        References are in Entity name and field order."""
+        like a name the model binds or reserves, or, for one frp generates, named
+        as Django forbids. An existing model declares its own. References are in
+        Entity name and field order."""
         bound = {
             *DjangoModelsRenderer.reserved,
             *(
@@ -814,8 +923,7 @@ class DjangoModelsRenderer:
                     and reference.cardinality == Cardinality.ONE_TO_ONE
                 ):
                     by_name.setdefault(
-                        DjangoModelsRenderer.reverse_accessor(entity, reference.field),
-                        [],
+                        config.reverse_accessor_of(entity, reference.field), []
                     ).append(ReferenceKey(entity=entity, field=reference.field))
         for name, references in by_name.items():
             if len(references) > 1 or name in bound:
@@ -828,6 +936,7 @@ class DjangoModelsRenderer:
                 yield from (
                     InvalidReverseAccessorName(name=name, reference=reference)
                     for reference in references
+                    if config.generates(reference.entity)
                 )
 
     @staticmethod
@@ -841,11 +950,10 @@ class DjangoModelsRenderer:
         `ForeignKey` without one (`related_name='+'`). A generated model is named
         by a string, since it may be defined further down, an existing one by
         its imported class."""
-        match config.existing.get(reference.target):
-            case ExistingDjangoModel() as existing:
-                target = ValueExpression(existing.symbol().bound_name().root)
-            case None:
-                target = ValueExpression(repr(reference.target.__name__))
+        bound = config.model_of(reference.target).bound_name().root
+        target = ValueExpression(
+            repr(bound) if config.generates(reference.target) else bound
+        )
         deleted = config.on_delete.get(
             ReferenceKey(entity=model, field=reference.field), OnDelete.PROTECT
         )
@@ -855,9 +963,7 @@ class DjangoModelsRenderer:
                 related_name = "+"
             case Cardinality.ONE_TO_ONE:
                 field_class = Identifier("OneToOneField")
-                related_name = DjangoModelsRenderer.reverse_accessor(
-                    model, reference.field
-                ).root
+                related_name = config.reverse_accessor_of(model, reference.field).root
         arguments = {
             Identifier("on_delete"): ValueExpression(f"models.{deleted.value}"),
             Identifier("related_name"): ValueExpression(repr(related_name)),
