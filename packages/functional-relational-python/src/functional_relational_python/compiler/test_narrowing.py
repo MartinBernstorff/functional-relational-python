@@ -1,5 +1,6 @@
 import datetime
 import enum
+import typing
 from typing import Annotated, Literal
 
 import pydantic
@@ -663,6 +664,106 @@ def test_narrowing_keeps_the_fields_constraints(step: steps.Step) -> None:
 
     assert isinstance(label, ir.Field)
     assert label.info.metadata == Constrained.model_fields["label"].metadata != []
+
+
+PastMoment = Annotated[datetime.datetime, pydantic.AwareDatetime, pydantic.PastDatetime]
+
+
+class Stamped(pydantic.BaseModel):
+    id: CampaignId
+    stamped_at: PastMoment | None
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        steps.require(FieldName("stamped_at")),
+        steps.where(conditions.ne(conditions.field(FieldName("stamped_at")), None)),
+    ],
+    ids=["require", "where"],
+)
+def test_narrowing_an_optional_annotated_alias_keeps_its_metadata(
+    step: steps.Step,
+) -> None:
+    (compiled,) = (
+        compiler.compile_views(
+            graph(), [View(name=ViewName.fake(), source=Stamped, step=step)]
+        )
+        .unwrap()
+        .views
+    )
+
+    field = field_of(compiled, FieldName("stamped_at"))
+    assert isinstance(field, ir.Field)
+    assert (field.annotation(), field.info.metadata) == (
+        datetime.datetime,
+        list(typing.get_args(PastMoment)[1:]),
+    )
+
+
+class StampedBase(pydantic.BaseModel):
+    stamped_at: PastMoment
+
+
+def test_a_required_annotated_alias_is_inherited_from_a_base_declaring_it() -> None:
+    view = View(
+        name=ViewName.fake(),
+        source=Stamped,
+        step=steps.require(FieldName("stamped_at")),
+        base=StampedBase,
+    )
+
+    assert compiler.compile_views(graph(), [view]).unwrap().views
+
+
+def test_a_field_narrowed_to_a_literal_loses_its_constraints() -> None:
+    (compiled,) = (
+        compiler.compile_views(
+            graph(),
+            [
+                View(
+                    name=ViewName.fake(),
+                    source=Constrained,
+                    step=steps.where(
+                        conditions.is_null(conditions.field(FieldName("label")))
+                    ),
+                )
+            ],
+        )
+        .unwrap()
+        .views
+    )
+    field = field_of(compiled, FieldName("label"))
+
+    assert isinstance(field, ir.Field)
+    assert (field.annotation(), field.info.metadata) == (Literal[None], [])
+
+
+class MarkedDetail(pydantic.BaseModel):
+    """At most one per Campaign, when it has one, marked outside its `None`."""
+
+    id: DetailId
+    campaign_id: Annotated[CampaignId, OneToOne()] | None
+
+
+def test_a_required_reference_marked_outside_its_none_resolves() -> None:
+    marked = EntityGraph.build(
+        [Owner, Campaign, MarkedDetail], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+    view = View(
+        name=ViewName.fake(),
+        source=MarkedDetail,
+        step=steps.pipeline(
+            steps.require(FieldName("campaign_id")),
+            steps.resolve(named(FieldName("campaign_id"))),
+        ),
+    )
+
+    (compiled,) = compiler.compile_views(marked, [view]).unwrap().views
+
+    field = field_of(compiled, FieldName("campaign"))
+    assert isinstance(field, ir.Field)
+    assert field.annotation() == Campaign
 
 
 type MaybeObjective = Text | None

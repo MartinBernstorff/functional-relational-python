@@ -244,16 +244,16 @@ def test_a_chain_is_optional_iff_a_lookup_on_its_way_is() -> None:
     ) == (Company, Department | None)
 
 
-def test_admitting_none_keeps_the_fields_constraints() -> None:
+def test_admitting_none_keeps_the_fields_constraints_inside_the_none() -> None:
     field = own_field(FieldName("name"), Annotated[str, pydantic.Field(min_length=1)])
 
     widened = field.admitting_none()
 
     assert (widened.annotation(), widened.info.metadata) == (
-        str | None,
-        field.info.metadata,
+        Annotated[str, *field.info.metadata] | None,
+        [],
     )
-    assert widened.info.metadata
+    assert field.info.metadata
 
 
 def test_a_relation_of_own_fields_has_no_lookups() -> None:
