@@ -8,6 +8,7 @@ from functional_relational_python.outputs.python.symbols import (
     ImportSection,
     ImportText,
     ModulePath,
+    SitePackages,
     Symbol,
 )
 from functional_relational_python.support.filesystem import FileText
@@ -30,7 +31,7 @@ from functional_relational_python.support.identifier import Identifier
 def test_a_module_is_in_the_section_of_where_it_is_installed(
     module: ModulePath, section: ImportSection
 ) -> None:
-    assert ImportSection.of(module) == section
+    assert ImportSection.of(module, SitePackages.current()) == section
 
 
 def mixed_block() -> ImportBlock:
@@ -45,9 +46,10 @@ def mixed_block() -> ImportBlock:
                 ("typing", ("Annotated", "TYPE_CHECKING", "cast")),
                 ("pydantic", ("MISSING", "BaseModel")),
                 ("pydantic.types", ("AwareDatetime",)),
-                ("app.views", ("Company", "company_id")),
+                ("app.views", ("Company", "company_id", "v1", "v001", "v01")),
                 ("app.views10", ("View",)),
                 ("app.views2", ("View",)),
+                ("app.views02", ("View",)),
             )
             for name in names
         ),
@@ -65,7 +67,8 @@ def test_an_import_block_puts_each_section_apart() -> None:
         "\n"
         "import app.views\n"
         "import App2\n"
-        "from app.views import Company, company_id\n"
+        "from app.views import Company, company_id, v001, v01, v1\n"
+        "from app.views02 import View\n"
         "from app.views2 import View\n"
         "from app.views10 import View\n"
     )
@@ -100,8 +103,9 @@ def test_an_empty_import_block_has_no_text() -> None:
 
 def ruff_import_diff(text: FileText | ImportText) -> FileText:
     """How ruff would sort the imports of `text`: empty when they are sorted
-    already. Installed packages are third party and the rest first party, as
-    `ImportSection.of` has them."""
+    already. The packages generated source here imports from site-packages are
+    third party and the rest first party, which is how `ImportSection.of` has
+    them in this workspace."""
     result = subprocess.run(
         [
             sys.executable,
@@ -115,7 +119,7 @@ def ruff_import_diff(text: FileText | ImportText) -> FileText:
             "--config",
             'lint.isort.default-section = "first-party"',
             "--config",
-            'lint.isort.known-third-party = ["django", "pydantic"]',
+            'lint.isort.known-third-party = ["annotated_types", "django", "pydantic"]',
             "--stdin-filename",
             "generated.py",
             "-",

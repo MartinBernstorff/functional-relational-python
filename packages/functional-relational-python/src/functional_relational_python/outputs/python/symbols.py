@@ -214,6 +214,25 @@ class LineLength(pydantic.RootModel[int], frozen=True):
         return LineLength(88)
 
 
+class SitePackages(pydantic.RootModel[frozenset[Path]], frozen=True):
+    """The directories distributions are installed into."""
+
+    @staticmethod
+    def current() -> SitePackages:
+        """Those of the running interpreter."""
+        return SitePackages(
+            frozenset(
+                Path(directory).resolve()
+                for directory in (
+                    *site.getsitepackages(),
+                    site.getusersitepackages(),
+                    sysconfig.get_path("purelib"),
+                    sysconfig.get_path("platlib"),
+                )
+            )
+        )
+
+
 class ImportSection(enum.IntEnum):
     """A section of import statements, in the order ruff's isort rules put them."""
 
@@ -222,7 +241,7 @@ class ImportSection(enum.IntEnum):
     FIRST_PARTY = enum.auto()
 
     @staticmethod
-    def of(module: ModulePath) -> ImportSection:
+    def of(module: ModulePath, installed: SitePackages) -> ImportSection:
         """The standard library by name; third party when the module is installed
         into site-packages; first party otherwise, i.e. the project's own modules,
         including generated ones that do not exist yet.
@@ -246,19 +265,10 @@ class ImportSection(enum.IntEnum):
             *((spec.origin,) if spec.origin is not None else ()),
             *(spec.submodule_search_locations or ()),
         )
-        installed = {
-            Path(directory).resolve()
-            for directory in (
-                *site.getsitepackages(),
-                site.getusersitepackages(),
-                sysconfig.get_path("purelib"),
-                sysconfig.get_path("platlib"),
-            )
-        }
         if any(
             Path(location).resolve().is_relative_to(directory)
             for location in locations
-            for directory in installed
+            for directory in installed.root
         ):
             return ImportSection.THIRD_PARTY
         return ImportSection.FIRST_PARTY
@@ -283,9 +293,10 @@ class MemberKind(enum.IntEnum):
         return MemberKind.VARIABLE
 
 
-class SortName(pydantic.RootModel[tuple[tuple[str, int], ...]], frozen=True):
+class SortName(pydantic.RootModel[tuple[tuple[str, int, int], ...]], frozen=True):
     """A name as ruff's isort rules compare it: character by character, except
-    that runs of digits compare by value, so `v2` comes before `v10`.
+    that runs of digits compare by value, so `v2` comes before `v10`, and of equal
+    values the one with more leading zeros first, so `v01` before `v1`.
 
     A run of digits is keyed as `0`, the lowest digit, then its value: against
     any other character it compares as a digit would.
@@ -295,7 +306,7 @@ class SortName(pydantic.RootModel[tuple[tuple[str, int], ...]], frozen=True):
     def of(name: pydantic.RootModel[str]) -> SortName:
         return SortName(
             tuple(
-                ("0", int(token)) if token.isdigit() else (token, 0)
+                ("0", int(token), -len(token)) if token.isdigit() else (token, 0, 0)
                 for token in re.findall(r"\d+|\D", name.root)
             )
         )
@@ -330,8 +341,9 @@ class ImportBlock(pydantic.BaseModel, frozen=True):
 
     def text(self) -> ImportText:
         """The statements; empty without any."""
+        installed = SitePackages.current()
         sections = {
-            module: ImportSection.of(module)
+            module: ImportSection.of(module, installed)
             for module in (*self.modules, *(symbol.module for symbol in self.symbols))
         }
         names: dict[ModulePath, set[Identifier]] = {}
@@ -347,37 +359,27 @@ class ImportBlock(pydantic.BaseModel, frozen=True):
                 (module for module in names if sections[module] is section),
                 key=ImportBlock._module_key,
             )
-            lines = (
-                *(f"import {module.root}\n" for module in straight),
-                *(
-                    ImportBlock._from_statement(module, names[module]).root
-                    for module in from_modules
-                ),
-            )
+            lines = [f"import {module.root}\n" for module in straight]
+            for module in from_modules:
+                ordered = [
+                    name.root
+                    for name in sorted(
+                        names[module],
+                        key=lambda name: (
+                            MemberKind.of(name),
+                            SortName.ignoring_case(name),
+                            SortName.of(name),
+                        ),
+                    )
+                ]
+                line = f"from {module.root} import {', '.join(ordered)}"
+                if len(line) > LineLength.default().root:
+                    listed = "".join(f"    {name},\n" for name in ordered)
+                    line = f"from {module.root} import (\n{listed})"
+                lines.append(f"{line}\n")
             if lines:
                 texts.append("".join(lines))
         return ImportText("\n".join(texts))
-
-    @staticmethod
-    def _from_statement(module: ModulePath, names: Iterable[Identifier]) -> ImportText:
-        """`from <module> import <names>`, split one name per line if it does not
-        fit."""
-        ordered = [
-            name.root
-            for name in sorted(
-                names,
-                key=lambda name: (
-                    MemberKind.of(name),
-                    SortName.ignoring_case(name),
-                    SortName.of(name),
-                ),
-            )
-        ]
-        line = f"from {module.root} import {', '.join(ordered)}"
-        if len(line) <= LineLength.default().root:
-            return ImportText(f"{line}\n")
-        listed = "".join(f"    {name},\n" for name in ordered)
-        return ImportText(f"from {module.root} import (\n{listed})\n")
 
     @staticmethod
     def _module_key(module: ModulePath) -> tuple[SortName, SortName]:
