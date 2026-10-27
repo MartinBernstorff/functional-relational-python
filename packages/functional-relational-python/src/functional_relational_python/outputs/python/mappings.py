@@ -124,6 +124,27 @@ class Indent(pydantic.RootModel[int], frozen=True):
             lines = f"{pad}{inner.fitted(body, Expression('')).root}\n"
         return Expression(f"{head.root}\n{lines}{self.pad().root}{tail.root}")
 
+    def assigned(self, target: Expression, value: Expression) -> Expression:
+        """`<target> = <value>` on a line at this indentation, split as ruff
+        format splits it: as `fitted` splits it, unless the line up to the
+        value's last opening bracket does not fit. Then the value is
+        parenthesized on lines of its own, split as `fitted` splits it."""
+        line = Expression(f"{target.root} = {value.root}")
+        match _Bracketed.of(value):
+            case _Bracketed(head=head) if (
+                len(f"{self.pad().root}{line.root}") > LineLength.default().root
+                and len(f"{self.pad().root}{target.root} = {head.root}")
+                > LineLength.default().root
+            ):
+                inner = self.deeper()
+                written = inner.fitted(value, Expression("")).root
+                return Expression(
+                    f"{target.root} = (\n{inner.pad().root}{written}\n"
+                    f"{self.pad().root})"
+                )
+            case _Bracketed() | _Unbracketed():
+                return self.fitted(line, Expression(""))
+
     def optional_annotation(
         self, start: Expression, annotated: Expression, end: Expression
     ) -> Expression:

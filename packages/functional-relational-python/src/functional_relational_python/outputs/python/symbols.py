@@ -80,20 +80,50 @@ class TypeExpression(pydantic.RootModel[str], frozen=True):
     """An annotation as it is written in generated source."""
 
 
+class Quote(enum.StrEnum):
+    """The quote character a string or bytes literal is in."""
+
+    SINGLE = "'"
+    DOUBLE = '"'
+
+
 class PythonString(pydantic.RootModel[str], frozen=True):
     """A string generated source writes as a string literal."""
 
     def literal(self) -> ValueExpression:
         """The string in the quotes ruff writes: double quotes, unless the string
         has more double quotes than single ones."""
-        written = repr(self.root)
-        body = written[1:-1]
-        if written.startswith("'"):
+        return PythonString.requoted(
+            ValueExpression(repr(self.root)),
+            Quote.SINGLE
+            if self.root.count('"') > self.root.count("'")
+            else Quote.DOUBLE,
+        )
+
+    @staticmethod
+    def requoted(written: ValueExpression, quote: Quote) -> ValueExpression:
+        """`written`, the `repr` of a string or bytes without its prefix, in
+        `quote`."""
+        body = written.root[1:-1]
+        if written.root.startswith("'"):
             # `repr` escapes single quotes only when it quotes with them.
             body = body.replace("\\'", "'")
-        quote = "'" if self.root.count('"') > self.root.count("'") else '"'
         escaped = body.replace(quote, f"\\{quote}")
         return ValueExpression(f"{quote}{escaped}{quote}")
+
+
+class PythonBytes(pydantic.RootModel[bytes], frozen=True):
+    """Bytes generated source writes as a bytes literal."""
+
+    def literal(self) -> ValueExpression:
+        """The bytes in the quotes ruff writes, which it chooses as for a string."""
+        written = PythonString.requoted(
+            ValueExpression(repr(self.root).removeprefix("b")),
+            Quote.SINGLE
+            if self.root.count(b'"') > self.root.count(b"'")
+            else Quote.DOUBLE,
+        )
+        return ValueExpression(f"b{written.root}")
 
 
 class ValueExpression(pydantic.RootModel[str], frozen=True):

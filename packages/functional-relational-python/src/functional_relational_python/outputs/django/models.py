@@ -62,6 +62,8 @@ from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     LineLength,
     ModulePath,
+    PythonBytes,
+    PythonString,
     Symbol,
     TypeExpression,
     ValueExpression,
@@ -188,7 +190,7 @@ class DjangoField(pydantic.BaseModel, frozen=True):
 
     def to_expression(self, positional: Iterable[ValueExpression]) -> ValueExpression:
         """The field constructed with `positional` and its arguments, e.g.
-        `models.ForeignKey('Company', on_delete=models.PROTECT)`."""
+        `models.ForeignKey("Company", on_delete=models.PROTECT)`."""
         arguments = ", ".join(
             [
                 *(value.root for value in positional),
@@ -313,7 +315,8 @@ class ForeignKeyConstraint(enum.StrEnum):
 type DjangoValue = Symbol | ValueExpression
 """A value in generated source: a Symbol is imported and referred to by name,
 e.g. `uuid.uuid4` or the enum member `Kind.INSTANCE`, and an expression is
-written as it is."""
+written as it is: for the module to be as ruff formats it, write it so too, e.g.
+`["channel_campaign"]`, not `['channel_campaign']`."""
 
 
 class Default(pydantic.BaseModel, frozen=True):
@@ -349,7 +352,7 @@ class BareDecorator(pydantic.BaseModel, frozen=True):
 
 class CalledDecorator(pydantic.BaseModel, frozen=True):
     """`@<function>(<arguments>)` on a model class, e.g.
-    `@register(follow=['channel_campaign'])`."""
+    `@register(follow=["channel_campaign"])`."""
 
     function: Symbol
     arguments: Mapping[Identifier, DjangoValue]
@@ -846,7 +849,7 @@ class RelatedNameForNonReference(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 type StoredValue = object
-"""A value a column stores, e.g. `'meta'` for the enum member `Channel.META`."""
+"""A value a column stores, e.g. `"meta"` for the enum member `Channel.META`."""
 
 
 class NoDjangoFieldRule(pydantic.BaseModel, Diagnostic, frozen=True):
@@ -1550,9 +1553,8 @@ class _ChoiceValues(pydantic.BaseModel, frozen=True):
         return value
 
     def listed_choices(self) -> Result[ValueExpression, UnwritableChoicesError]:
-        """The values as Django choices, each its own label, written as their
-        `repr`. Only a boolean, integer, finite float, string or bytes is written
-        that way."""
+        """The values as Django choices, each its own label, written as source.
+        Only a boolean, integer, finite float, string or bytes can be."""
         unwritable = tuple(
             value
             for value in self.stored
@@ -1567,7 +1569,23 @@ class _ChoiceValues(pydantic.BaseModel, frozen=True):
         )
         if unwritable:
             return Err(UnwritableChoicesError(self.values_of, unwritable))
-        return Ok(ValueExpression(repr([(value, value) for value in self.stored])))
+        written = [_ChoiceValues._written(value).root for value in self.stored]
+        return Ok(
+            ValueExpression(
+                f"[{', '.join(f'({value}, {value})' for value in written)}]"
+            )
+        )
+
+    @staticmethod
+    def _written(value: StoredValue) -> ValueExpression:
+        """`value` as source, in the quotes ruff writes."""
+        match value:
+            case str():
+                return PythonString(value).literal()
+            case bytes():
+                return PythonBytes(value).literal()
+            case _:
+                return ValueExpression(repr(value))
 
 
 class _TypedField(pydantic.BaseModel, frozen=True):
@@ -1645,14 +1663,17 @@ class _Declaration(pydantic.BaseModel, frozen=True):
         )
 
     def line(self) -> FileText:
-        return FileText(
-            f"    {self.name.root} = {self.field.to_expression(self.positional).root}\n"
+        """The line in the model's body, split as ruff format splits it."""
+        written = Indent(4).assigned(
+            Expression(self.name.root),
+            Expression(self.field.to_expression(self.positional).root),
         )
+        return FileText(f"    {written.root}\n")
 
 
 class _NoReverseAccessor(pydantic.BaseModel, frozen=True):
     """A Reference whose referenced Entity's model has no attribute for it:
-    `related_name='+'`."""
+    `related_name="+"`."""
 
 
 class _CheckedCheck(pydantic.BaseModel, frozen=True):
@@ -1742,42 +1763,71 @@ class _PlannedModel(pydantic.BaseModel, frozen=True):
     def statement(self, app_label: AppLabel, constraints: FileText) -> FileText:
         """The class statement, decorators first. `constraints` are the lines of
         the `Meta` option `constraints`, if any."""
+        top, meta_body = Indent(0), Indent(8)
         decorators = "".join(
-            f"@{DjangoModelsRenderer.decorator(decorator).root}\n"
+            top.fitted(
+                Expression(f"@{DjangoModelsRenderer.decorator(decorator).root}"),
+                Expression(""),
+            ).root
+            + "\n"
             for decorator in self.options.decorators
         )
         bases = ", ".join(
             DjangoField.referred(base).root for base in self.options.bases
         )
         meta = self.options.meta
-        options = [f"app_label = {app_label.root!r}"]
+        options = {"app_label": PythonString(app_label.root).literal()}
         match meta.db_table:
             case DbTable(root=table):
-                options.append(f"db_table = {table!r}")
+                options["db_table"] = PythonString(table).literal()
             case DefaultDbTable():
                 pass
         if meta.ordering:
-            options.append(f"ordering = {[term.root for term in meta.ordering]!r}")
+            options["ordering"] = _PlannedModel._listed(
+                PythonString(term.root) for term in meta.ordering
+            )
         if meta.indexes:
             indexes = ", ".join(
-                f"models.Index(fields={[field.root for field in index.fields]!r}, "
-                f"name={index.name.root!r})"
+                "models.Index(fields="
+                + _PlannedModel._listed(
+                    PythonString(field.root) for field in index.fields
+                ).root
+                + f", name={PythonString(index.name.root).literal().root})"
                 for index in meta.indexes
             )
-            options.append(f"indexes = [{indexes}]")
+            options["indexes"] = ValueExpression(f"[{indexes}]")
+        statement = top.fitted(
+            Expression(f"class {self.name.root}({bases}):"), Expression("")
+        )
         return FileText(
-            f"{decorators}class {self.name.root}({bases}):\n"
+            f"{decorators}{statement.root}\n"
             f"    {DjangoModelsRenderer.manager.root} = "
             f"{self.manager.bound_name().root}()\n"
             + "".join(declaration.line().root for declaration in self.declarations)
             + "\n    class Meta:\n"
-            + "".join(f"        {option}\n" for option in options)
+            + "".join(
+                f"        "
+                f"{meta_body.assigned(Expression(name), Expression(value.root)).root}\n"
+                for name, value in options.items()
+            )
             + constraints.root
+        )
+
+    @staticmethod
+    def _listed(strings: Iterable[PythonString]) -> ValueExpression:
+        """`strings` as a list literal on one line."""
+        return ValueExpression(
+            f"[{', '.join(text.literal().root for text in strings)}]"
         )
 
 
 class DjangoModelsRenderer:
-    """Writes the Django model of every Entity into one module."""
+    """Writes the Django model of every Entity into one module.
+
+    The output is ruff-format stable: strings are in the quotes ruff writes, and
+    a line that does not fit is split as ruff format splits it. A
+    `ValueExpression` from the configuration is written as it is given.
+    """
 
     header: typing.ClassVar[FileText] = FileText(
         f"{GeneratedFiles.header.root}"
@@ -2469,7 +2519,7 @@ class DjangoModelsRenderer:
         """
         models = DjangoModelsRenderer.models_import.root
         indent = Indent(12)
-        name = Expression(f"name={constraint.name.root!r}")
+        name = Expression(f"name={PythonString(constraint.name.root).literal().root}")
         match constraint:
             case _CheckedCheck(kept=kept):
                 excluded = writer.excluded(kept, entity)
@@ -2491,7 +2541,9 @@ class DjangoModelsRenderer:
                     Expression(")"),
                 )
             case _CheckedUnique(fields=fields, where=where):
-                listed = ", ".join(repr(field.root) for field in fields)
+                listed = ", ".join(
+                    PythonString(field.root).literal().root for field in fields
+                )
                 match where:
                     case EveryRow():
                         kept: tuple[Expression, ...] = ()
@@ -2618,12 +2670,14 @@ class DjangoModelsRenderer:
     ) -> _Declaration:
         """A foreign key to the referenced Entity's model, named without `_id`: a
         `OneToOneField` for a one-to-one Reference, else a `ForeignKey`. Without a
-        reverse accessor, its related name is `'+'`. A generated model is named
+        reverse accessor, its related name is `"+"`. A generated model is named
         by a string, since it may be defined further down, an existing one by
         its imported class."""
         bound = config.model_of(reference.target).bound_name().root
         target = ValueExpression(
-            repr(bound) if config.generates(reference.target) else bound
+            PythonString(bound).literal().root
+            if config.generates(reference.target)
+            else bound
         )
         deleted = config.on_delete.get(
             ReferenceKey(entity=model, field=reference.field), OnDelete.PROTECT
@@ -2640,7 +2694,7 @@ class DjangoModelsRenderer:
                 related_name = "+"
         arguments = {
             Identifier("on_delete"): ValueExpression(f"models.{deleted.value}"),
-            Identifier("related_name"): ValueExpression(repr(related_name)),
+            Identifier("related_name"): PythonString(related_name).literal(),
         }
         if reference.optionality == Optionality.OPTIONAL:
             arguments[Identifier("null")] = ValueExpression("True")
