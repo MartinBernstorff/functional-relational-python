@@ -14,7 +14,7 @@ import pydantic
 import pytest
 from django.apps import AppConfig, apps
 from django.conf import settings as django_settings
-from django.db import NotSupportedError, connection, transaction
+from django.db import IntegrityError, NotSupportedError, connection, transaction
 from django.db.models import Manager, Model, Q, QuerySet
 from django.test.utils import CaptureQueriesContext
 from hypothesis import event, given, settings
@@ -25,12 +25,14 @@ from functional_relational_python.compiler import compiler, narrowing, test_comp
 from functional_relational_python.compiler.test_compiler import Depth, pipelines
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
+    EntityNode,
     FieldName,
     Optionality,
 )
 from functional_relational_python.entity_graph.id import (
     Id,
     IdBase,
+    IdValue,
     OneToOne,
     OneToOneMarker,
 )
@@ -75,6 +77,11 @@ from functional_relational_python.outputs.python.test_mappings import (
     into,
 )
 from functional_relational_python.pipeline import conditions, ir, steps
+from functional_relational_python.pipeline.constraints import (
+    Check,
+    ConstraintName,
+    Unique,
+)
 from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticsError
@@ -273,6 +280,7 @@ class Modules:
             queries=Modules.queries,
             model_options=CatalogModelOptions.default(),
             entity_model_options={},
+            constraints={},
             existing={},
         )
 
@@ -309,6 +317,7 @@ class ExistingCompany:
             queries=generated.queries,
             model_options=CatalogModelOptions.default(),
             entity_model_options={},
+            constraints={},
             existing={
                 Company: ExistingDjangoModel(
                     module=ExistingCompany.module,
@@ -1145,16 +1154,51 @@ class Database:
         value, as Django stores one it has a built-in rule for."""
         with transaction.atomic():
             for entity in entities:
-                model = Database.model_of(type(entity), config)
-                node = entity_graph().entities[type(entity)]
-                _ = model.objects.create(
-                    **{
-                        DjangoModelsRenderer.attribute_of(
-                            node, FieldName(name)
-                        ).root: value
-                        for name, value in entity.model_dump(mode="json").items()
-                    }
-                )
+                Database.create(entity, config)
+
+    @staticmethod
+    def create(entity: pydantic.BaseModel, config: DjangoModels) -> None:
+        """Stores `entity` as a row of its Django model."""
+        model = Database.model_of(type(entity), config)
+        node = entity_graph().entities[type(entity)]
+        _ = model.objects.create(
+            **{
+                DjangoModelsRenderer.attribute_of(node, FieldName(name)).root: value
+                for name, value in entity.model_dump(mode="json").items()
+            }
+        )
+
+    @staticmethod
+    def primary_key(entity: pydantic.BaseModel) -> IdValue:
+        match getattr(entity, EntityNode.primary_key.root):
+            case pydantic.RootModel() as id_value:
+                return id_value
+            case other:
+                pytest.fail(f"expected an ID, got {other!r}")
+
+    @staticmethod
+    def rejected(
+        entities: Iterable[pydantic.BaseModel],
+        source: type[pydantic.BaseModel],
+        config: DjangoModels,
+    ) -> frozenset[IdValue]:
+        """The IDs of the `source` Entities the database refuses to store, each
+        stored on its own after every other Entity. Nothing is kept, so a refused
+        row leaves no Reference to it dangling."""
+        refused: set[IdValue] = set()
+        with transaction.atomic():
+            for entity in entities:
+                if type(entity) is not source:
+                    Database.create(entity, config)
+            for entity in entities:
+                if type(entity) is source:
+                    try:
+                        with transaction.atomic():
+                            Database.create(entity, config)
+                    except IntegrityError:
+                        refused.add(Database.primary_key(entity))
+            transaction.set_rollback(True)
+        return frozenset(refused)
 
     @staticmethod
     def read(
@@ -1549,6 +1593,7 @@ def test_a_query_follows_the_reverse_accessor_an_existing_model_declares() -> No
         queries=generated.queries,
         model_options=CatalogModelOptions.default(),
         entity_model_options={},
+        constraints={},
         existing={
             Badge: ExistingDjangoModel(
                 module=ModulePath("frp_existing_badges"),
@@ -2420,6 +2465,36 @@ def test_queries_give_the_same_view_results_as_the_engine(
     assert read == expected
 
 
+def constrained(config: DjangoModels) -> DjangoModels:
+    """`config` with constraints, one comparing with an enum member."""
+    role = conditions.field(FieldName("role"))
+    nickname = conditions.field(FieldName("nickname"))
+    return config.model_copy(
+        update={
+            "constraints": {
+                Employee: (
+                    Check(
+                        name=ConstraintName("employee_lead_has_nickname"),
+                        condition=conditions.or_(
+                            conditions.ne(role, Role.LEAD),
+                            conditions.not_(conditions.is_null(nickname)),
+                        ),
+                    ),
+                ),
+                Department: (
+                    Unique(
+                        name=ConstraintName("department_unique_name"),
+                        fields=(FieldName("company_id"), FieldName("name")),
+                        where=conditions.ne(
+                            conditions.field(FieldName("name")), Text("")
+                        ),
+                    ),
+                ),
+            }
+        }
+    )
+
+
 type Existing = tuple[tuple[ModulePath, FileText], ...]
 """The modules of the existing Django models a config names, with their source."""
 
@@ -2457,7 +2532,9 @@ def type_checked(
     methods return the Entity's QuerySet, so `as_<view>()` type checks after
     them."""
     views, unions = every_definition()
-    Database.files(views, unions, config).write(LocalFileSystem(), directory).unwrap()
+    Database.files(views, unions, constrained(config)).write(
+        LocalFileSystem(), directory
+    ).unwrap()
     for module, source in existing:
         _ = (directory.root / module.file_path().root).write_text(
             source.root, encoding="utf-8"
@@ -2668,3 +2745,81 @@ def test_a_met_requirement_reads_like_the_engine() -> None:
         rows = Database.read(django_models, compiled, every_row)
 
     assert rows == engine_rows([compiled], entities)[view.name]
+
+
+class ConstraintCase(pydantic.BaseModel, frozen=True):
+    source: type[pydantic.BaseModel]
+    condition: ir.Condition
+    entities: tuple[pydantic.BaseModel, ...]
+
+
+@st.composite
+def constraint_cases(draw: st.DrawFn) -> ConstraintCase:
+    stored = draw(entities())
+    source = draw(st.sampled_from([Company, Department, Employee, Badge]))
+    return ConstraintCase(
+        source=source,
+        condition=draw(field_conditions(source, stored, Depth(2))),
+        entities=stored,
+    )
+
+
+# Each example defines Django models and creates their tables, which can exceed
+# the default deadline.
+@settings(deadline=None)
+@given(constraint_cases())
+def test_the_database_refuses_exactly_the_rows_a_check_is_false_for(
+    case: ConstraintCase,
+) -> None:
+    """Differential: a row violates a Check exactly where `where` of its
+    Condition does not keep it in the InMemoryViewEngine."""
+    view = View(
+        name=ViewName("Kept"), source=case.source, step=steps.where(case.condition)
+    )
+    compiled = compile_all([view])
+    kept = {
+        row.root[FieldName("id")]
+        for row in view_engine(compiled, case.entities).read(view.name).unwrap()
+    }
+    check = Check(name=ConstraintName("checked"), condition=case.condition)
+    config = Modules.config().model_copy(
+        update={"constraints": {case.source: (check,)}}
+    )
+
+    with Database.of([view], (), config):
+        refused = Database.rejected(case.entities, case.source, config)
+
+    rows = {
+        Database.primary_key(entity)
+        for entity in case.entities
+        if type(entity) is case.source
+    }
+    event(f"refuses some rows: {bool(refused)}")
+    event(f"stores some rows: {refused != rows}")
+    assert refused == rows - kept
+
+
+def test_the_database_refuses_a_second_row_a_unique_keeps() -> None:
+    """Rows with a NULL in a Unique's fields, or that its Condition does not keep,
+    are not compared."""
+    company = Company(id=CompanyId(1), name=Text("a"), parent=None)
+    named = [
+        Department(id=DepartmentId(index), name=Text(name), company_id=company.id)
+        for index, name in enumerate(["a", "a", "b", "dup", "dup"])
+    ]
+    unique = Unique(
+        name=ConstraintName("department_unique_name"),
+        fields=(FieldName("company_id"), FieldName("name")),
+        where=conditions.ne(conditions.field(FieldName("name")), Text("dup")),
+    )
+    config = Modules.config().model_copy(
+        update={"constraints": {Department: (unique,)}}
+    )
+
+    # A View, so that there is a module of View models.
+    view = View(name=ViewName("Departments"), source=Department, step=steps.pipeline())
+
+    with Database.of([view], (), config):
+        refused = Database.rejected([company, *named], Department, config)
+
+    assert refused == {DepartmentId(1)}

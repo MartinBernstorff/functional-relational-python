@@ -490,7 +490,7 @@ def _check_omit(
                 recovered=relation,
                 diagnostics=(
                     diagnostics.UnknownField(
-                        view=view,
+                        owner=view,
                         source=relation.source,
                         field=field,
                         valid=relation.field_names(),
@@ -507,7 +507,7 @@ def _check_rename(
     if node.field not in names:
         reported.append(
             diagnostics.UnknownField(
-                view=view, source=relation.source, field=node.field, valid=names
+                owner=view, source=relation.source, field=node.field, valid=names
             )
         )
     # Renaming a field to its own name changes nothing, so it is no defect.
@@ -607,7 +607,7 @@ def _check_retype(
             if field not in relation.field_names():
                 reported.append(
                     diagnostics.UnknownField(
-                        view=view,
+                        owner=view,
                         source=relation.source,
                         field=field,
                         valid=relation.field_names(),
@@ -641,7 +641,7 @@ def _check_project(
     kept = relation.keeping(node.fields)
     unknown = tuple(
         diagnostics.UnknownField(
-            view=view,
+            owner=view,
             source=relation.source,
             field=field,
             valid=relation.field_names(),
@@ -674,7 +674,7 @@ def _check_default(
             names = ()
             reported.append(
                 diagnostics.UnknownField(
-                    view=view,
+                    owner=view,
                     source=relation.source,
                     field=field,
                     valid=relation.field_names(),
@@ -741,7 +741,7 @@ def _check_where(
     checked.
     """
     match condition_checker.ConditionChecker(
-        view=view, relation=relation, subject=_subject(node).source
+        owner=view, relation=relation, subject=_subject(node).source
     ).check(node.condition):
         case condition_checker.Defects(diagnostics=reported):
             return Poisoned(recovered=relation, diagnostics=reported)
@@ -783,7 +783,7 @@ def _check_require(
             if field not in relation.field_names():
                 reported.append(
                     diagnostics.UnknownField(
-                        view=view,
+                        owner=view,
                         source=relation.source,
                         field=field,
                         valid=relation.field_names(),
@@ -1206,7 +1206,7 @@ def _check_flatten(
                 )
                 if name in relation.field_names()
                 else diagnostics.UnknownField(
-                    view=view,
+                    owner=view,
                     source=relation.source,
                     field=name,
                     valid=relation.field_names(),

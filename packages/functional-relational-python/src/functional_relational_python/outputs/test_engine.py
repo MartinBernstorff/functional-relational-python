@@ -802,7 +802,7 @@ def test_every_view_either_gives_results_or_reports_diagnostics(
             case compiler.PoisonedView(diagnostics=reported):
                 for diagnostic in reported:
                     event(f"diagnostic: {type(diagnostic).__name__}")
-                    assert diagnostic.view == view.name
+                    assert test_compiler.owner_of(diagnostic) == view.name
                     assert diagnostic.describe().root
     match compiler.compile_views(graph, case.views.views):
         case Ok(all_compiled):

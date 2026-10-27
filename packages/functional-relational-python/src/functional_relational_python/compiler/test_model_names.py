@@ -203,7 +203,7 @@ def test_a_compile_defect_and_an_invalid_view_name_are_reported_together() -> No
         case Err(error):
             assert error.diagnostics == (
                 diagnostics.UnknownField(
-                    view=defective.name,
+                    owner=defective.name,
                     source=ir.SourceName("Employee"),
                     field=unknown,
                     valid=tuple(map(FieldName, Employee.model_fields)),
@@ -218,7 +218,7 @@ def test_a_view_that_does_not_compile_still_reports_its_invalid_name() -> None:
 
     assert compiled_names(view) == (
         diagnostics.UnknownField(
-            view=view.name,
+            owner=view.name,
             source=ir.SourceName("Employee"),
             field=unknown,
             valid=tuple(map(FieldName, Employee.model_fields)),
