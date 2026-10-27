@@ -51,8 +51,9 @@ class Catalog(pydantic.BaseModel, frozen=True):
     It cannot be a module `layout` returns, a Django module, a module defining a
     Source or an Entity a View looks up, or a module named like a package other
     files are generated into (`app` when generating `app.views`). `django`
-    generates a Django model per Entity, and Django queries for each View over
-    an Entity, see `DjangoModels`. `id_base` is `IdBase(Id)`, or an application's
+    generates a Django model per Entity, but for one the application already has
+    a Django model for, and Django queries for each View over an Entity, see
+    `DjangoModels`. `id_base` is `IdBase(Id)`, or an application's
     own base, and `one_to_one_marker` is `OneToOneMarker(OneToOne)`, or an
     application's own marker, so that the Entity modules, and with them the
     generated code, do not need frp installed.

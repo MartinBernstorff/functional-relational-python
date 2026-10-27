@@ -12,7 +12,9 @@ up, and annotates each row with the name of the first Variant that keeps it;
 QuerySet with a method `as_<view>()` per View and Union over the Entity, and a
 Manager, which is the Entity's Django model's manager `objects`. The method yields
 View models from the QuerySet as filtered, ordered and sliced so far, so a list
-costs one query.
+costs one query. An Entity whose Django model the application already has, see
+`ExistingDjangoModel`, gets no QuerySet or Manager, since its model's manager is
+its own; its Views and Unions still get their two functions.
 
 The View's Filters apply before a slice the QuerySet has taken: `[:10]` gives the
 first ten rows the View keeps, not those of the first ten rows it keeps. A Filter
@@ -482,7 +484,10 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             ),
             enums=enums,
         )
-        entities = sorted(graph.entities, key=lambda entity: entity.__name__)
+        entities = sorted(
+            (entity for entity in graph.entities if config.generates(entity)),
+            key=lambda entity: entity.__name__,
+        )
         return DiagnosticsError.or_ok(
             (
                 *DjangoQueriesRenderer._modules(config, (*views, *unions), placed),
@@ -530,6 +535,20 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             *(symbol.module for symbol in self.enums.values()),
         )
 
+    def _django_model_modules(self) -> tuple[ModulePath, ...]:
+        """The modules of the Django models, generated and existing, imported only
+        for type checking."""
+        return ModulePath.ordered(
+            (
+                self.config.module,
+                *(
+                    existing.module
+                    for entity, existing in self.config.existing.items()
+                    if entity in self.graph.entities
+                ),
+            )
+        )
+
     def _clashes(
         self, entities: Sequence[type[pydantic.BaseModel]]
     ) -> Iterator[NameClash]:
@@ -561,7 +580,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                         f"{entity.__qualname__})"
                     ),
                 )
-        for imported in (*self._imports(), self.config.module):
+        for imported in (*self._imports(), *self._django_model_modules()):
             module.refer_to_module(imported)
         module.refer(
             DjangoQueriesRenderer.map_builtin, AnnotationText("the built-in map")
@@ -647,9 +666,14 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             "".join(f"import {module.root}\n" for module in section)
             for section in ModulePath.import_sections(self._imports())
         )
-        type_checking = (
-            f"\nif {DjangoQueriesRenderer.typing_module.root}.TYPE_CHECKING:\n"
-            f"    import {self.config.module.root}\n"
+        type_checking = "".join(
+            (
+                f"\nif {DjangoQueriesRenderer.typing_module.root}.TYPE_CHECKING:\n",
+                *(
+                    f"    import {module.root}\n"
+                    for module in self._django_model_modules()
+                ),
+            )
         )
         functions = "".join(
             f"\n\n{self._queryset_function(query).root}"
