@@ -1888,7 +1888,9 @@ class PlainBases:
         "    import frp_generated_django\n"
         "\n"
         "\n"
-        'class EmployeeQuerySetBase(models.QuerySet["frp_generated_django.Employee"]):\n'
+        "class EmployeeQuerySetBase(\n"
+        '    models.QuerySet["frp_generated_django.Employee"],\n'
+        "):\n"
         "    def newest_first(self) -> typing.Self:\n"
         '        return self.order_by("-pk")\n'
         "\n"
