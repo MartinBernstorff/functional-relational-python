@@ -77,6 +77,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
     Optionality,
 )
+from functional_relational_python.outputs.django import conditions
 from functional_relational_python.outputs.django.models import (
     DjangoModels,
     DjangoModelsRenderer,
@@ -103,7 +104,6 @@ from functional_relational_python.outputs.python.symbols import (
     ModulePath,
     PythonString,
     Symbol,
-    ValueExpression,
 )
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.unions import UnionName
@@ -437,6 +437,8 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     classes: Mapping[type, Symbol]
     """Every class the code refers to: the enum of a Filter's literal, and every
     class a field is read through."""
+    writer: conditions.ConditionWriter
+    """Writes the Filters of every View, once for all of them."""
 
     @staticmethod
     def related(lookup: ir.EntityLookup, config: DjangoModels) -> FieldName:
@@ -500,6 +502,17 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                 if union.source in graph.entities
             ),
             classes=classes,
+            writer=conditions.ConditionWriter(
+                columns=DjangoModelsRenderer.columns(
+                    graph, FieldTypes(overrides=config.field_types)
+                ),
+                models=Expression(DjangoQueriesRenderer.django_models.root),
+                enums={
+                    used: symbol.qualified()
+                    for used, symbol in classes.items()
+                    if issubclass(used, enum.Enum)
+                },
+            ),
         )
         entities = sorted(
             (entity for entity in graph.entities if config.generates(entity)),
@@ -750,14 +763,14 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
     def _queryset_function(self, query: ViewQueries) -> FileText:
         prepared = self._prepared(query)
         signature = DjangoQueriesRenderer._queryset_signature(query).root
-        conditions = self._conditions()
-        match conditions.of_view(query.view):
+        writer = self.writer
+        match DjangoQueriesRenderer._kept_by(writer, query.view):
             case _KeepsEvery():
                 return FileText(f"{signature}    return {prepared.root}\n")
             case condition:
                 pass
         kept = DjangoQueriesRenderer.kept_variable.root
-        added = DjangoQueriesRenderer._added(conditions.written(condition, Indent(8)))
+        added = DjangoQueriesRenderer._added(writer.written(condition, Indent(8)))
         return FileText(
             f"{signature}    {kept} = {prepared.root}\n{added.root}    return {kept}\n"
         )
@@ -775,12 +788,19 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         )
         return FileText(f"    {added.root}\n")
 
-    def _conditions(self) -> _ConditionWriter:
-        return _ConditionWriter(
-            graph=self.graph,
-            field_types=FieldTypes(overrides=self.config.field_types),
-            classes=self.classes,
-        )
+    @staticmethod
+    def _kept_by(
+        writer: conditions.ConditionWriter, view: compiler.CompiledView
+    ) -> conditions.Q | _KeepsEvery:
+        """True for the rows `view`'s Filters all keep, or `_KeepsEvery` when it
+        has none."""
+        match view.relation.filters:
+            case ():
+                return _KeepsEvery()
+            case (single,):
+                return writer.kept(single, view.source)
+            case filters:
+                return writer.kept(ir.FilterAnd(terms=filters), view.source)
 
     def _union_queryset_function(self, union: UnionQueries) -> FileText:
         """Annotates each row with the name of the first Variant whose Filters keep
@@ -788,14 +808,14 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         Variant may keep every row, the compiler checks, so it is the default."""
         kept = DjangoQueriesRenderer.kept_variable.root
         models = DjangoQueriesRenderer.django_models.root
-        conditions = self._conditions()
+        writer = self.writer
         cases: list[Expression] = []
         default: list[Expression] = []
         for leaf in union.leaves:
             name = Expression(
                 f"{models}.Value({PythonString(leaf.view.name.root).literal().root})"
             )
-            match conditions.of_view(leaf.view):
+            match DjangoQueriesRenderer._kept_by(writer, leaf.view):
                 case _KeepsEvery():
                     default.append(Expression(f"default={name.root}"))
                     break
@@ -805,7 +825,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                 Indent(12).exploded(
                     Expression(f"{models}.When("),
                     (
-                        conditions.written(condition, Indent(16)),
+                        writer.written(condition, Indent(16)),
                         Expression(f"then={name.root}"),
                     ),
                     Expression(")"),
@@ -825,20 +845,20 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             ),
             Expression(")"),
         )
-        named = _Lookup(
+        named = conditions.QLookup(
             entries=(
-                _Entry(
+                conditions.QEntry(
                     lookup=Expression(
                         f"{DjangoQueriesRenderer.variant_annotation.root}__isnull"
                     ),
-                    value=_Null.NOT_NULL.written(),
+                    value=conditions.NullTest.NOT_NULL.written(),
                 ),
             )
         )
         added = (
             ""
             if default
-            else DjangoQueriesRenderer._added(conditions.written(named, Indent(8))).root
+            else DjangoQueriesRenderer._added(writer.written(named, Indent(8))).root
         )
         return FileText(
             f"{DjangoQueriesRenderer._queryset_signature(union).root}"
@@ -1065,34 +1085,9 @@ class _ClassesUsed:
         """The enum of every Filter's enum literal, and the class every field is
         read through, nested ones included."""
         for kept in view.relation.filters:
-            for enum_class in _ClassesUsed._in_filter(kept):
+            for enum_class in conditions.ConditionWriter.enums_in(kept):
                 yield enum_class, None
         yield from _ClassesUsed._in_relation(view.relation, graph, field_types)
-
-    @staticmethod
-    def _in_filter(kept: ir.Filter) -> Iterator[type[enum.Enum]]:
-        match kept:
-            case ir.FilterComparison(operand=operand):
-                yield from _ClassesUsed._in_operand(operand)
-            case ir.FilterIsNull():
-                pass
-            case ir.FilterAnd(terms=terms) | ir.FilterOr(terms=terms):
-                for term in terms:
-                    yield from _ClassesUsed._in_filter(term)
-            case ir.FilterNot(term=term):
-                yield from _ClassesUsed._in_filter(term)
-
-    @staticmethod
-    def _in_operand(
-        operand: ir.SourceField | ir.FilterLiteral,
-    ) -> Iterator[type[enum.Enum]]:
-        match operand:
-            case ir.SourceField() | ir.ScalarLiteral():
-                pass
-            case ir.EnumLiteral(member=member):
-                yield type(member)
-            case ir.RootModelLiteral(root=root):
-                yield from _ClassesUsed._in_operand(root)
 
     @staticmethod
     def _in_relation(
@@ -1194,366 +1189,8 @@ class _ReadThrough:
                 return _ReadAsStored()
 
 
-class _Sense(enum.Enum):
-    """Whether a condition is written for the rows a Filter keeps, or for those
-    it excludes."""
-
-    KEPT = "kept"
-    EXCLUDED = "excluded"
-
-    def flipped(self) -> _Sense:
-        match self:
-            case _Sense.KEPT:
-                return _Sense.EXCLUDED
-            case _Sense.EXCLUDED:
-                return _Sense.KEPT
-
-
-class _Null(enum.Enum):
-    """What an `__isnull` lookup asks of a column."""
-
-    NULL = "null"
-    NOT_NULL = "not null"
-
-    def written(self) -> Expression:
-        match self:
-            case _Null.NULL:
-                return Expression("True")
-            case _Null.NOT_NULL:
-                return Expression("False")
-
-
-class _Entry(pydantic.BaseModel, frozen=True):
-    """A keyword argument of a `Q`, e.g. `nickname__isnull=True`."""
-
-    lookup: Expression
-    value: Expression
-
-
-class _Lookup(pydantic.BaseModel, frozen=True):
-    """`Q(<entries>)`: true where every entry is. A comparison in it is NULL in
-    SQL where a column it compares is NULL, and its negation may be too, or may
-    be true, depending on how Django negates it. So a negated one is only ever
-    combined with explicit `IS NULL` terms that decide the rows where its
-    columns are NULL: it is `and`-ed with their being not NULL, or `or`-ed with a
-    term true wherever one is NULL.
-
-    The explicit terms are needed: Django's own negation of `f == g` on two
-    nullable columns is true where both are NULL, and of `f == f` where `f` is,
-    but `None != None` is false."""
-
-    entries: tuple[_Entry, ...]
-
-
-class _Negated(pydantic.BaseModel, frozen=True):
-    """`~Q(<entries>)`."""
-
-    lookup: _Lookup
-
-
-class _AllOf(pydantic.BaseModel, frozen=True):
-    """`(<a> & <b> ...)`, at least two terms."""
-
-    terms: tuple[_Q, ...]
-
-    @staticmethod
-    def of(terms: Sequence[_Q]) -> _Q:
-        """The `and` of `terms`, nested `and`s flattened; one term is itself."""
-        flat = tuple(
-            inner
-            for term in terms
-            for inner in (term.terms if isinstance(term, _AllOf) else (term,))
-        )
-        return flat[0] if len(flat) == 1 else _AllOf(terms=flat)
-
-
-class _AnyOf(pydantic.BaseModel, frozen=True):
-    """`(<a> | <b> ...)`, at least two terms."""
-
-    terms: tuple[_Q, ...]
-
-    @staticmethod
-    def of(terms: Sequence[_Q]) -> _Q:
-        """The `or` of `terms`, nested `or`s flattened; one term is itself."""
-        flat = tuple(
-            inner
-            for term in terms
-            for inner in (term.terms if isinstance(term, _AnyOf) else (term,))
-        )
-        return flat[0] if len(flat) == 1 else _AnyOf(terms=flat)
-
-
-type _Q = _Lookup | _Negated | _AllOf | _AnyOf
-"""A condition on a Django model's rows, written with `Q` objects. True in SQL
-exactly where it is in Python: each NULL a comparison may give is either covered
-by an explicit `IS NULL` term or ends up false."""
-
-
 class _KeepsEvery(pydantic.BaseModel, frozen=True):
     """A View without Filters: it keeps every row."""
-
-
-class _ConditionWriter(pydantic.BaseModel, frozen=True):
-    """Writes Filters as `Q` conditions with Python's two-valued null semantics.
-
-    A Filter is written for the rows it keeps or for those it excludes, so that
-    no negation is left around a comparison that may be NULL: `not` flips which,
-    and turns an `and` into an `or` of the excluded terms, and vice versa. Each
-    comparison is then written with explicit `IS NULL` terms.
-    """
-
-    graph: EntityGraph
-    field_types: FieldTypes
-    classes: Mapping[type, Symbol]
-
-    def of_view(self, view: compiler.CompiledView) -> _Q | _KeepsEvery:
-        """True for the rows `view`'s Filters all keep, or `_KeepsEvery` when it
-        has none."""
-        match view.relation.filters:
-            case ():
-                return _KeepsEvery()
-            case (single,):
-                return self.kept(single, view.source)
-            case filters:
-                return self.kept(ir.FilterAnd(terms=filters), view.source)
-
-    def kept(self, kept: ir.Filter, subject: type[pydantic.BaseModel]) -> _Q:
-        """True for the rows of `subject`'s Django model `kept` keeps."""
-        return self._condition(kept, subject, _Sense.KEPT)
-
-    def _condition(
-        self, kept: ir.Filter, subject: type[pydantic.BaseModel], sense: _Sense
-    ) -> _Q:
-        match kept:
-            case ir.FilterIsNull(field=field):
-                match sense:
-                    case _Sense.KEPT:
-                        null = _Null.NULL
-                    case _Sense.EXCLUDED:
-                        null = _Null.NOT_NULL
-                return _Lookup(entries=(self._is_null(subject, field, null),))
-            case ir.FilterNot(term=term):
-                return self._condition(term, subject, sense.flipped())
-            case ir.FilterAnd(terms=terms) | ir.FilterOr(terms=terms):
-                written = [self._condition(term, subject, sense) for term in terms]
-                match kept, sense:
-                    case (ir.FilterAnd(), _Sense.KEPT) | (
-                        ir.FilterOr(),
-                        _Sense.EXCLUDED,
-                    ):
-                        return _AllOf.of(written)
-                    case _:
-                        return _AnyOf.of(written)
-            case ir.FilterComparison():
-                return self._comparison(kept, subject, sense)
-
-    def _comparison(
-        self,
-        compared: ir.FilterComparison,
-        subject: type[pydantic.BaseModel],
-        sense: _Sense,
-    ) -> _Q:
-        """`field <operator> operand`. `!=` is written as `==` the other way."""
-        left = compared.field
-        match compared.operand:
-            case ir.SourceField() as right:
-                value = Expression(
-                    f"{DjangoQueriesRenderer.django_models.root}.F("
-                    f"{PythonString(self._column(subject, right).root).literal().root})"
-                )
-                fields: tuple[ir.SourceField, ...] = (left, right)
-            case literal:
-                value = self._literal(literal)
-                fields = (left,)
-        column = self._column(subject, left).root
-        match compared.operator:
-            case ir.ComparisonOperator.EQ:
-                pass
-            case ir.ComparisonOperator.NE:
-                sense = sense.flipped()
-            case ordering:
-                suffix = _ConditionWriter._suffix(ordering).root
-                compares = _Lookup(
-                    entries=(
-                        _Entry(lookup=Expression(f"{column}__{suffix}"), value=value),
-                    )
-                )
-                return self._ordering(subject, compares, fields, sense)
-        equal = _Lookup(entries=(_Entry(lookup=Expression(column), value=value),))
-        return self._equality(subject, equal, fields, sense)
-
-    def _ordering(
-        self,
-        subject: type[pydantic.BaseModel],
-        compares: _Lookup,
-        fields: Sequence[ir.SourceField],
-        sense: _Sense,
-    ) -> _Q:
-        """`compares`, an ordering of `fields`. The compiler lets through only
-        fields that are never `None`, but a column may still be NULL, e.g. for
-        a RootModel of an optional type. SQL orders no NULL, so the ordering is
-        false there, and its negation true, explicitly, rather than NULL or
-        whatever Django's negation makes of it."""
-        nullable = tuple(
-            dict.fromkeys(
-                field
-                for field in fields
-                if self._optionality(subject, field) is Optionality.OPTIONAL
-            )
-        )
-        match sense:
-            case _Sense.KEPT:
-                return compares
-            case _Sense.EXCLUDED if not nullable:
-                return _Negated(lookup=compares)
-            case _Sense.EXCLUDED:
-                return _AnyOf.of(
-                    [
-                        _AllOf.of(
-                            [
-                                _Negated(lookup=compares),
-                                self._nulls(subject, nullable, ()),
-                            ]
-                        ),
-                        *(self._nulls(subject, (side,), (side,)) for side in nullable),
-                    ]
-                )
-
-    def _equality(
-        self,
-        subject: type[pydantic.BaseModel],
-        equal: _Lookup,
-        fields: Sequence[ir.SourceField],
-        sense: _Sense,
-    ) -> _Q:
-        """`equal`, which compares `fields` with each other or with a literal,
-        with Python's semantics where a field is NULL: `None == None` is true, so
-        a field also equals itself where it is NULL.
-
-        `fields` has a field twice when it is compared with itself."""
-        nullable = tuple(
-            field
-            for field in fields
-            if self._optionality(subject, field) is Optionality.OPTIONAL
-        )
-        distinct = tuple(dict.fromkeys(nullable))
-        every_side = len(fields) > 1 and len(nullable) == len(fields)
-        match sense:
-            case _Sense.KEPT:
-                if every_side:
-                    return _AnyOf.of([equal, self._nulls(subject, distinct, distinct)])
-                return equal
-            case _Sense.EXCLUDED:
-                # Both values and unequal, or one side `None` and the other not.
-                unequal = (
-                    _AllOf.of(
-                        [_Negated(lookup=equal), self._nulls(subject, distinct, ())]
-                    )
-                    if distinct
-                    else _Negated(lookup=equal)
-                )
-                one_null = (
-                    ()
-                    if len(distinct) < len(nullable)
-                    else tuple(
-                        self._nulls(subject, distinct, (side,)) for side in distinct
-                    )
-                )
-                return _AnyOf.of([unequal, *one_null])
-
-    def _nulls(
-        self,
-        subject: type[pydantic.BaseModel],
-        fields: Sequence[ir.SourceField],
-        null: Sequence[ir.SourceField],
-    ) -> _Lookup:
-        """True where each of `fields` is NULL if it is in `null`, else not."""
-        return _Lookup(
-            entries=tuple(
-                self._is_null(
-                    subject, field, _Null.NULL if field in null else _Null.NOT_NULL
-                )
-                for field in fields
-            )
-        )
-
-    def _is_null(
-        self, subject: type[pydantic.BaseModel], field: ir.SourceField, null: _Null
-    ) -> _Entry:
-        return _Entry(
-            lookup=Expression(f"{self._column(subject, field).root}__isnull"),
-            value=null.written(),
-        )
-
-    def _column(
-        self, subject: type[pydantic.BaseModel], field: ir.SourceField
-    ) -> FieldName:
-        """The attribute of `subject`'s Django model holding `field`."""
-        return DjangoModelsRenderer.attribute_of(
-            self.graph.entities[subject], field.field
-        )
-
-    def _optionality(
-        self, subject: type[pydantic.BaseModel], field: ir.SourceField
-    ) -> Optionality:
-        """Whether the column of `field` may be NULL."""
-        return DjangoModelsRenderer.column_optionality(
-            self.graph.entities[subject], field.field, self.field_types
-        )
-
-    @staticmethod
-    def _suffix(ordering: ir.ComparisonOperator) -> Expression:
-        match ordering:
-            case ir.ComparisonOperator.LT:
-                return Expression("lt")
-            case ir.ComparisonOperator.LE:
-                return Expression("lte")
-            case ir.ComparisonOperator.GT:
-                return Expression("gt")
-            case ir.ComparisonOperator.GE:
-                return Expression("gte")
-            case ir.ComparisonOperator.EQ | ir.ComparisonOperator.NE:
-                return Expression("exact")
-
-    def _literal(self, literal: ir.FilterLiteral) -> Expression:
-        """`literal` as Django stores it: a RootModel as its root, and an enum
-        member as its value."""
-        match literal:
-            case ir.ScalarLiteral(root=str() as text):
-                return Expression(PythonString(text).literal().root)
-            case ir.ScalarLiteral(root=value):
-                return Expression(repr(value))
-            case ir.EnumLiteral(member=member):
-                enum_class = self.classes[type(member)].qualified()
-                written = ValueExpression.of_enum_member(enum_class, member)
-                return Expression(f"{written.root}.value")
-            case ir.RootModelLiteral(root=root):
-                return self._literal(root)
-
-    def written(self, condition: _Q, indent: Indent) -> Expression:
-        """`condition` as an expression starting on a line at `indent`."""
-        models = DjangoQueriesRenderer.django_models.root
-        match condition:
-            case _Lookup(entries=entries):
-                return indent.exploded(
-                    Expression(f"{models}.Q("),
-                    (
-                        Expression(f"{entry.lookup.root}={entry.value.root}")
-                        for entry in entries
-                    ),
-                    Expression(")"),
-                )
-            case _Negated(lookup=lookup):
-                return Expression(f"~{self.written(lookup, indent).root}")
-            case _AllOf(terms=terms) | _AnyOf(terms=terms):
-                operator = "&" if isinstance(condition, _AllOf) else "|"
-                inner = indent.deeper()
-                lines = "".join(
-                    f"{inner.pad().root}{'' if index == 0 else f'{operator} '}"
-                    f"{self.written(term, inner).root}\n"
-                    for index, term in enumerate(terms)
-                )
-                return Expression(f"(\n{lines}{indent.pad().root})")
 
 
 class _RowReader(pydantic.BaseModel, frozen=True):

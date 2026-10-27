@@ -9,6 +9,11 @@ referenced Entity's model, `<entity>_by_<foreign key>`, e.g.
 follow it backwards. A many-to-one Reference has no reverse accessor, so several
 never clash.
 
+An Entity's constraints, see `pipeline.constraints`, are in its model's
+`Meta.constraints`, with a check per numeric bound its fields' types set, e.g.
+`campaign_lifetime_budget_gt` for `lifetime_budget: PositiveInt`. A Condition is
+written with the semantics it has in `where`, see `conditions`; so a row violates
+a Check exactly where the Check is false in Python.
 An Entity the application already has a Django model for, e.g. a hand-written
 `Company`, gets none: a Reference to it is a foreign key to that model, which
 the module imports. See `ExistingDjangoModel`.
@@ -24,13 +29,20 @@ import math
 import operator
 import typing
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 
+import annotated_types
 import pydantic
+from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
-from functional_relational_python.compiler import model_names
+from functional_relational_python.compiler import (
+    condition_checker,
+    diagnostics,
+    model_names,
+)
 from functional_relational_python.entity_graph.entity_graph import (
+    AnnotationMetadata,
     Cardinality,
     EntityGraph,
     EntityNode,
@@ -39,6 +51,8 @@ from functional_relational_python.entity_graph.entity_graph import (
     Reference,
     RuntimeAnnotation,
 )
+from functional_relational_python.outputs.django import conditions
+from functional_relational_python.outputs.python.mappings import Expression, Indent
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     LineLength,
@@ -46,6 +60,14 @@ from functional_relational_python.outputs.python.symbols import (
     Symbol,
     TypeExpression,
     ValueExpression,
+)
+from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline.constraints import (
+    Check,
+    Constraint,
+    ConstraintName,
+    EveryRow,
+    Unique,
 )
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
@@ -110,6 +132,31 @@ class DjangoField(pydantic.BaseModel, frozen=True):
         match self.field_class.qualname:
             case (name,) if DjangoField.is_in_models_module(self.field_class):
                 return name in DjangoField.auto_increment
+            case _:
+                return False
+
+    numeric: typing.ClassVar[frozenset[Identifier]] = frozenset(
+        map(
+            Identifier,
+            (
+                "BigIntegerField",
+                "IntegerField",
+                "SmallIntegerField",
+                "PositiveBigIntegerField",
+                "PositiveIntegerField",
+                "PositiveSmallIntegerField",
+                "FloatField",
+                "DecimalField",
+            ),
+        )
+    )
+
+    def is_numeric(self) -> bool:
+        """Whether this is one of Django's non-auto-incrementing numeric fields,
+        whose column compares with a number."""
+        match self.field_class.qualname:
+            case (name,) if DjangoField.is_in_models_module(self.field_class):
+                return name in DjangoField.numeric
             case _:
                 return False
 
@@ -259,6 +306,9 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
     `field_types` overrides the built-in rule for a type, see `FieldTypes`.
     `on_delete` sets what deleting the referenced Entity does, per Reference; a
     Reference not in it is `PROTECT`. `queries` holds a QuerySet and a Manager per
+    Entity, which its model's manager is, see `DjangoQueriesRenderer`.
+    `constraints` are each Entity's constraints, which its model's `Meta` lists
+    with those its field types imply, see `DjangoModelsRenderer`.
     Entity, which its model's manager is, see `DjangoQueriesRenderer`. `existing`
     names the Django model the application already has for an Entity, which then
     gets no generated model, QuerySet or Manager, see `ExistingDjangoModel`.
@@ -269,6 +319,7 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
     field_types: Mapping[RuntimeAnnotation, DjangoField]
     on_delete: Mapping[ReferenceKey, OnDelete]
     queries: ModulePath
+    constraints: Mapping[type[pydantic.BaseModel], Sequence[Constraint]]
     existing: Mapping[type[pydantic.BaseModel], ExistingDjangoModel]
 
     @staticmethod
@@ -279,6 +330,7 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
             field_types={},
             on_delete={},
             queries=ModulePath("app.queries"),
+            constraints={},
             existing={},
         )
 
@@ -629,12 +681,76 @@ class AutoIncrementOnNonPrimaryKey(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
+class ConstraintsForNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`DjangoModels.constraints` has constraints for a model that is not an
+    Entity, so no Django model holds them."""
+
+    model: type[pydantic.BaseModel]
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.model.__qualname__}: DjangoModels.constraints has constraints "
+            "for it, but it is not an Entity."
+        )
+
+
+class ConstraintsOnExistingModel(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`DjangoModels.constraints` has constraints for an Entity with an existing
+    Django model, which frp does not generate, so cannot add them to."""
+
+    entity: type[pydantic.BaseModel]
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}: DjangoModels.constraints has constraints "
+            "for it, but its Django model is an existing one, not generated."
+        )
+
+
+class ConstraintNameClash(pydantic.BaseModel, Diagnostic, frozen=True):
+    """Several constraints, declared or implied by a field's type, have one name.
+    The database needs each name once. `entities` have those constraints."""
+
+    name: ConstraintName
+    entities: tuple[type[pydantic.BaseModel], ...]
+
+    def describe(self) -> DiagnosticMessage:
+        entities = ", ".join(entity.__qualname__ for entity in self.entities)
+        return DiagnosticMessage(
+            f"Django models: several constraints are named '{self.name.root}', "
+            f"of {entities}."
+        )
+
+
+class UnimportableConstraintEnum(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A constraint's Condition compares with a member of an enum the Django
+    models module cannot import by its module and name."""
+
+    constraint: ConstraintName
+    enum_class: AnnotationText
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.constraint.root}: the Django models cannot import "
+            f"{self.enum_class.root}, which its condition compares with."
+        )
+
+
 type _DeclarationDiagnostic = (
     NoDjangoFieldRule
     | UnimportableDjangoChoices
     | UnwritableDjangoChoices
     | MixedDjangoChoiceTypes
     | AutoIncrementOnNonPrimaryKey
+)
+
+
+type _ConstraintDiagnostic = (
+    diagnostics.CompileDiagnostic
+    | ConstraintsForNonEntity
+    | ConstraintsOnExistingModel
+    | ConstraintNameClash
+    | UnimportableConstraintEnum
 )
 
 
@@ -656,6 +772,7 @@ type DjangoDiagnostic = (
     | DjangoModelNameClash
     | ReverseAccessorClash
     | InvalidReverseAccessorName
+    | _ConstraintDiagnostic
 )
 
 
@@ -1052,6 +1169,63 @@ class _Declaration(pydantic.BaseModel, frozen=True):
         )
 
 
+class _CheckedCheck(pydantic.BaseModel, frozen=True):
+    """A Check whose Condition holds up against its Entity."""
+
+    name: ConstraintName
+    kept: ir.Filter
+
+
+class _CheckedUnique(pydantic.BaseModel, frozen=True):
+    """A Unique over the Django model fields `fields`, whose Condition holds up
+    against its Entity."""
+
+    name: ConstraintName
+    fields: tuple[FieldName, ...]
+    where: ir.Filter | EveryRow
+
+
+class _ImpliedBound(pydantic.BaseModel, frozen=True):
+    """A bound a field's type sets, e.g. `Gt(0)`: the field, where not NULL,
+    is as `compared` says."""
+
+    name: ConstraintName
+    compared: ir.FilterComparison
+
+
+type _PlannedConstraint = _CheckedCheck | _CheckedUnique | _ImpliedBound
+
+
+class _BoundValue(pydantic.RootModel[int | float], frozen=True):
+    """A finite number a field's type bounds it by, as a plain `int` or `float`."""
+
+    def key(self) -> float:
+        """For ordering bounds."""
+        return self.root
+
+
+class _Bound(pydantic.BaseModel, frozen=True):
+    """A field's value, where not `None`, compares with `value` by `operator`."""
+
+    operator: ir.ComparisonOperator
+    value: _BoundValue
+
+
+class _ModelConstraints(pydantic.BaseModel, frozen=True):
+    """An Entity's constraints, and why some of those declared are defective."""
+
+    planned: tuple[_PlannedConstraint, ...]
+    diagnostics: tuple[_ConstraintDiagnostic, ...]
+
+
+class _ConstraintEnums(pydantic.BaseModel, frozen=True):
+    """The enums constraints refer to, each by how the module imports it, and
+    those it cannot import."""
+
+    symbols: Mapping[type[enum.Enum], Symbol]
+    diagnostics: tuple[UnimportableConstraintEnum, ...]
+
+
 class _PlannedModel(pydantic.BaseModel, frozen=True):
     """`manager` is the class of its manager `objects`."""
 
@@ -1059,6 +1233,7 @@ class _PlannedModel(pydantic.BaseModel, frozen=True):
     name: Identifier
     declarations: tuple[_Declaration, ...]
     manager: Symbol
+    constraints: tuple[_PlannedConstraint, ...]
 
 
 class DjangoModelsRenderer:
@@ -1113,6 +1288,7 @@ class DjangoModelsRenderer:
                     )
                 case Reference():
                     pass
+        reported.extend(DjangoModelsRenderer._misplaced_constraints(graph, config))
         for model, node in sorted(
             graph.entities.items(), key=lambda item: item[0].__name__
         ):
@@ -1143,14 +1319,22 @@ class DjangoModelsRenderer:
                     graph, config, model, declarations
                 )
             )
+            constraints = DjangoModelsRenderer._constraints(
+                model, node, config.constraints.get(model, ()), types
+            )
+            reported.extend(constraints.diagnostics)
             planned.append(
                 _PlannedModel(
                     entity=model,
                     name=Identifier(model.__name__),
                     declarations=tuple(declarations),
                     manager=config.manager_of(model),
+                    constraints=constraints.planned,
                 )
             )
+        reported.extend(DjangoModelsRenderer._constraint_name_clashes(planned))
+        enums = DjangoModelsRenderer._constraint_enums(planned)
+        reported.extend(enums.diagnostics)
         imports = frozenset(
             {
                 *(
@@ -1160,6 +1344,7 @@ class DjangoModelsRenderer:
                     for symbol in declaration.field.imports()
                 ),
                 *(model.manager for model in planned),
+                *(symbol.imported() for symbol in enums.symbols.values()),
                 *(
                     config.model_of(reference.target)
                     for model in planned
@@ -1185,7 +1370,19 @@ class DjangoModelsRenderer:
                     GeneratedFile(
                         path=config.module.file_path(),
                         text=DjangoModelsRenderer._module(
-                            config.app_label, planned, imports
+                            config.app_label,
+                            planned,
+                            imports,
+                            conditions.ConditionWriter(
+                                columns=DjangoModelsRenderer.columns(graph, types),
+                                models=Expression(
+                                    DjangoModelsRenderer.models_import.root
+                                ),
+                                enums={
+                                    used: symbol.reference()
+                                    for used, symbol in enums.symbols.items()
+                                },
+                            ),
                         ),
                     ),
                 )
@@ -1311,6 +1508,338 @@ class DjangoModelsRenderer:
                 return typed.optionality
             case Err():
                 return Optionality.OPTIONAL
+
+    @staticmethod
+    def columns(
+        graph: EntityGraph, field_types: FieldTypes
+    ) -> conditions.DjangoColumns:
+        """The column holding each field of each Entity."""
+        return conditions.DjangoColumns(
+            of_entity={
+                model: {
+                    field: conditions.DjangoColumn(
+                        attribute=DjangoModelsRenderer.attribute_of(node, field),
+                        optionality=DjangoModelsRenderer.column_optionality(
+                            node, field, field_types
+                        ),
+                    )
+                    for field in map(FieldName, model.model_fields)
+                }
+                for model, node in graph.entities.items()
+            }
+        )
+
+    @staticmethod
+    def _constraints(
+        model: type[pydantic.BaseModel],
+        node: EntityNode,
+        declared: Iterable[Constraint],
+        types: FieldTypes,
+    ) -> _ModelConstraints:
+        """The constraints `declared` for `model`, checked against it, then those
+        its fields' types imply."""
+        planned: list[_PlannedConstraint] = []
+        reported: list[_ConstraintDiagnostic] = []
+        relation = ir.Relation.of(ir.FromSource(source=model))
+        for constraint in declared:
+            checker = condition_checker.ConditionChecker(
+                owner=constraint.name, relation=relation, subject=model
+            )
+            match constraint:
+                case Check(condition=condition):
+                    match checker.check(condition):
+                        case condition_checker.Defects(diagnostics=defects):
+                            reported.extend(defects)
+                        case kept:
+                            planned.append(
+                                _CheckedCheck(name=constraint.name, kept=kept)
+                            )
+                case Unique(fields=fields, where=where):
+                    unknown = [
+                        diagnostics.UnknownField(
+                            owner=constraint.name,
+                            source=relation.source,
+                            field=field,
+                            valid=relation.field_names(),
+                        )
+                        for field in fields
+                        if field not in relation.field_names()
+                    ]
+                    match where:
+                        case EveryRow():
+                            checked: (
+                                ir.Filter | EveryRow | condition_checker.Defects
+                            ) = where
+                        case condition:
+                            checked = checker.check(condition)
+                    match checked:
+                        case condition_checker.Defects(diagnostics=defects):
+                            reported.extend((*unknown, *defects))
+                        case _ if unknown:
+                            reported.extend(unknown)
+                        case _:
+                            planned.append(
+                                _CheckedUnique(
+                                    name=constraint.name,
+                                    fields=tuple(
+                                        DjangoModelsRenderer._django_field_name(
+                                            node, field
+                                        )
+                                        for field in fields
+                                    ),
+                                    where=checked,
+                                )
+                            )
+        planned.extend(DjangoModelsRenderer._implied_bounds(model, node, types))
+        return _ModelConstraints(planned=tuple(planned), diagnostics=tuple(reported))
+
+    @staticmethod
+    def _implied_bounds(
+        model: type[pydantic.BaseModel], node: EntityNode, types: FieldTypes
+    ) -> Iterator[_ImpliedBound]:
+        """A Check per numeric bound on a field held in a numeric column, other
+        than the primary key and the References, e.g. `Gt(0)` of `PositiveInt`:
+        on the field, inside its `None`, or on a RootModel it is or wraps. A bound
+        applies where the field is not `None`, as a SQL check passes where the
+        column is NULL. Of several bounds by one operator, the tightest applies.
+
+        A bound that is not a finite `int` or `float`, e.g. a `Decimal` or a
+        `datetime`, implies none, nor do other metadata, e.g. `MinLen`.
+        """
+        snake = model_names.PascalCase(model.__name__).snake_case().root
+        references = {reference.field for reference in node.references}
+        for name, info in model.model_fields.items():
+            field = FieldName(name)
+            if field == EntityNode.primary_key or field in references:
+                continue
+            match types.field_of(info.annotation, FieldRole.PLAIN):
+                case Ok(typed) if typed.field.is_numeric():
+                    pass
+                case Ok() | Err():
+                    continue
+            tightest: dict[ir.ComparisonOperator, _BoundValue] = {}
+            for bound in DjangoModelsRenderer._numeric_bounds(info):
+                compared_by, value = bound.operator, bound.value
+                match compared_by, tightest.get(compared_by):
+                    case _, None:
+                        tightest[compared_by] = value
+                    case ir.ComparisonOperator.GT | ir.ComparisonOperator.GE, known:
+                        tightest[compared_by] = max(known, value, key=_BoundValue.key)
+                    case _, known:
+                        tightest[compared_by] = min(known, value, key=_BoundValue.key)
+            for compared_by, value in tightest.items():
+                suffix = conditions.ConditionWriter.suffix(compared_by).root
+                yield _ImpliedBound(
+                    name=ConstraintName(f"{snake}_{name}_{suffix}"),
+                    compared=ir.FilterComparison(
+                        operator=compared_by,
+                        field=ir.SourceField(field=field),
+                        operand=ir.ScalarLiteral(value.root),
+                    ),
+                )
+
+    @staticmethod
+    def _metadata(info: FieldInfo) -> Iterator[AnnotationMetadata]:
+        """The metadata of a field, inside its `None`, and of the `type` aliases,
+        `Annotated`s and RootModels it is or wraps, as far as `FieldTypes`
+        unwraps them. A recursive alias or RootModel is unwrapped once."""
+        yield from info.metadata
+        annotation = info.annotation
+        seen: set[RuntimeAnnotation] = set()
+        while True:
+            split = Optionality.of_annotation(annotation)
+            yield from split.metadata
+            annotation = split.required
+            if typing.get_origin(annotation) is typing.Annotated:
+                annotation, *metadata = typing.get_args(annotation)
+                yield from metadata
+                continue
+            if isinstance(annotation, typing.TypeAliasType):
+                if annotation in seen:
+                    return
+                seen.add(annotation)
+                annotation = annotation.__value__
+                continue
+            if (
+                not (
+                    isinstance(annotation, type)
+                    and issubclass(annotation, pydantic.RootModel)
+                )
+                or annotation in seen
+            ):
+                return
+            seen.add(annotation)
+            root = annotation.model_fields["root"]
+            yield from root.metadata
+            annotation = root.annotation
+
+    @staticmethod
+    def _numeric_bounds(
+        info: FieldInfo,
+    ) -> Iterator[_Bound]:
+        """The finite `int` and `float` bounds on a field, inside its `None`, or
+        on a RootModel it is or wraps, as plain `int`s and `float`s."""
+        for item in DjangoModelsRenderer._metadata(info):
+            for bound in (
+                item if isinstance(item, annotated_types.GroupedMetadata) else (item,)
+            ):
+                match bound:
+                    case annotated_types.Gt(gt=value):
+                        compared_by = ir.ComparisonOperator.GT
+                    case annotated_types.Ge(ge=value):
+                        compared_by = ir.ComparisonOperator.GE
+                    case annotated_types.Lt(lt=value):
+                        compared_by = ir.ComparisonOperator.LT
+                    case annotated_types.Le(le=value):
+                        compared_by = ir.ComparisonOperator.LE
+                    case _:
+                        continue
+                match value:
+                    case bool():
+                        pass
+                    case int():
+                        # A plain `int`, also of a subclass, e.g. an `IntEnum`,
+                        # whose own `repr` is no Python source.
+                        yield _Bound(
+                            operator=compared_by, value=_BoundValue(math.trunc(value))
+                        )
+                    case float() if math.isfinite(value):
+                        yield _Bound(
+                            operator=compared_by,
+                            value=_BoundValue(float.__float__(value)),
+                        )
+                    case _:
+                        pass
+
+    @staticmethod
+    def _misplaced_constraints(
+        graph: EntityGraph, config: DjangoModels
+    ) -> Iterator[ConstraintsForNonEntity | ConstraintsOnExistingModel]:
+        """Constraints for a model no generated Django model holds."""
+        for model in config.constraints:
+            if model not in graph.entities:
+                yield ConstraintsForNonEntity(model=model)
+            elif not config.generates(model):
+                yield ConstraintsOnExistingModel(entity=model)
+
+    @staticmethod
+    def _constraint_name_clashes(
+        planned: Iterable[_PlannedModel],
+    ) -> Iterator[ConstraintNameClash]:
+        by_name: dict[ConstraintName, list[type[pydantic.BaseModel]]] = {}
+        for model in planned:
+            for constraint in model.constraints:
+                by_name.setdefault(constraint.name, []).append(model.entity)
+        for name, entities in by_name.items():
+            if len(entities) > 1:
+                yield ConstraintNameClash(
+                    name=name, entities=tuple(dict.fromkeys(entities))
+                )
+
+    @staticmethod
+    def _django_field_name(node: EntityNode, field: FieldName) -> FieldName:
+        """The Django model field holding the Entity's `field`: the foreign key
+        for a Reference, else the field."""
+        if any(reference.field == field for reference in node.references):
+            return DjangoModelsRenderer.foreign_key_name(field)
+        return field
+
+    @staticmethod
+    def _constraint_enums(planned: Iterable[_PlannedModel]) -> _ConstraintEnums:
+        """The enums the written constraints refer to, each by how the module
+        imports it."""
+        symbols: dict[type[enum.Enum], Symbol] = {}
+        reported: list[UnimportableConstraintEnum] = []
+        for model in planned:
+            for constraint in model.constraints:
+                match constraint:
+                    case _CheckedCheck(kept=kept) | _CheckedUnique(where=kept) if (
+                        not isinstance(kept, EveryRow)
+                    ):
+                        used = conditions.ConditionWriter.enums_in(kept)
+                    case _CheckedCheck() | _CheckedUnique() | _ImpliedBound():
+                        used = iter(())
+                for enum_class in used:
+                    match Symbol.of(enum_class):
+                        case Ok(symbol):
+                            symbols[enum_class] = symbol
+                        case Err():
+                            reported.append(
+                                UnimportableConstraintEnum(
+                                    constraint=constraint.name,
+                                    enum_class=AnnotationText.of(enum_class),
+                                )
+                            )
+        return _ConstraintEnums(symbols=symbols, diagnostics=tuple(reported))
+
+    @staticmethod
+    def _constraints_option(
+        writer: conditions.ConditionWriter, model: _PlannedModel
+    ) -> FileText:
+        """The `constraints` line of the model's `Meta`, if it has any."""
+        if not model.constraints:
+            return FileText("")
+        listed = Indent(8).exploded(
+            Expression("constraints = ["),
+            (
+                DjangoModelsRenderer._constraint(writer, model.entity, constraint)
+                for constraint in model.constraints
+            ),
+            Expression("]"),
+        )
+        return FileText(f"        {listed.root}\n")
+
+    @staticmethod
+    def _constraint(
+        writer: conditions.ConditionWriter,
+        entity: type[pydantic.BaseModel],
+        constraint: _PlannedConstraint,
+    ) -> Expression:
+        """`constraint` as a Django constraint, on a line at the indentation of
+        an item of `Meta.constraints`.
+
+        A Check is written as the negation of the rows it excludes: SQL passes a
+        check that is NULL, and that is exactly NULL or false where the Check
+        holds, so a row violates it exactly where the Check is false in Python.
+        """
+        models = DjangoModelsRenderer.models_import.root
+        indent = Indent(12)
+        name = Expression(f"name={constraint.name.root!r}")
+        match constraint:
+            case _CheckedCheck(kept=kept):
+                excluded = writer.excluded(kept, entity)
+                condition = writer.written_negation(excluded, indent.deeper())
+                return indent.exploded(
+                    Expression(f"{models}.CheckConstraint("),
+                    (Expression(f"condition={condition.root}"), name),
+                    Expression(")"),
+                )
+            case _ImpliedBound(compared=compared):
+                # Written as the rows it keeps: an ordering keeps no NULL in
+                # Python, but SQL passes a check that is NULL, as a bound should.
+                condition = writer.written(
+                    writer.kept(compared, entity), indent.deeper()
+                )
+                return indent.exploded(
+                    Expression(f"{models}.CheckConstraint("),
+                    (Expression(f"condition={condition.root}"), name),
+                    Expression(")"),
+                )
+            case _CheckedUnique(fields=fields, where=where):
+                listed = ", ".join(repr(field.root) for field in fields)
+                match where:
+                    case EveryRow():
+                        kept: tuple[Expression, ...] = ()
+                    case filtered:
+                        written = writer.written(
+                            writer.kept(filtered, entity), indent.deeper()
+                        )
+                        kept = (Expression(f"condition={written.root}"),)
+                return indent.exploded(
+                    Expression(f"{models}.UniqueConstraint("),
+                    (Expression(f"fields=[{listed}]"), *kept, name),
+                    Expression(")"),
+                )
 
     @staticmethod
     def _existing_misconfigured(
@@ -1470,7 +1999,10 @@ class DjangoModelsRenderer:
 
     @staticmethod
     def _module(
-        app_label: AppLabel, planned: list[_PlannedModel], imports: frozenset[Symbol]
+        app_label: AppLabel,
+        planned: list[_PlannedModel],
+        imports: frozenset[Symbol],
+        writer: conditions.ConditionWriter,
     ) -> FileText:
         by_module: dict[ModulePath, set[Identifier]] = {}
         for symbol in imports:
@@ -1491,6 +2023,7 @@ class DjangoModelsRenderer:
             + "".join(declaration.line().root for declaration in model.declarations)
             + "\n    class Meta:\n"
             + f"        app_label = {app_label.root!r}\n"
+            + DjangoModelsRenderer._constraints_option(writer, model).root
             for model in planned
         )
         return FileText(

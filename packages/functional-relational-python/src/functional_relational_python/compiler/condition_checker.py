@@ -14,7 +14,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     SplitAnnotation,
 )
 from functional_relational_python.pipeline import ir
-from functional_relational_python.pipeline.payloads import DefinitionName
+from functional_relational_python.pipeline.constraints import ConditionOwner
 
 
 class Defects(pydantic.BaseModel, frozen=True):
@@ -72,10 +72,12 @@ type Checked = (
 class ConditionChecker(pydantic.BaseModel, frozen=True):
     """Checks a Condition against `relation`, the relation at its `where`.
 
-    Every defective term is reported, not only the first.
+    Every defective term is reported, not only the first. `owner` is what the
+    Condition belongs to: a View's or Payload's `where`, or a constraint, whose
+    relation is its Entity's.
     """
 
-    view: DefinitionName
+    owner: ConditionOwner
     relation: ir.Relation
     subject: type[pydantic.BaseModel]
 
@@ -142,11 +144,11 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
                 )
             case [_, *_]:
                 diagnostic = diagnostics.NotASourceColumn(
-                    view=self.view, source=self.relation.source, field=reference.name
+                    owner=self.owner, source=self.relation.source, field=reference.name
                 )
             case _:
                 diagnostic = diagnostics.UnknownField(
-                    view=self.view,
+                    owner=self.owner,
                     source=self.relation.source,
                     field=reference.name,
                     valid=self.relation.field_names(),
@@ -227,7 +229,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
                 return Defects(
                     diagnostics=(
                         diagnostics.ComparedTypesDiffer(
-                            view=self.view,
+                            owner=self.owner,
                             source=self.relation.source,
                             field=left.field.name,
                             annotation=left.annotation,
@@ -243,7 +245,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
                 return Defects(
                     diagnostics=(
                         diagnostics.NonLiteralConditionValue(
-                            view=self.view, value=diagnostics.LiteralText.of(value)
+                            owner=self.owner, value=diagnostics.LiteralText.of(value)
                         ),
                     )
                 )
@@ -257,7 +259,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
         self, column: _Column, value: ir.UncheckedLiteral
     ) -> diagnostics.LiteralTypeMismatch:
         return diagnostics.LiteralTypeMismatch(
-            view=self.view,
+            owner=self.owner,
             source=self.relation.source,
             field=column.field.name,
             annotation=column.annotation,
@@ -288,7 +290,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
             case Optionality.OPTIONAL:
                 reported.append(
                     diagnostics.OrderingOnOptionalField(
-                        view=self.view,
+                        owner=self.owner,
                         source=self.relation.source,
                         field=column.field.name,
                         operator=operator,
@@ -301,7 +303,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
         ):
             reported.append(
                 diagnostics.UnorderedFieldType(
-                    view=self.view,
+                    owner=self.owner,
                     source=self.relation.source,
                     field=column.field.name,
                     annotation=required,
