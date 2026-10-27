@@ -23,6 +23,7 @@ from functional_relational_python.compiler.diagnostics import UnknownField
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
+    Optionality,
     RuntimeAnnotation,
 )
 from functional_relational_python.entity_graph.id import (
@@ -31,6 +32,7 @@ from functional_relational_python.entity_graph.id import (
     OneToOne,
     OneToOneMarker,
 )
+from functional_relational_python.outputs.django.conditions import DjangoColumn
 from functional_relational_python.outputs.django.models import (
     AppLabel,
     AutoIncrementOnNonPrimaryKey,
@@ -59,6 +61,7 @@ from functional_relational_python.outputs.django.models import (
     ExistingModelInGeneratedModule,
     ExistingModelOfNonEntity,
     FieldDefault,
+    FieldTypes,
     ForeignKeyConstraint,
     IndexField,
     IndexName,
@@ -793,6 +796,35 @@ def test_a_primary_key_reference_django_cannot_key_by_is_a_diagnostic(
     )
 
     assert diagnostics([Company, Department, CompanyDetails], models) == (expected,)
+
+
+class UnruledId(Id[complex]):
+    """No Django field rule holds a `complex`."""
+
+
+class UnruledDetails(pydantic.BaseModel):
+    id: UnruledId
+    company_id: Annotated[CompanyId, OneToOne()]
+
+
+def test_the_id_of_a_reference_keyed_model_is_held_by_the_reference_column() -> None:
+    """The `id` needs no Django field rule, and its column is the Reference's,
+    which is never NULL."""
+    models = config({}, {}).model_copy(
+        update={
+            "entity_model_options": {UnruledDetails: keyed_by(FieldName("company_id"))}
+        }
+    )
+    graph = EntityGraph.build(
+        [Company, UnruledDetails], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+
+    _ = DjangoModelsRenderer.render(graph, models).unwrap()
+    assert DjangoModelsRenderer.columns(graph, models, FieldTypes(overrides={})).of(
+        UnruledDetails, FieldName("id")
+    ) == DjangoColumn(
+        attribute=FieldName("company_id"), optionality=Optionality.REQUIRED
+    )
 
 
 def test_a_catalog_wide_default_for_the_id_of_a_reference_keyed_model_is_left_out() -> (

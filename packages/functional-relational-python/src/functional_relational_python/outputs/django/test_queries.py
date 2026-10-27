@@ -1638,21 +1638,21 @@ def test_a_view_reads_through_a_related_name_like_the_engine(view: View) -> None
     assert rows == engine_rows([compiled], entities)[view.name]
 
 
-def badge_by_id() -> View:
-    """Filters on the `id` of a Badge keyed by its Employee."""
-    return View(
-        name=ViewName("NotTheFirstBadge"),
-        source=Badge,
-        step=steps.where(
-            conditions.not_(
-                conditions.eq(conditions.field(FieldName("id")), BadgeId(1))
-            )
-        ),
-    )
-
-
 @pytest.mark.parametrize(
-    "view", [*read_views(), badge_by_id()], ids=lambda view: view.name.root
+    "view",
+    [
+        *read_views(),
+        View(
+            name=ViewName("NotTheFirstBadge"),
+            source=Badge,
+            step=steps.where(
+                conditions.not_(
+                    conditions.eq(conditions.field(FieldName("id")), BadgeId(1))
+                )
+            ),
+        ),
+    ],
+    ids=lambda view: view.name.root,
 )
 def test_a_view_reads_a_model_keyed_by_its_reference_like_the_engine(
     view: View,

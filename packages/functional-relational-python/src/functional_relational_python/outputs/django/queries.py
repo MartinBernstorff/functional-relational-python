@@ -486,7 +486,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         for query in queries:
             for used, field in dict.fromkeys(
                 _ClassesUsed.by(
-                    query.view, graph, FieldTypes(overrides=config.field_types)
+                    query.view, graph, config, FieldTypes(overrides=config.field_types)
                 )
             ):
                 match Symbol.of(used):
@@ -1117,25 +1117,33 @@ class _ClassesUsed:
 
     @staticmethod
     def by(
-        view: compiler.CompiledView, graph: EntityGraph, field_types: FieldTypes
+        view: compiler.CompiledView,
+        graph: EntityGraph,
+        config: DjangoModels,
+        field_types: FieldTypes,
     ) -> Iterator[tuple[type, FieldName | None]]:
         """The enum of every Filter's enum literal, and the class every field is
         read through, nested ones included."""
         for kept in view.relation.filters:
             for enum_class in conditions.ConditionWriter.enums_in(kept):
                 yield enum_class, None
-        yield from _ClassesUsed._in_relation(view.relation, graph, field_types)
+        yield from _ClassesUsed._in_relation(view.relation, graph, config, field_types)
 
     @staticmethod
     def _in_relation(
-        relation: ir.Relation, graph: EntityGraph, field_types: FieldTypes
+        relation: ir.Relation,
+        graph: EntityGraph,
+        config: DjangoModels,
+        field_types: FieldTypes,
     ) -> Iterator[tuple[type, FieldName]]:
         for field in relation.fields:
             match field:
                 case ir.NestedField(relation=nested):
-                    yield from _ClassesUsed._in_relation(nested, graph, field_types)
+                    yield from _ClassesUsed._in_relation(
+                        nested, graph, config, field_types
+                    )
                 case ir.Field():
-                    match _ReadThrough.of(field, graph, field_types):
+                    match _ReadThrough.of(field, graph, config, field_types):
                         case (
                             _ThroughEnum(enum_class=through)
                             | _ThroughRootModel(root_model=through)
@@ -1180,13 +1188,16 @@ class _ReadThrough:
 
     @staticmethod
     def of(
-        field: ir.Field, graph: EntityGraph, field_types: FieldTypes
+        field: ir.Field,
+        graph: EntityGraph,
+        config: DjangoModels,
+        field_types: FieldTypes,
     ) -> _ThroughEnum | _ThroughRootModel | _ReadAsStored:
         match field.value:
             case ir.SourceField() | ir.RequiredField():
                 return _ReadThrough._literal_enum(field.annotation())
             case ir.Lifted() as lifted:
-                return _ReadThrough._wrapping_none(lifted, graph, field_types)
+                return _ReadThrough._wrapping_none(lifted, graph, config, field_types)
             case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() | ir.Added():
                 return _ReadAsStored()
 
@@ -1207,7 +1218,10 @@ class _ReadThrough:
 
     @staticmethod
     def _wrapping_none(
-        lifted: ir.Lifted, graph: EntityGraph, field_types: FieldTypes
+        lifted: ir.Lifted,
+        graph: EntityGraph,
+        config: DjangoModels,
+        field_types: FieldTypes,
     ) -> _ThroughRootModel | _ReadAsStored:
         match lifted.declared():
             case FieldInfo(annotation=annotation):
@@ -1215,7 +1229,10 @@ class _ReadThrough:
             case ir.Undeclared():
                 return _ReadAsStored()
         column = DjangoModelsRenderer.column_optionality(
-            graph.entities[lifted.through[-1].target], lifted.field.field, field_types
+            config,
+            graph.entities[lifted.through[-1].target],
+            lifted.field.field,
+            field_types,
         )
         match split.optionality, column, split.required:
             case Optionality.REQUIRED, Optionality.OPTIONAL, type() as root_model if (
@@ -1291,7 +1308,7 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                 )
             case ir.Field(value=value):
                 field_types = FieldTypes(overrides=self.config.field_types)
-                read_as = _ReadThrough.of(field, self.graph, field_types)
+                read_as = _ReadThrough.of(field, self.graph, self.config, field_types)
         row = reached.row()
         match value:
             case ir.SourceField() | ir.RequiredField():

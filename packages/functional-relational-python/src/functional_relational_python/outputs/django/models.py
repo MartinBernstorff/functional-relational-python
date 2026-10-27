@@ -454,6 +454,10 @@ class OwnPrimaryKey(pydantic.BaseModel, frozen=True):
     """The model's primary key is a column of its own, holding the Entity's
     `id`."""
 
+    @staticmethod
+    def fake() -> OwnPrimaryKey:
+        return OwnPrimaryKey()
+
 
 class ReferencePrimaryKey(pydantic.BaseModel, frozen=True):
     """The model's primary key is the foreign key of `reference`, a required
@@ -464,10 +468,16 @@ class ReferencePrimaryKey(pydantic.BaseModel, frozen=True):
     A query reads the `id` from the foreign key's column, so the `id` is the
     Reference's value, whichever value an Entity holds. Writes must keep them
     equal; frp checks neither that nor that the `id`'s type stores like the
-    Reference's.
+    Reference's. The model declares no `id`, so a base class declaring an `id`
+    primary key, e.g. an abstract model with a UUID `id`, would give it two;
+    give such an Entity bases of its own.
     """
 
     reference: FieldName
+
+    @staticmethod
+    def fake() -> ReferencePrimaryKey:
+        return ReferencePrimaryKey(reference=FieldName("company_id"))
 
 
 type PrimaryKey = OwnPrimaryKey | ReferencePrimaryKey
@@ -776,7 +786,8 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
     ) -> FieldName:
         """The field of `entity` whose column holds its `field`: for the `id` of
         a model keyed by a Reference, that Reference, else `field`."""
-        match self.options_of(entity).primary_key:
+        own = self.entity_model_options.get(entity, EntityModelOptions.inherited())
+        match own.primary_key:
             case ReferencePrimaryKey(reference=reference) if (
                 field == EntityNode.primary_key
             ):
@@ -2281,11 +2292,16 @@ class DjangoModelsRenderer:
 
     @staticmethod
     def column_optionality(
-        node: EntityNode, field: FieldName, field_types: FieldTypes
+        config: DjangoModels,
+        node: EntityNode,
+        field: FieldName,
+        field_types: FieldTypes,
     ) -> Optionality:
         """Whether the column holding the Entity's `field` may be NULL: an optional
-        Reference's, or one whose type, or a type it wraps, admits `None`. A field
-        without a Django field rule may be."""
+        Reference's, also for the `id` of a model keyed by it, or one whose type,
+        or a type it wraps, admits `None`. A field without a Django field rule may
+        be."""
+        field = config.column_field_of(node.model, field)
         for reference in node.references:
             if reference.field == field:
                 return reference.optionality
@@ -2309,7 +2325,7 @@ class DjangoModelsRenderer:
                             config, node, field
                         ),
                         optionality=DjangoModelsRenderer.column_optionality(
-                            node, field, field_types
+                            config, node, field, field_types
                         ),
                     )
                     for field in map(FieldName, model.model_fields)
