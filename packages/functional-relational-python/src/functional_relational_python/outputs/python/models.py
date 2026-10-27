@@ -18,6 +18,7 @@ from functional_relational_python.outputs.python.plan import (
     UnionPlan,
 )
 from functional_relational_python.outputs.python.symbols import (
+    ImportBlock,
     LineLength,
     ModulePath,
     PythonString,
@@ -30,7 +31,6 @@ from functional_relational_python.support.generated_files import (
     GeneratedFile,
     GeneratedFiles,
 )
-from functional_relational_python.support.identifier import Identifier
 
 
 class FieldDeclaration(pydantic.RootModel[str], frozen=True):
@@ -78,26 +78,21 @@ class ModelsRenderer:
         unions: Sequence[UnionPlan],
     ) -> FileText:
         """The classes of `models`, then the `type` statements of `unions`."""
-        imported: dict[ModulePath, set[Identifier]] = {}
-        for symbol in (
-            *(symbol for model in models for symbol in model.uses),
-            *(symbol for union in unions for symbol in union.uses()),
-        ):
-            if symbol.module.root != "builtins" and symbol.module != module:
-                imported.setdefault(symbol.module, set()).add(symbol.bound_name())
-
-        sections: list[list[str]] = []
-        for section in ModulePath.import_sections(imported):
-            lines: list[str] = []
-            for source in section:
-                names = sorted(name.root for name in imported[source])
-                line = f"from {source.root} import {', '.join(names)}"
-                if len(line) > LineLength.default().root:
-                    listed = "".join(f"    {name},\n" for name in names)
-                    line = f"from {source.root} import (\n{listed})"
-                lines.append(line)
-            sections.append(lines)
-        imports = "\n\n".join("\n".join(lines) for lines in sections)
+        imports = (
+            ImportBlock(
+                modules=frozenset(),
+                symbols=frozenset(
+                    symbol
+                    for symbol in (
+                        *(symbol for model in models for symbol in model.uses),
+                        *(symbol for union in unions for symbol in union.uses()),
+                    )
+                    if symbol.module.root != "builtins" and symbol.module != module
+                ),
+            )
+            .text()
+            .root
+        )
 
         classes = "\n\n".join(
             f"class {model.symbol.bound_name().root}({model.base.root}, frozen=True):\n"
@@ -113,7 +108,7 @@ class ModelsRenderer:
         )
         aliases = "".join(f"{ModelsRenderer._alias(union).root}\n" for union in unions)
         body = "\n\n".join(part for part in (classes, aliases) if part)
-        return FileText(f"{ModelsRenderer.header.root}\n{imports}\n\n\n{body}")
+        return FileText(f"{ModelsRenderer.header.root}\n{imports}\n\n{body}")
 
     @staticmethod
     def _alias(union: UnionPlan) -> AliasStatement:

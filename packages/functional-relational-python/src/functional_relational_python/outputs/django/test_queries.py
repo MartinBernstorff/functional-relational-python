@@ -57,6 +57,7 @@ from functional_relational_python.outputs.django.queries import (
     ViewModelIntoDjangoModelsModule,
     ViewModelIntoQueriesModule,
 )
+from functional_relational_python.outputs.python import test_symbols
 from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import (
     NameClash,
@@ -464,6 +465,7 @@ import typing
 
 import django.db.models
 import django.db.models.expressions
+
 import frp_generated_models
 
 if typing.TYPE_CHECKING:
@@ -2059,7 +2061,7 @@ def every_definition() -> tuple[list[View], list[Union]]:
     ],
     ids=["short", "long", "existing", "generic-bases", "plain-bases", "long-plain"],
 )
-def test_generated_queries_are_ruff_formatted(
+def test_generated_queries_are_ruff_formatted_and_sorted(
     config: DjangoModels, views: ModulePath
 ) -> None:
     compiled = compile_all(*every_definition())
@@ -2084,6 +2086,7 @@ def test_generated_queries_are_ruff_formatted(
     ).stdout
 
     assert formatted == file.text.root
+    assert test_symbols.ruff_import_diff(file.text) == FileText("")
 
 
 def render_diagnostics(

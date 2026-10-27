@@ -106,6 +106,7 @@ from functional_relational_python.outputs.python.plan import (
 )
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
+    ImportBlock,
     LineLength,
     ModulePath,
     PythonString,
@@ -709,16 +710,26 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         return (query for query in self._read() if query.entity() is entity)
 
     def _module(self, entities: Sequence[type[pydantic.BaseModel]]) -> FileText:
-        imports = "\n".join(
-            "".join(f"import {module.root}\n" for module in section)
-            for section in ModulePath.import_sections(self._imports())
+        imports = (
+            ImportBlock(modules=frozenset(self._imports()), symbols=frozenset())
+            .text()
+            .root
+        )
+        checked = (
+            ImportBlock(
+                modules=frozenset(self._django_model_modules()), symbols=frozenset()
+            )
+            .text()
+            .root
         )
         type_checking = "".join(
             (
                 f"\nif {DjangoQueriesRenderer.typing_module.root}.TYPE_CHECKING:\n",
+                # Only `import` statements, which are never split, so indenting
+                # each line keeps them as ruff writes them.
                 *(
-                    f"    import {module.root}\n"
-                    for module in self._django_model_modules()
+                    f"    {line}" if line != "\n" else line
+                    for line in checked.splitlines(keepends=True)
                 ),
             )
         )

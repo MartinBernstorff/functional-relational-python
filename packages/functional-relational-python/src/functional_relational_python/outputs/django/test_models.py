@@ -94,6 +94,7 @@ from functional_relational_python.outputs.django.models import (
     UnwritableDjangoChoices,
 )
 from functional_relational_python.outputs.django.queries import DjangoQueriesRenderer
+from functional_relational_python.outputs.python import test_symbols
 from functional_relational_python.outputs.python.plan import PlacedModels
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
@@ -345,9 +346,9 @@ def test_an_overridden_field_class_outside_django_is_imported() -> None:
     text = render([Thing], config({tuple[Text, ...]: money}, {})).root
 
     assert (
-        "\n\nfrom app.fields import MoneyField\n"
-        "from app.queries import ThingManager\n"
-        "from django.db import models\n\n\n"
+        "\n\nfrom django.db import models\n\n"
+        "from app.fields import MoneyField\n"
+        "from app.queries import ThingManager\n\n\n"
     ) in text
     assert "    tags = MoneyField()\n" in text
 
@@ -1019,8 +1020,9 @@ def test_golden_django_models() -> None:
         # Regenerate with `frp generate`; `frp check` fails when this is stale.
         # Migrations are yours to make, e.g. with `makemigrations`.
 
-        from app.queries import CompanyManager, DepartmentManager
         from django.db import models
+
+        from app.queries import CompanyManager, DepartmentManager
 
 
         class Company(models.Model):
@@ -1134,9 +1136,10 @@ def test_an_entity_with_an_existing_model_gets_none_and_is_imported() -> None:
         # Regenerate with `frp generate`; `frp check` fails when this is stale.
         # Migrations are yours to make, e.g. with `makemigrations`.
 
+        from django.db import models
+
         from app.queries import CompanyDetailsManager, DepartmentManager
         from crm.models import Company
-        from django.db import models
 
 
         class CompanyDetails(models.Model):
@@ -1799,9 +1802,10 @@ def test_golden_django_model_with_options() -> None:
         # Regenerate with `frp generate`; `frp check` fails when this is stale.
         # Migrations are yours to make, e.g. with `makemigrations`.
 
+        from django.db import models
+
         from app.base import Described, Stamped, following, registered
         from app.queries import CompanyManager, DepartmentManager, PersonManager
-        from django.db import models
 
 
         class Company(models.Model):
@@ -1908,7 +1912,7 @@ class Quoted(pydantic.BaseModel):
     [{}, {Person: person_options(), Department: uuid_default()}],
     ids=["django", "options"],
 )
-def test_generated_models_are_as_ruff_formats_them(
+def test_generated_models_are_as_ruff_formats_and_sorts_them(
     entity_model_options: Mapping[type[pydantic.BaseModel], EntityModelOptions],
 ) -> None:
     models = config(
@@ -1933,6 +1937,7 @@ def test_generated_models_are_as_ruff_formats_them(
     )
 
     assert [ruff_format_diff(text) for text in texts] == [FileText("")] * 3
+    assert [test_symbols.ruff_import_diff(text) for text in texts] == [FileText("")] * 3
 
 
 def ruff_format_diff(text: FileText) -> FileText:

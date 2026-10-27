@@ -38,6 +38,7 @@ from functional_relational_python.outputs.python.plan import (
     UnionFunctionPlan,
 )
 from functional_relational_python.outputs.python.symbols import (
+    ImportBlock,
     LineLength,
     ModulePath,
     PythonString,
@@ -381,13 +382,17 @@ class MappingsRenderer:
         """The mapping functions of `module`, and `_required` if they need it."""
         functions = plan.functions.get(module, ())
         union_functions = plan.union_functions.get(module, ())
-        imports = "\n".join(
-            "".join(f"import {imported.root}\n" for imported in section)
-            for section in ModulePath.import_sections(
-                imported
-                for function in (*functions, *union_functions)
-                for imported in function.imports()
+        imports = (
+            ImportBlock(
+                modules=frozenset(
+                    imported
+                    for function in (*functions, *union_functions)
+                    for imported in function.imports()
+                ),
+                symbols=frozenset(),
             )
+            .text()
+            .root
         )
         helper = (
             f"\n\n{MappingsRenderer.required_function().root}"

@@ -2,10 +2,14 @@
 it imports, and annotations as source text."""
 
 import enum
+import importlib.util
 import keyword
+import re
+import site
 import sys
+import sysconfig
 from collections.abc import Iterable
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 
 import pydantic
@@ -41,23 +45,6 @@ class ModulePath(pydantic.RootModel[str], frozen=True):
     def ordered(modules: Iterable[ModulePath]) -> tuple[ModulePath, ...]:
         """`modules` in module order, each once."""
         return tuple(sorted(set(modules), key=lambda module: module.root))
-
-    @staticmethod
-    def import_sections(
-        modules: Iterable[ModulePath],
-    ) -> tuple[tuple[ModulePath, ...], ...]:
-        """`modules` grouped like isort: the standard library, then the rest.
-
-        Each section is sorted, and an empty one is left out.
-        """
-        ordered = ModulePath.ordered(modules)
-        stdlib = tuple(
-            module
-            for module in ordered
-            if module.top_level().root in sys.stdlib_module_names
-        )
-        rest = tuple(module for module in ordered if module not in stdlib)
-        return tuple(section for section in (stdlib, rest) if section)
 
 
 class AnnotationText(pydantic.RootModel[str], frozen=True):
@@ -215,3 +202,173 @@ class LineLength(pydantic.RootModel[int], frozen=True):
     def default() -> LineLength:
         """ruff's default, so generated source reads like formatted code."""
         return LineLength(88)
+
+
+class ImportSection(enum.IntEnum):
+    """A section of import statements, in the order ruff's isort rules put them."""
+
+    STANDARD_LIBRARY = enum.auto()
+    THIRD_PARTY = enum.auto()
+    FIRST_PARTY = enum.auto()
+
+    @staticmethod
+    def of(module: ModulePath) -> ImportSection:
+        """The standard library by name; third party when the module is installed
+        into site-packages; first party otherwise, i.e. the project's own modules,
+        including generated ones that do not exist yet.
+
+        ruff decides what is first party from its configuration and the project's
+        source directories, which frp does not read. This agrees with it where a
+        project marks the packages it develops, e.g. editable workspace members,
+        as first party.
+        """
+        top = module.top_level().root
+        if top in sys.stdlib_module_names:
+            return ImportSection.STANDARD_LIBRARY
+        try:
+            spec = importlib.util.find_spec(top)
+        except ValueError:
+            # An imported module without a spec, e.g. `__main__`, is the project's.
+            return ImportSection.FIRST_PARTY
+        if spec is None:
+            return ImportSection.FIRST_PARTY
+        locations = (
+            *((spec.origin,) if spec.origin is not None else ()),
+            *(spec.submodule_search_locations or ()),
+        )
+        installed = {
+            Path(directory).resolve()
+            for directory in (
+                *site.getsitepackages(),
+                site.getusersitepackages(),
+                sysconfig.get_path("purelib"),
+                sysconfig.get_path("platlib"),
+            )
+        }
+        if any(
+            Path(location).resolve().is_relative_to(directory)
+            for location in locations
+            for directory in installed
+        ):
+            return ImportSection.THIRD_PARTY
+        return ImportSection.FIRST_PARTY
+
+
+class MemberKind(enum.IntEnum):
+    """What a name a `from` statement imports is, in the order ruff's isort rules
+    put the kinds."""
+
+    CONSTANT = enum.auto()
+    CLASS = enum.auto()
+    VARIABLE = enum.auto()
+
+    @staticmethod
+    def of(name: Identifier) -> MemberKind:
+        """A constant is in upper case and longer than one character, e.g.
+        `TYPE_CHECKING`; a class starts with an upper case letter, e.g. `X`."""
+        if len(name.root) > 1 and name.root.isupper():
+            return MemberKind.CONSTANT
+        if name.root[0].isupper():
+            return MemberKind.CLASS
+        return MemberKind.VARIABLE
+
+
+class SortName(pydantic.RootModel[tuple[tuple[str, int], ...]], frozen=True):
+    """A name as ruff's isort rules compare it: character by character, except
+    that runs of digits compare by value, so `v2` comes before `v10`.
+
+    A run of digits is keyed as `0`, the lowest digit, then its value: against
+    any other character it compares as a digit would.
+    """
+
+    @staticmethod
+    def of(name: pydantic.RootModel[str]) -> SortName:
+        return SortName(
+            tuple(
+                ("0", int(token)) if token.isdigit() else (token, 0)
+                for token in re.findall(r"\d+|\D", name.root)
+            )
+        )
+
+    @staticmethod
+    def ignoring_case(name: pydantic.RootModel[str]) -> SortName:
+        return SortName.of(pydantic.RootModel[str](name.root.lower()))
+
+    def __lt__(self, other: SortName) -> bool:
+        return self.root < other.root
+
+
+class ImportText(pydantic.RootModel[str], frozen=True):
+    """Import statements as generated source, each line ending in a newline."""
+
+
+class ImportBlock(pydantic.BaseModel, frozen=True):
+    """Import statements, written as ruff's isort rule (I001) with its default
+    settings writes them.
+
+    They are in a section each for the standard library, third party and first
+    party (see `ImportSection.of`), with a blank line between sections. In a
+    section, `import` statements come before `from` statements, each in module
+    order: by name ignoring case, then by name. A `from` statement's names are
+    constants, then classes, then the rest, each in the same order.
+    """
+
+    modules: frozenset[ModulePath]
+    """Imported by `import <module>`."""
+    symbols: frozenset[Symbol]
+    """Imported by `from <module> import <name>`, by their bound names."""
+
+    def text(self) -> ImportText:
+        """The statements; empty without any."""
+        sections = {
+            module: ImportSection.of(module)
+            for module in (*self.modules, *(symbol.module for symbol in self.symbols))
+        }
+        names: dict[ModulePath, set[Identifier]] = {}
+        for symbol in self.symbols:
+            names.setdefault(symbol.module, set()).add(symbol.bound_name())
+        texts: list[str] = []
+        for section in ImportSection:
+            straight = sorted(
+                (module for module in self.modules if sections[module] is section),
+                key=ImportBlock._module_key,
+            )
+            from_modules = sorted(
+                (module for module in names if sections[module] is section),
+                key=ImportBlock._module_key,
+            )
+            lines = (
+                *(f"import {module.root}\n" for module in straight),
+                *(
+                    ImportBlock._from_statement(module, names[module]).root
+                    for module in from_modules
+                ),
+            )
+            if lines:
+                texts.append("".join(lines))
+        return ImportText("\n".join(texts))
+
+    @staticmethod
+    def _from_statement(module: ModulePath, names: Iterable[Identifier]) -> ImportText:
+        """`from <module> import <names>`, split one name per line if it does not
+        fit."""
+        ordered = [
+            name.root
+            for name in sorted(
+                names,
+                key=lambda name: (
+                    MemberKind.of(name),
+                    SortName.ignoring_case(name),
+                    SortName.of(name),
+                ),
+            )
+        ]
+        line = f"from {module.root} import {', '.join(ordered)}"
+        if len(line) <= LineLength.default().root:
+            return ImportText(f"{line}\n")
+        listed = "".join(f"    {name},\n" for name in ordered)
+        return ImportText(f"from {module.root} import (\n{listed})\n")
+
+    @staticmethod
+    def _module_key(module: ModulePath) -> tuple[SortName, SortName]:
+        return (SortName.ignoring_case(module), SortName.of(module))

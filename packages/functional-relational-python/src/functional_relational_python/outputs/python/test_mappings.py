@@ -35,6 +35,7 @@ from functional_relational_python.entity_graph.id import (
     OneToOneMarker,
 )
 from functional_relational_python.outputs import engine
+from functional_relational_python.outputs.python import test_symbols
 from functional_relational_python.outputs.python.mappings import (
     Expression,
     Indent,
@@ -1509,6 +1510,8 @@ def test_golden_models_of_narrowed_views() -> None:
 
 from typing import Literal
 
+from pydantic import BaseModel
+
 from functional_relational_python.compiler.test_compiler import Score, Stage
 from functional_relational_python.outputs.python.test_mappings import (
     DepartmentId,
@@ -1516,7 +1519,6 @@ from functional_relational_python.outputs.python.test_mappings import (
     Text,
     WideId,
 )
-from pydantic import BaseModel
 
 
 class WideWon(BaseModel, frozen=True):
@@ -1731,8 +1733,11 @@ def employee_lifted_mentor(
     )
 
 
-def test_required_mapping_functions_are_as_ruff_formats_them() -> None:
-    assert ruff_format_diff(generated_mappings(required_views())) == FileText("")
+def test_required_mapping_functions_are_as_ruff_formats_and_sorts_them() -> None:
+    text = generated_mappings(required_views())
+
+    assert ruff_format_diff(text) == FileText("")
+    assert test_symbols.ruff_import_diff(text) == FileText("")
 
 
 @pytest.mark.parametrize(
