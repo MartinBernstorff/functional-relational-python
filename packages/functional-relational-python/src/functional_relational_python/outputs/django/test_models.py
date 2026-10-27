@@ -787,9 +787,11 @@ def test_a_model_named_by_its_options_is_referred_to_by_that_name() -> None:
         "\nclass DjangoCompanyDetails(models.Model):\n"
         "    objects = CompanyDetailsManager()\n"
         "    id = models.BigIntegerField(primary_key=True)\n"
-        "    company = models.OneToOneField('DjangoCompany', "
-        "on_delete=models.PROTECT, "
-        "related_name='django_company_details_by_company')\n"
+        "    company = models.OneToOneField(\n"
+        '        "DjangoCompany",\n'
+        "        on_delete=models.PROTECT,\n"
+        '        related_name="django_company_details_by_company",\n'
+        "    )\n"
     ) in text
     assert models.model_of(Company) == Symbol(
         module=models.module, qualname=(Identifier("DjangoCompany"),)
@@ -2436,7 +2438,7 @@ def test_an_implied_bound_is_named_after_the_model() -> None:
 
     text = render([Bounded], models).root
 
-    assert "name='django_bounded_positive_gt'" in text
+    assert 'name="django_bounded_positive_gt"' in text
 
 
 def test_a_bound_on_a_field_without_a_numeric_column_implies_no_constraint() -> None:
