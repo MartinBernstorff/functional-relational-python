@@ -28,6 +28,7 @@ from functional_relational_python.entity_graph.id import (
     OneToOneMarker,
 )
 from functional_relational_python.pipeline import conditions, ir, steps, test_ir
+from functional_relational_python.pipeline import selectors as sel
 from functional_relational_python.pipeline.constraints import ConditionOwner
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.unions import Union, UnionName
@@ -77,23 +78,23 @@ def diagnostics_of(views: list[View]) -> tuple[diagnostics.CompileDiagnostic, ..
 
 
 def test_omit_removes_the_field_from_the_source() -> None:
-    view = compile_one(steps.omit(FieldName("secret")))
+    view = compile_one(steps.omit("secret"))
 
     assert field_names(view) == names(Text("name"), Text("revenue"))
 
 
-def test_project_keeps_only_the_listed_fields_in_source_order() -> None:
-    view = compile_one(steps.project([FieldName("revenue"), FieldName("name")]))
+def test_pick_keeps_only_the_listed_fields_in_source_order() -> None:
+    view = compile_one(steps.pick(["revenue", "name"]))
 
     assert field_names(view) == names(Text("name"), Text("revenue"))
 
 
-def test_each_unknown_projected_field_is_a_diagnostic() -> None:
+def test_each_unknown_picked_field_is_a_diagnostic() -> None:
     unknown = [FieldName("revnue"), FieldName("nme")]
     view = View(
         name=ViewName.fake(),
         source=Company,
-        step=steps.project([FieldName("secret"), *unknown]),
+        step=steps.pick(["secret", *(field.root for field in unknown)]),
     )
 
     assert diagnostics_of([view]) == tuple(
@@ -107,14 +108,14 @@ def test_each_unknown_projected_field_is_a_diagnostic() -> None:
     )
 
 
-def test_steps_after_a_defective_project_are_checked_against_its_known_fields() -> None:
+def test_steps_after_a_defective_pick_are_checked_against_its_known_fields() -> None:
     unknown = FieldName("revnue")
     view = View(
         name=ViewName.fake(),
         source=Company,
         step=steps.pipeline(
-            steps.project([FieldName("name"), unknown]),
-            steps.omit(FieldName("secret")),
+            steps.pick(["name", unknown.root]),
+            steps.omit("secret"),
         ),
     )
 
@@ -137,16 +138,14 @@ def test_steps_after_a_defective_project_are_checked_against_its_known_fields() 
 @pytest.mark.parametrize(
     "step",
     [
+        steps.pipeline(steps.omit("secret"), steps.omit("revenue")),
         steps.pipeline(
-            steps.omit(FieldName("secret")), steps.omit(FieldName("revenue"))
+            steps.pipeline(steps.omit("secret")),
+            steps.omit("revenue"),
         ),
         steps.pipeline(
-            steps.pipeline(steps.omit(FieldName("secret"))),
-            steps.omit(FieldName("revenue")),
-        ),
-        steps.pipeline(
-            steps.omit(FieldName("secret")),
-            steps.pipeline(steps.pipeline(), steps.omit(FieldName("revenue"))),
+            steps.omit("secret"),
+            steps.pipeline(steps.pipeline(), steps.omit("revenue")),
         ),
     ],
     ids=["flat", "nested-first", "nested-last-with-empty"],
@@ -165,11 +164,9 @@ def test_an_empty_pipeline_keeps_every_field() -> None:
 
 def test_a_user_defined_step_composes_like_a_built_in_one() -> None:
     def without_financials(node: ir.Node) -> ir.Node:
-        return steps.omit(FieldName("revenue"))(node)
+        return steps.omit("revenue")(node)
 
-    view = compile_one(
-        steps.pipeline(without_financials, steps.omit(FieldName("secret")))
-    )
+    view = compile_one(steps.pipeline(without_financials, steps.omit("secret")))
 
     assert field_names(view) == names(Text("name"))
 
@@ -179,7 +176,7 @@ def test_an_unknown_field_names_the_source_the_field_and_the_valid_names() -> No
     view = View(
         name=ViewName.fake(),
         source=Company,
-        step=steps.pipeline(steps.omit(FieldName("secret")), steps.omit(unknown)),
+        step=steps.pipeline(steps.omit("secret"), steps.omit(unknown.root)),
     )
 
     assert diagnostics_of([view]) == (
@@ -223,15 +220,19 @@ def test_building_a_pipeline_checks_nothing() -> None:
     unknown = FieldName("does_not_exist")
     root = ir.FromSource(source=Company)
 
-    node = steps.pipeline(steps.omit(unknown), steps.rename(unknown, unknown))(root)
+    node = steps.pipeline(
+        steps.omit(unknown.root), steps.rename(unknown.root, unknown.root)
+    )(root)
 
     assert node == ir.Rename(
-        input=ir.Omit(input=root, fields=unknown), field=unknown, new=unknown
+        input=ir.Omit(input=root, fields=ir.Named(names=(unknown,))),
+        field=unknown,
+        new=unknown,
     )
 
 
 def test_rename_keeps_the_field_in_place_with_its_type() -> None:
-    view = compile_one(steps.rename(FieldName("secret"), FieldName("code")))
+    view = compile_one(steps.rename("secret", "code"))
 
     assert view.relation.fields == tuple(
         ir.Field(
@@ -249,7 +250,7 @@ def test_renaming_onto_an_existing_field_is_a_diagnostic() -> None:
     view = View(
         name=ViewName.fake(),
         source=Company,
-        step=steps.rename(FieldName("secret"), existing),
+        step=steps.rename("secret", existing.root),
     )
 
     assert diagnostics_of([view]) == (
@@ -264,7 +265,9 @@ def test_renaming_onto_an_existing_field_is_a_diagnostic() -> None:
 def test_renaming_a_field_to_its_own_name_changes_nothing() -> None:
     field = FieldName("secret")
 
-    view = compile_one(steps.pipeline(steps.rename(field, field), steps.omit(field)))
+    view = compile_one(
+        steps.pipeline(steps.rename(field.root, field.root), steps.omit(field.root))
+    )
 
     assert field_names(view) == names(Text("name"), Text("revenue"))
 
@@ -273,7 +276,7 @@ def test_a_renamed_field_can_be_omitted_by_its_new_name() -> None:
     new = FieldName("code")
 
     view = compile_one(
-        steps.pipeline(steps.rename(FieldName("secret"), new), steps.omit(new))
+        steps.pipeline(steps.rename("secret", new.root), steps.omit(new.root))
     )
 
     assert field_names(view) == names(Text("name"), Text("revenue"))
@@ -282,8 +285,8 @@ def test_a_renamed_field_can_be_omitted_by_its_new_name() -> None:
 @pytest.mark.parametrize(
     "later",
     [
-        steps.omit(FieldName("code")),
-        steps.rename(FieldName("code"), FieldName("other")),
+        steps.omit("code"),
+        steps.rename("code", "other"),
     ],
     ids=["omit", "rename"],
 )
@@ -294,7 +297,7 @@ def test_renaming_an_unknown_field_is_one_diagnostic_even_if_later_steps_use_it(
     view = View(
         name=ViewName.fake(),
         source=Company,
-        step=steps.pipeline(steps.rename(unknown, FieldName("code")), later),
+        step=steps.pipeline(steps.rename(unknown.root, "code"), later),
     )
 
     assert diagnostics_of([view]) == (
@@ -312,7 +315,7 @@ def test_renaming_an_unknown_field_onto_an_existing_one_reports_both() -> None:
     view = View(
         name=ViewName.fake(),
         source=Company,
-        step=steps.rename(unknown, FieldName("name")),
+        step=steps.rename(unknown.root, "name"),
     )
 
     assert diagnostics_of([view]) == (
@@ -357,6 +360,86 @@ def test_omit_with_a_select_that_selects_nothing_changes_nothing() -> None:
     view = compile_one(steps.omit(named(FieldName("does_not_exist"))))
 
     assert field_names(view) == names(*map(Text, Company.model_fields))
+
+
+def is_secret(field: ir.RelationField) -> bool:
+    return field.name == FieldName("secret")
+
+
+@pytest.mark.parametrize(
+    "fields",
+    ["secret", ["secret"], sel.matching(is_secret)],
+    ids=["name", "names", "selector"],
+)
+def test_omit_takes_a_name_several_names_or_a_selector(fields: steps.Fields) -> None:
+    view = compile_one(steps.omit(fields))
+
+    assert field_names(view) == names(Text("name"), Text("revenue"))
+
+
+@pytest.mark.parametrize(
+    "fields",
+    ["secret", ["secret"], sel.matching(is_secret)],
+    ids=["name", "names", "selector"],
+)
+def test_pick_takes_a_name_several_names_or_a_selector(fields: steps.Fields) -> None:
+    view = compile_one(steps.pick(fields))
+
+    assert field_names(view) == names(Text("secret"))
+
+
+def test_all_fields_selects_every_field() -> None:
+    view = compile_one(steps.pick(sel.all_fields()))
+
+    assert field_names(view) == names(*map(Text, Company.model_fields))
+
+
+def default_to_none(fields: steps.Fields) -> steps.Step:
+    return steps.default(fields, None)
+
+
+def rename_prefixed(fields: steps.Fields) -> steps.Step:
+    return steps.rename(fields, prefixed(Text("renamed")))
+
+
+@pytest.mark.parametrize(
+    "make_step",
+    [
+        steps.omit,
+        steps.pick,
+        steps.non_nullable,
+        steps.flatten,
+        steps.resolve,
+        default_to_none,
+        rename_prefixed,
+    ],
+    ids=["omit", "pick", "non_nullable", "flatten", "resolve", "default", "rename"],
+)
+def test_each_unknown_name_in_a_list_is_a_diagnostic(
+    make_step: Callable[[steps.Fields], steps.Step],
+) -> None:
+    unknown = [FieldName("revnue"), FieldName("nme")]
+    view = View(
+        name=ViewName.fake(),
+        source=Company,
+        step=make_step([field.root for field in unknown]),
+    )
+
+    assert diagnostics_of([view]) == tuple(
+        diagnostics.UnknownField(
+            owner=view.name,
+            source=ir.SourceName("Company"),
+            field=field,
+            valid=tuple(map(FieldName, Company.model_fields)),
+        )
+        for field in unknown
+    )
+
+
+def test_rename_with_names_renames_each_named_field_in_place() -> None:
+    view = compile_one(steps.rename(["secret"], prefixed(Text("old"))))
+
+    assert field_names(view) == names(Text("name"), Text("old_secret"), Text("revenue"))
 
 
 def test_rename_with_a_select_renames_each_selected_field_in_place() -> None:
@@ -432,7 +515,7 @@ def test_renaming_two_selected_fields_onto_one_name_reports_the_second() -> None
                 named(FieldName("secret"), FieldName("revenue")), lambda _field: new
             ),
             # The first renamed field keeps the name, so a later step finds it.
-            steps.omit(new),
+            steps.omit(new.root),
         ),
     )
 
@@ -507,7 +590,7 @@ def test_default_sets_a_literal_as_the_named_fields_default(
 ) -> None:
     field = FieldName("secret")
 
-    view = compile_one(steps.default(field, value))
+    view = compile_one(steps.default(field.root, value))
 
     assert defaults(view) == {field: default}
 
@@ -525,9 +608,9 @@ def test_a_later_default_replaces_an_earlier_one_and_a_rename_keeps_it() -> None
 
     view = compile_one(
         steps.pipeline(
-            steps.default(old, None),
-            steps.default(old, "redacted"),
-            steps.rename(old, new),
+            steps.default(old.root, None),
+            steps.default(old.root, "redacted"),
+            steps.rename(old.root, new.root),
         )
     )
 
@@ -574,7 +657,7 @@ def test_a_default_that_is_not_a_literal_is_a_diagnostic(
     view = View(
         name=ViewName.fake(),
         source=Company,
-        step=steps.default(FieldName("secret"), value),
+        step=steps.default("secret", value),
     )
 
     assert diagnostics_of([view]) == (
@@ -587,7 +670,7 @@ def test_a_default_that_is_not_a_literal_is_a_diagnostic(
 def test_a_default_for_an_unknown_field_that_is_not_a_literal_reports_both() -> None:
     unknown, value = FieldName("revnue"), object()
     view = View(
-        name=ViewName.fake(), source=Company, step=steps.default(unknown, value)
+        name=ViewName.fake(), source=Company, step=steps.default(unknown.root, value)
     )
 
     assert diagnostics_of([view]) == (
@@ -616,9 +699,11 @@ def test_building_a_default_checks_nothing() -> None:
     root = ir.FromSource(source=Company)
     unknown, value = FieldName("does_not_exist"), object()
 
-    node = steps.default(unknown, value)(root)
+    node = steps.default(unknown.root, value)(root)
 
-    assert node == ir.Default(input=root, fields=unknown, value=value)
+    assert node == ir.Default(
+        input=root, fields=ir.Named(names=(unknown,)), value=value
+    )
 
 
 class AddedField(pydantic.BaseModel, frozen=True):
@@ -648,7 +733,7 @@ class AddedField(pydantic.BaseModel, frozen=True):
 def test_add_appends_a_field_with_no_value_from_the_source() -> None:
     kind = FieldName("kind")
 
-    view = compile_one(steps.add(kind, Literal["company"], default="company"))
+    view = compile_one(steps.add(kind.root, Literal["company"], default="company"))
 
     assert field_names(view) == [*map(FieldName, Company.model_fields), kind]
     assert AddedField.of(view.relation.fields[-1]) == AddedField(
@@ -664,7 +749,8 @@ def test_a_later_default_replaces_an_added_fields_default() -> None:
 
     view = compile_one(
         steps.pipeline(
-            steps.add(kind, str | None, default="company"), steps.default(kind, None)
+            steps.add(kind.root, str | None, default="company"),
+            steps.default(kind.root, None),
         )
     )
 
@@ -674,7 +760,9 @@ def test_a_later_default_replaces_an_added_fields_default() -> None:
 def test_a_view_that_adds_a_field_without_a_default_is_a_diagnostic() -> None:
     kind = FieldName("kind")
     view = View(
-        name=ViewName.fake(), source=Company, step=steps.add(kind, Literal["company"])
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.add(kind.root, Literal["company"]),
     )
 
     assert diagnostics_of([view]) == (
@@ -685,7 +773,7 @@ def test_a_view_that_adds_a_field_without_a_default_is_a_diagnostic() -> None:
 def test_a_payload_may_add_a_field_without_a_default() -> None:
     kind = FieldName("kind")
     payload = Payload(
-        name=PayloadName.fake(), source=Company, step=steps.add(kind, Literal["a"])
+        name=PayloadName.fake(), source=Company, step=steps.add(kind.root, Literal["a"])
     )
 
     (compiled,) = compile_catalog([], [payload]).unwrap().payloads
@@ -698,7 +786,9 @@ def test_a_payload_may_add_a_field_without_a_default() -> None:
 def test_adding_a_field_the_relation_already_has_is_a_diagnostic() -> None:
     existing = FieldName("name")
     view = View(
-        name=ViewName.fake(), source=Company, step=steps.add(existing, str, default="")
+        name=ViewName.fake(),
+        source=Company,
+        step=steps.add(existing.root, str, default=""),
     )
 
     assert diagnostics_of([view]) == (
@@ -712,7 +802,7 @@ def test_steps_after_a_defective_add_find_the_added_field() -> None:
         name=ViewName.fake(),
         source=Company,
         step=steps.pipeline(
-            steps.add(kind, str, default=value), steps.rename(kind, FieldName("tag"))
+            steps.add(kind.root, str, default=value), steps.rename(kind.root, "tag")
         ),
     )
 
@@ -738,7 +828,7 @@ def test_building_an_add_checks_nothing() -> None:
     root = ir.FromSource(source=Company)
     existing, value = FieldName("name"), object()
 
-    node = steps.add(existing, str, default=value)(root)
+    node = steps.add(existing.root, str, default=value)(root)
 
     match node:
         case ir.Add(input=input_node, name=name, info=info, default=default):
@@ -793,7 +883,7 @@ def views_with_defects(draw: st.DrawFn) -> ViewsWithDefects:
             View(
                 name=name,
                 source=source,
-                step=steps.pipeline(*(steps.omit(FieldName(f)) for f in omits)),
+                step=steps.pipeline(*(steps.omit(f) for f in omits)),
             )
         )
     return ViewsWithDefects(
@@ -866,7 +956,7 @@ def projections(draw: st.DrawFn) -> Projection:
 
 
 @given(projections())
-def test_project_equals_omitting_every_other_field(case: Projection) -> None:
+def test_pick_equals_omitting_every_other_field(case: Projection) -> None:
     def compile_relation(step: steps.Step) -> ir.Relation:
         view = View(name=ViewName.fake(), source=case.source, step=step)
         match compiler.compile_views(empty_graph(), [view]):
@@ -881,9 +971,9 @@ def test_project_equals_omitting_every_other_field(case: Projection) -> None:
         if FieldName(name) not in case.kept
     ]
 
-    assert compile_relation(steps.project(case.kept)) == compile_relation(
-        steps.pipeline(*map(steps.omit, others))
-    )
+    assert compile_relation(
+        steps.pick([field.root for field in case.kept])
+    ) == compile_relation(steps.pipeline(*(steps.omit(field.root) for field in others)))
 
 
 # Resolving References against `hr_graph()`.
@@ -934,7 +1024,7 @@ def hr_graph() -> EntityGraph:
 
 
 def named(*fields: FieldName) -> ir.Select:
-    return steps.select(lambda field: field.name in fields)
+    return sel.matching(lambda field: field.name in fields)
 
 
 def is_lifted_reference(
@@ -1041,7 +1131,7 @@ def test_a_reference_without_the_id_suffix_keeps_its_name() -> None:
     view = compile_resolving(
         Employee,
         steps.pipeline(
-            steps.rename(FieldName("department_id"), FieldName("team")),
+            steps.rename("department_id", "team"),
             steps.resolve(named(FieldName("team"))),
         ),
     )
@@ -1062,14 +1152,35 @@ def test_resolve_leaves_unselected_references_alone() -> None:
     )
 
 
+@pytest.mark.parametrize("fields", ["mentor_id", ["mentor_id"]], ids=["name", "names"])
+def test_resolve_takes_names(fields: steps.Fields) -> None:
+    view = compile_resolving(Employee, steps.resolve(fields))
+
+    assert field_names(view) == names(
+        Text("id"), Text("name"), Text("department_id"), Text("mentor")
+    )
+
+
+def test_optional_selects_the_fields_whose_type_admits_none() -> None:
+    view = compile_resolving(Employee, steps.pick(sel.optional()))
+
+    assert field_names(view) == names(Text("mentor_id"))
+
+
+def test_references_selects_the_references_for_any_step() -> None:
+    view = compile_resolving(Employee, steps.omit(sel.references()))
+
+    assert field_names(view) == names(Text("id"), Text("name"))
+
+
 @pytest.mark.parametrize(
-    "then", [(), (steps.project([FieldName("name")]),)], ids=["entity", "nested"]
+    "then", [(), (steps.pick(["name"]),)], ids=["entity", "nested"]
 )
 def test_a_resolved_reference_loses_its_default(then: tuple[steps.Step, ...]) -> None:
     view = compile_resolving(
         Employee,
         steps.pipeline(
-            steps.default(FieldName("mentor_id"), None),
+            steps.default("mentor_id", None),
             steps.resolve(named(FieldName("mentor_id")), *then),
         ),
     )
@@ -1091,8 +1202,8 @@ def test_hydrate_leaves_a_renamed_primary_key_alone() -> None:
     view = compile_resolving(
         Employee,
         steps.pipeline(
-            steps.project([FieldName("id"), FieldName("department_id")]),
-            steps.rename(FieldName("id"), FieldName("key")),
+            steps.pick(["id", "department_id"]),
+            steps.rename("id", "key"),
             steps.hydrate(),
         ),
     )
@@ -1107,8 +1218,8 @@ def test_hydrate_resolves_a_reference_renamed_to_id() -> None:
     view = compile_resolving(
         Employee,
         steps.pipeline(
-            steps.project([FieldName("department_id")]),
-            steps.rename(FieldName("department_id"), FieldName("id")),
+            steps.pick(["department_id"]),
+            steps.rename("department_id", "id"),
             steps.hydrate(),
         ),
     )
@@ -1119,9 +1230,7 @@ def test_hydrate_resolves_a_reference_renamed_to_id() -> None:
 def test_a_nested_pipeline_types_the_field_by_its_relation() -> None:
     view = compile_resolving(
         Employee,
-        steps.resolve(
-            named(FieldName("mentor_id")), steps.omit(FieldName("mentor_id"))
-        ),
+        steps.resolve(named(FieldName("mentor_id")), steps.omit("mentor_id")),
     )
 
     match view.relation.fields[-1]:
@@ -1187,9 +1296,7 @@ def test_a_reference_to_no_entity_is_a_diagnostic_and_others_still_resolve() -> 
             View(
                 name=ViewName.fake(),
                 source=Memo,
-                step=steps.pipeline(
-                    steps.hydrate(), steps.omit(FieldName("department"))
-                ),
+                step=steps.pipeline(steps.hydrate(), steps.omit("department")),
             )
         ],
     ):
@@ -1210,7 +1317,8 @@ def test_a_defect_in_a_nested_pipeline_names_the_referenced_entity() -> None:
     unknown = FieldName("budget")
 
     assert resolve_diagnostics(
-        Employee, steps.resolve(named(FieldName("department_id")), steps.omit(unknown))
+        Employee,
+        steps.resolve(named(FieldName("department_id")), steps.omit(unknown.root)),
     ) == (
         diagnostics.UnknownField(
             owner=ViewName.fake(),
@@ -1400,8 +1508,8 @@ def test_flattening_a_reversed_entity_lifts_its_fields_as_optional() -> None:
     view = compile_reversing(
         ChannelCampaign,
         steps.pipeline(
-            steps.reverse(MetaCampaign, steps.project([FieldName("ad_account")])),
-            steps.flatten(FieldName("meta_campaign")),
+            steps.reverse(MetaCampaign, steps.pick(["ad_account"])),
+            steps.flatten("meta_campaign"),
         ),
     )
 
@@ -1426,7 +1534,7 @@ def test_flattening_a_reversed_entity_lifts_its_fields_as_optional() -> None:
 def test_a_reversed_nested_pipeline_types_the_field_by_its_relation() -> None:
     view = compile_reversing(
         ChannelCampaign,
-        steps.reverse(MetaCampaign, steps.omit(FieldName("channel_campaign_id"))),
+        steps.reverse(MetaCampaign, steps.omit("channel_campaign_id")),
     )
 
     match view.relation.fields[-1]:
@@ -1443,7 +1551,7 @@ def test_a_reversed_nested_pipeline_types_the_field_by_its_relation() -> None:
 
 def test_reverse_via_follows_the_chosen_one_to_one_reference() -> None:
     view = compile_reversing(
-        ChannelCampaign, steps.reverse_via(Relaunch, FieldName("new_campaign_id"))
+        ChannelCampaign, steps.reverse_via(Relaunch, "new_campaign_id")
     )
 
     assert values(view)[FieldName("relaunch")] == ir.ReverseLookup(
@@ -1459,7 +1567,7 @@ def test_reverse_in_a_nested_pipeline_starts_from_the_resolved_entity() -> None:
         MetaCampaign,
         steps.resolve(
             named(FieldName("channel_campaign_id")),
-            steps.reverse_via(Relaunch, FieldName("old_campaign_id")),
+            steps.reverse_via(Relaunch, "old_campaign_id"),
         ),
     )
 
@@ -1478,7 +1586,7 @@ def test_reverse_in_a_nested_pipeline_starts_from_the_resolved_entity() -> None:
 def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
     view = compile_reversing(
         ChannelCampaign,
-        steps.pipeline(steps.omit(FieldName("id")), steps.reverse(MetaCampaign)),
+        steps.pipeline(steps.omit("id"), steps.reverse(MetaCampaign)),
     )
 
     assert values(view) == {
@@ -1542,7 +1650,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
         ),
         (
             ChannelCampaign,
-            steps.reverse_via(CampaignNote, FieldName("campaign_id")),
+            steps.reverse_via(CampaignNote, "campaign_id"),
             diagnostics.NotAOneToOneReference(
                 view=ViewName.fake(),
                 source=ir.SourceName("ChannelCampaign"),
@@ -1553,7 +1661,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
         ),
         (
             ChannelCampaign,
-            steps.reverse_via(Relaunch, FieldName("id")),
+            steps.reverse_via(Relaunch, "id"),
             diagnostics.NotAOneToOneReference(
                 view=ViewName.fake(),
                 source=ir.SourceName("ChannelCampaign"),
@@ -1565,7 +1673,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
         (
             ChannelCampaign,
             steps.pipeline(
-                steps.rename(FieldName("name"), FieldName("meta_campaign")),
+                steps.rename("name", "meta_campaign"),
                 steps.reverse(MetaCampaign),
             ),
             diagnostics.ReverseOntoExistingField(
@@ -1608,9 +1716,7 @@ def test_a_reverse_defect_is_one_diagnostic(
 def test_steps_after_a_defective_reverse_find_the_reversed_field() -> None:
     assert reverse_diagnostics(
         ChannelCampaign,
-        steps.pipeline(
-            steps.reverse(CampaignNote), steps.omit(FieldName("campaign_note"))
-        ),
+        steps.pipeline(steps.reverse(CampaignNote), steps.omit("campaign_note")),
     ) == (
         diagnostics.NoOneToOneReference(
             view=ViewName.fake(),
@@ -1626,7 +1732,7 @@ def test_a_defect_in_a_reversed_nested_pipeline_names_the_reversed_entity() -> N
     unknown = FieldName("budget")
 
     assert reverse_diagnostics(
-        ChannelCampaign, steps.reverse(MetaCampaign, steps.omit(unknown))
+        ChannelCampaign, steps.reverse(MetaCampaign, steps.omit(unknown.root))
     ) == (
         diagnostics.UnknownField(
             owner=ViewName.fake(),
@@ -1642,7 +1748,7 @@ def test_a_defect_in_a_reversed_nested_pipeline_names_the_reversed_entity() -> N
     [
         (steps.reverse(Company), ir.SoleReference()),
         (
-            steps.reverse_via(Company, FieldName("does_not_exist")),
+            steps.reverse_via(Company, "does_not_exist"),
             FieldName("does_not_exist"),
         ),
     ],
@@ -1792,7 +1898,7 @@ def resolve_mentor(*then: steps.Step) -> steps.Step:
     """Resolves the mentor, prefixing its fields so none collides when lifted."""
     return steps.resolve(
         named(FieldName("mentor_id")),
-        steps.rename(steps.select(lambda _field: True), prefixed(Text("mentor"))),
+        steps.rename(sel.all_fields(), prefixed(Text("mentor"))),
         *then,
     )
 
@@ -1806,7 +1912,7 @@ def test_flatten_lifts_an_entitys_fields_in_place_of_the_resolved_field() -> Non
         Memo,
         steps.pipeline(
             steps.resolve(named(FieldName("department_id"))),
-            steps.flatten(FieldName("department")),
+            steps.flatten("department"),
         ),
     )
 
@@ -1828,11 +1934,11 @@ def test_flatten_lifts_the_fields_of_a_nested_pipeline_with_their_defaults() -> 
         steps.pipeline(
             steps.resolve(
                 named(FieldName("department_id")),
-                steps.omit(FieldName("id")),
-                steps.rename(FieldName("name"), FieldName("department_name")),
-                steps.default(FieldName("department_name"), "Sales"),
+                steps.omit("id"),
+                steps.rename("name", "department_name"),
+                steps.default("department_name", "Sales"),
             ),
-            steps.flatten(FieldName("department")),
+            steps.flatten("department"),
         ),
     )
 
@@ -1851,8 +1957,8 @@ def test_flatten_with_a_select_passes_over_fields_that_are_not_resolved() -> Non
         steps.pipeline(
             steps.resolve(
                 named(FieldName("department_id")),
-                steps.project([FieldName("name")]),
-                steps.rename(FieldName("name"), FieldName("department_name")),
+                steps.pick(["name"]),
+                steps.rename("name", "department_name"),
             ),
             steps.flatten(named(FieldName("name"), FieldName("department"))),
         ),
@@ -1869,7 +1975,7 @@ def test_flatten_with_a_select_passes_over_fields_that_are_not_resolved() -> Non
 def test_fields_lifted_out_of_an_optional_reference_are_optional() -> None:
     view = compile_resolving(
         Employee,
-        steps.pipeline(resolve_mentor(), steps.flatten(FieldName("mentor"))),
+        steps.pipeline(resolve_mentor(), steps.flatten("mentor")),
     )
 
     # `mentor_mentor_id` was optional already, and stays `EmployeeId | None`.
@@ -1894,7 +2000,7 @@ def test_a_resolved_field_lifted_out_follows_the_flattened_entitys_lookup() -> N
         Employee,
         steps.pipeline(
             resolve_mentor(steps.resolve(named(FieldName("mentor_department_id")))),
-            steps.flatten(FieldName("mentor")),
+            steps.flatten("mentor"),
         ),
     )
 
@@ -1920,10 +2026,10 @@ def test_a_nested_model_lifted_out_follows_the_flattened_entitys_lookup() -> Non
             resolve_mentor(
                 steps.resolve(
                     named(FieldName("mentor_department_id")),
-                    steps.omit(FieldName("id")),
+                    steps.omit("id"),
                 )
             ),
-            steps.flatten(FieldName("mentor")),
+            steps.flatten("mentor"),
         ),
     )
 
@@ -1938,8 +2044,8 @@ def department_name() -> steps.Step:
     """Resolves the mentor's department to its name, `department_name`."""
     return steps.resolve(
         named(FieldName("mentor_department_id")),
-        steps.project([FieldName("name")]),
-        steps.rename(FieldName("name"), FieldName("department_name")),
+        steps.pick(["name"]),
+        steps.rename("name", "department_name"),
     )
 
 
@@ -1947,15 +2053,13 @@ def department_name() -> steps.Step:
     "flattening",
     [
         steps.pipeline(
-            resolve_mentor(
-                department_name(), steps.flatten(FieldName("mentor_department"))
-            ),
-            steps.flatten(FieldName("mentor")),
+            resolve_mentor(department_name(), steps.flatten("mentor_department")),
+            steps.flatten("mentor"),
         ),
         steps.pipeline(
             resolve_mentor(department_name()),
-            steps.flatten(FieldName("mentor")),
-            steps.flatten(FieldName("mentor_department")),
+            steps.flatten("mentor"),
+            steps.flatten("mentor_department"),
         ),
     ],
     ids=["flattened before it is lifted", "flattened after it is lifted"],
@@ -1980,7 +2084,7 @@ def test_a_lifted_reference_resolves_through_the_flattened_entity(
 ) -> None:
     view = compile_resolving(
         Employee,
-        steps.pipeline(resolve_mentor(), steps.flatten(FieldName("mentor")), resolving),
+        steps.pipeline(resolve_mentor(), steps.flatten("mentor"), resolving),
     )
 
     assert values(view)[FieldName("mentor_department")] == mentor_department()
@@ -1994,10 +2098,8 @@ def test_a_lifted_reference_resolves_through_a_nested_pipeline() -> None:
         Employee,
         steps.pipeline(
             resolve_mentor(),
-            steps.flatten(FieldName("mentor")),
-            steps.resolve(
-                named(FieldName("mentor_department_id")), steps.omit(FieldName("id"))
-            ),
+            steps.flatten("mentor"),
+            steps.resolve(named(FieldName("mentor_department_id")), steps.omit("id")),
         ),
     )
 
@@ -2016,7 +2118,7 @@ def flatten_diagnostics(
 
 @pytest.mark.parametrize(
     "then",
-    [(), (steps.omit(FieldName("id")), steps.omit(FieldName("name")))],
+    [(), (steps.omit("id"), steps.omit("name"))],
     ids=["alone", "steps after it use the existing fields"],
 )
 def test_a_lifted_field_onto_an_existing_name_is_a_diagnostic_per_field(
@@ -2024,7 +2126,7 @@ def test_a_lifted_field_onto_an_existing_name_is_a_diagnostic_per_field(
 ) -> None:
     assert flatten_diagnostics(
         steps.resolve(named(FieldName("department_id"))),
-        steps.flatten(FieldName("department")),
+        steps.flatten("department"),
         *then,
     ) == tuple(
         diagnostics.FlattenOntoExistingField(
@@ -2040,13 +2142,13 @@ def test_two_flattened_fields_lifting_one_name_report_the_second() -> None:
     reported = flatten_diagnostics(
         steps.resolve(
             named(FieldName("department_id")),
-            steps.omit(FieldName("id")),
-            steps.rename(FieldName("name"), label),
+            steps.omit("id"),
+            steps.rename("name", label.root),
         ),
         steps.resolve(
             named(FieldName("mentor_id")),
-            steps.project([]),
-            steps.add(label, str, default="mentor"),
+            steps.pick([]),
+            steps.add(label.root, str, default="mentor"),
         ),
         steps.flatten(named(FieldName("department"), FieldName("mentor"))),
     )
@@ -2089,18 +2191,18 @@ def test_two_flattened_fields_lifting_one_name_report_the_second() -> None:
 def test_flattening_a_named_field_it_cannot_lift_is_one_diagnostic(
     named_field: FieldName, expected: diagnostics.CompileDiagnostic
 ) -> None:
-    assert flatten_diagnostics(steps.flatten(named_field)) == (expected,)
+    assert flatten_diagnostics(steps.flatten(named_field.root)) == (expected,)
 
 
 def test_building_a_flatten_checks_nothing() -> None:
     root = ir.FromSource(source=Memo)
     unknown = FieldName("does_not_exist")
 
-    node = steps.flatten(unknown)(root)
+    node = steps.flatten(unknown.root)(root)
 
     match node:
         case ir.Flatten(input=input_node, fields=fields):
-            assert (input_node, fields) == (root, unknown)
+            assert (input_node, fields) == (root, ir.Named(names=(unknown,)))
         case _:
             pytest.fail(f"expected a Flatten node, got {node}")
 
@@ -2310,11 +2412,11 @@ def flattening(
         steps.resolve(
             named(reference),
             nested,
-            steps.rename(steps.select(lambda _field: True), prefixed(prefix)),
+            steps.rename(sel.all_fields(), prefixed(prefix)),
         ),
-        steps.flatten(FieldName(reference.root.removesuffix("_id") or reference.root)),
+        steps.flatten(reference.root.removesuffix("_id") or reference.root),
         steps.resolve(
-            steps.select(
+            sel.matching(
                 functools.partial(
                     is_lifted_reference,
                     references={
@@ -2374,7 +2476,9 @@ def pipelines(
     added = [FieldName("added") for _ in range(draw(st.integers(0, 1)))]
     fields.extend(added)
     drawn: list[steps.Step] = [
-        steps.add(name, str, default=draw(st.sampled_from(["tag", pydantic.MISSING])))
+        steps.add(
+            name.root, str, default=draw(st.sampled_from(["tag", pydantic.MISSING]))
+        )
         for name in added
     ]
     for index in range(draw(st.integers(min_value=0, max_value=len(fields)))):
@@ -2403,7 +2507,7 @@ def pipelines(
                     draw(
                         st.sampled_from(
                             [
-                                tuple(map(steps.omit, omitted)),
+                                tuple(steps.omit(field.root) for field in omitted),
                                 (steps.omit(named(*omitted)),),
                             ]
                         )
@@ -2413,7 +2517,7 @@ def pipelines(
                 new = FieldName(f"renamed_{index}")
                 fields[fields.index(field)] = new
                 keep_target(references, field, new)
-                drawn.append(steps.rename(field, new))
+                drawn.append(steps.rename(field.root, new.root))
             case "rename_selected":
                 renamed = draw(st.lists(st.sampled_from(fields), unique=True))
                 renaming = prefixed(Text(f"renamed_{index}"))
@@ -2428,7 +2532,7 @@ def pipelines(
             case "project":
                 projected = draw(st.lists(st.sampled_from(fields), unique=True))
                 fields = [kept for kept in fields if kept in projected]
-                drawn.append(steps.project(projected))
+                drawn.append(steps.pick([field.root for field in projected]))
             # Without a Reference to flatten, this falls through.
             case "flatten" if depth.root > 0 and (
                 resolvable := [kept for kept in fields if kept in references]
@@ -2459,12 +2563,12 @@ def pipelines(
                     steps.pipeline(
                         steps.reverse_via(
                             model,
-                            via,
+                            via.root,
                             nested,
                             *(
                                 [
                                     steps.rename(
-                                        steps.select(lambda _field: True),
+                                        sel.all_fields(),
                                         prefixed(Text(f"flat_{index}")),
                                     )
                                 ]
@@ -2472,7 +2576,11 @@ def pipelines(
                                 else []
                             ),
                         ),
-                        *([steps.flatten(name)] if action == "reverse_flatten" else []),
+                        *(
+                            [steps.flatten(name.root)]
+                            if action == "reverse_flatten"
+                            else []
+                        ),
                     )
                 )
                 fields.extend([] if action == "reverse_flatten" else [name])
@@ -2508,20 +2616,25 @@ def any_steps(draw: st.DrawFn, pool: Sequence[FieldName], depth: Depth) -> steps
     ):
         case "omit" | "flatten" as action:
             # One name, or a Select of any names.
-            fields = draw(names | st.lists(names).map(lambda chosen: named(*chosen)))
+            fields = draw(
+                names.map(lambda name: name.root)
+                | st.lists(names).map(lambda chosen: named(*chosen))
+            )
             return {"omit": steps.omit, "flatten": steps.flatten}[action](fields)
         case "rename":
-            return steps.rename(draw(names), draw(names))
+            return steps.rename(draw(names).root, draw(names).root)
         case "rename_selected":
             renames = draw(st.dictionaries(names, names))
             return steps.rename(
                 named(*renames), lambda field: renames.get(field, field)
             )
         case "project":
-            return steps.project(draw(st.lists(names, unique=True)))
+            return steps.pick(
+                [name.root for name in draw(st.lists(names, unique=True))]
+            )
         case _:
             selection = draw(
-                st.just(steps.references())
+                st.just(sel.references())
                 | st.lists(names).map(lambda chosen: named(*chosen))
             )
             nested = (
@@ -2710,7 +2823,7 @@ def test_resolve_accepts_exactly_the_fields_references_selects(
         resolved = compile_step(
             steps.pipeline(case.step, steps.resolve(named(field.name)))
         )
-        is_reference = steps.references().selects(field, case.models.graph())
+        is_reference = sel.references().selects(field, case.models.graph())
         event(f"is_reference: {is_reference}")
         assert is_reference == (resolved is not None)
 
@@ -2812,7 +2925,7 @@ def test_a_payload_compiles_to_the_relation_its_pipeline_builds() -> None:
     payload = Payload(
         name=PayloadName.fake(),
         source=Company,
-        step=steps.omit(FieldName("secret")),
+        step=steps.omit("secret"),
     )
 
     (compiled,) = compile_catalog([], [payload]).unwrap().payloads
@@ -2827,7 +2940,7 @@ def test_a_payload_step_defect_is_reported_under_the_payload_name() -> None:
     payload = Payload(
         name=PayloadName.fake(),
         source=Company,
-        step=steps.omit(FieldName("missing")),
+        step=steps.omit("missing"),
     )
 
     match compile_catalog([], [payload]):
@@ -2852,11 +2965,11 @@ def test_a_name_shared_by_a_view_and_a_payload_is_one_diagnostic() -> None:
 
 
 def test_an_update_payload_composes_the_create_pipeline_with_more_steps() -> None:
-    create = steps.omit(FieldName("secret"))
+    create = steps.omit("secret")
     update = Payload(
         name=PayloadName.fake(),
         source=Company,
-        step=steps.pipeline(create, steps.omit(FieldName("revenue"))),
+        step=steps.pipeline(create, steps.omit("revenue")),
     )
 
     (compiled,) = compile_catalog([], [update]).unwrap().payloads
@@ -2874,7 +2987,7 @@ def test_views_and_payloads_of_distinct_names_compile() -> None:
     assert [p.name for p in compiled.payloads] == [payload.name]
 
 
-# retype.
+# map_type.
 
 
 def compile_employee_payload(
@@ -2902,10 +3015,10 @@ def annotations(relation: ir.Relation) -> dict[FieldName, ir.RuntimeAnnotation]:
     }
 
 
-def test_retype_maps_each_selected_fields_type_with_the_transform() -> None:
+def test_map_type_maps_each_selected_fields_type_with_the_transform() -> None:
     (compiled,) = (
         compile_employee_payload(
-            steps.retype(
+            steps.map_type(
                 named(FieldName("name"), FieldName("mentor_id")),
                 lambda annotation: annotation | MISSING,
             ),
@@ -2922,14 +3035,44 @@ def test_retype_maps_each_selected_fields_type_with_the_transform() -> None:
     }
 
 
-def test_retype_to_gives_the_named_field_one_type() -> None:
+def test_set_type_gives_the_named_field_one_type() -> None:
     (compiled,) = (
-        compile_employee_payload(steps.retype_to(FieldName("name"), int))
+        compile_employee_payload(steps.set_type("name", int)).unwrap().payloads
+    )
+
+    assert annotations(compiled.relation)[FieldName("name")] is int
+
+
+def test_widen_adds_the_variant_to_each_fields_type() -> None:
+    (compiled,) = (
+        compile_employee_payload(steps.widen(["name", "mentor_id"], int))
         .unwrap()
         .payloads
     )
 
-    assert annotations(compiled.relation)[FieldName("name")] is int
+    assert annotations(compiled.relation) == {
+        FieldName("id"): EmployeeId,
+        FieldName("name"): Text | int,
+        FieldName("department_id"): DepartmentId,
+        FieldName("mentor_id"): EmployeeId | None | int,
+    }
+
+
+def test_partial_lets_each_field_be_left_out() -> None:
+    (compiled,) = (
+        compile_employee_payload(steps.partial(sel.optional())).unwrap().payloads
+    )
+
+    assert [
+        (field.name, field.annotation(), field.default)
+        for field in compiled.relation.fields
+        if isinstance(field, ir.Field)
+    ] == [
+        (FieldName("id"), EmployeeId, ir.NoDefault()),
+        (FieldName("name"), Text, ir.NoDefault()),
+        (FieldName("department_id"), DepartmentId, ir.NoDefault()),
+        (FieldName("mentor_id"), EmployeeId | None | MISSING, ir.MissingDefault()),
+    ]
 
 
 class Constrained(pydantic.BaseModel):
@@ -2940,7 +3083,7 @@ def test_a_retyped_field_drops_the_old_types_constraints() -> None:
     payload = Payload(
         name=PayloadName.fake(),
         source=Constrained,
-        step=steps.retype_to(FieldName("code"), int),
+        step=steps.set_type("code", int),
     )
 
     (compiled,) = compile_catalog([], [payload]).unwrap().payloads
@@ -2955,7 +3098,7 @@ def test_a_retyped_field_drops_the_old_types_constraints() -> None:
 def test_retyping_an_unknown_field_is_a_diagnostic() -> None:
     unknown = FieldName("nme")
 
-    assert employee_payload_diagnostics(steps.retype_to(unknown, int)) == (
+    assert employee_payload_diagnostics(steps.set_type(unknown.root, int)) == (
         diagnostics.UnknownField(
             owner=PayloadName.fake(),
             source=ir.SourceName("Employee"),
@@ -2967,12 +3110,12 @@ def test_retyping_an_unknown_field_is_a_diagnostic() -> None:
 
 def test_retyping_a_field_resolved_through_a_nested_pipeline_is_a_diagnostic() -> None:
     step = steps.pipeline(
-        steps.resolve(named(FieldName("department_id")), steps.omit(FieldName("name"))),
-        steps.retype_to(FieldName("department"), int),
+        steps.resolve(named(FieldName("department_id")), steps.omit("name")),
+        steps.set_type("department", int),
     )
 
     assert employee_payload_diagnostics(step) == (
-        diagnostics.RetypeNestedField(
+        diagnostics.MapTypeNestedField(
             view=PayloadName.fake(),
             source=ir.SourceName("Employee"),
             field=FieldName("department"),
@@ -2983,17 +3126,17 @@ def test_retyping_a_field_resolved_through_a_nested_pipeline_is_a_diagnostic() -
 @pytest.mark.parametrize(
     "step",
     [
-        steps.retype_to(FieldName("name"), int),
+        steps.set_type("name", int),
         steps.resolve(
             named(FieldName("department_id")),
-            steps.retype(named(FieldName("name")), lambda annotation: annotation),
+            steps.map_type(named(FieldName("name")), lambda annotation: annotation),
         ),
     ],
     ids=["in the view", "in a nested pipeline"],
 )
-def test_retype_in_a_view_is_a_diagnostic(step: steps.Step) -> None:
+def test_map_type_in_a_view_is_a_diagnostic(step: steps.Step) -> None:
     assert resolve_diagnostics(Employee, step) == (
-        diagnostics.RetypeInView(view=ViewName.fake()),
+        diagnostics.MapTypeInView(view=ViewName.fake()),
     )
 
 
@@ -3001,27 +3144,28 @@ def test_retype_in_a_view_is_a_diagnostic(step: steps.Step) -> None:
     ("diagnostic", "message"),
     [
         (
-            diagnostics.RetypeInView(view=ViewName("CompanySummary")),
+            diagnostics.MapTypeInView(view=ViewName("CompanySummary")),
             (
-                "CompanySummary: a View cannot retype its fields, because its "
-                "mapping copies each value unchanged. Retype in a Payload instead."
+                "CompanySummary: a View cannot change its fields' types, because "
+                "its mapping copies each value unchanged. Use `map_type` in a "
+                "Payload instead."
             ),
         ),
         (
-            diagnostics.RetypeNestedField(
+            diagnostics.MapTypeNestedField(
                 view=PayloadName("CompanyUpdate"),
                 source=ir.SourceName("Company"),
                 field=FieldName("parent"),
             ),
             (
-                "CompanyUpdate: cannot retype Company.parent, because its type is "
-                "the model of a nested pipeline."
+                "CompanyUpdate: cannot map the type of Company.parent, because its "
+                "type is the model of a nested pipeline."
             ),
         ),
     ],
     ids=["in-view", "nested"],
 )
-def test_a_retype_diagnostic_message_names_the_offending_values(
+def test_a_map_type_diagnostic_message_names_the_offending_values(
     diagnostic: diagnostics.CompileDiagnostic, message: str
 ) -> None:
     assert diagnostic.describe().root == message
@@ -3084,7 +3228,7 @@ def test_a_field_the_base_declares_is_not_checked_once_omitted() -> None:
     payload = Payload(
         name=PayloadName.fake(),
         source=Company,
-        step=steps.omit(FieldName("name")),
+        step=steps.omit("name"),
         base=DepartmentNamedBase,
     )
 
@@ -3115,9 +3259,7 @@ def test_a_nested_field_the_base_declares_is_a_diagnostic() -> None:
     view = View(
         name=ViewName.fake(),
         source=Employee,
-        step=steps.resolve(
-            named(FieldName("department_id")), steps.project([FieldName("name")])
-        ),
+        step=steps.resolve(named(FieldName("department_id")), steps.pick(["name"])),
         base=DepartmentBase,
     )
 
@@ -3206,8 +3348,8 @@ def test_where_keeps_every_field_and_filters_by_the_sources_own_field() -> None:
 def test_a_condition_names_a_field_by_its_name_after_renames() -> None:
     view = compile_deal(
         steps.pipeline(
-            steps.rename(FieldName("score"), FieldName("points")),
-            steps.rename(FieldName("target"), FieldName("score")),
+            steps.rename("score", "points"),
+            steps.rename("target", "score"),
             steps.where(
                 conditions.lt(
                     conditions.field(FieldName("points")),
@@ -3230,7 +3372,7 @@ def test_a_filter_survives_omitting_the_field_it_uses() -> None:
     view = compile_deal(
         steps.pipeline(
             steps.where(conditions.is_null(conditions.field(FieldName("nickname")))),
-            steps.omit(FieldName("nickname")),
+            steps.omit("nickname"),
         )
     )
 
@@ -3342,7 +3484,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
         ),
         (
             steps.pipeline(
-                steps.add(FieldName("kind"), Literal["deal"], default="deal"),
+                steps.add("kind", Literal["deal"], default="deal"),
                 steps.where(conditions.eq(conditions.field(FieldName("kind")), "deal")),
             ),
             diagnostics.NotASourceColumn(
@@ -3490,7 +3632,7 @@ def test_steps_after_a_defective_where_are_still_checked() -> None:
     reported = deal_diagnostics(
         steps.pipeline(
             steps.where(conditions.eq(conditions.field(FieldName("name")), "Acme")),
-            steps.omit(FieldName("secret")),
+            steps.omit("secret"),
         )
     )
 
@@ -3780,7 +3922,9 @@ def added_tag(field: FieldName, tag: Tag) -> steps.Step:
     A type checker takes only a `Literal` written out, so it is subscripted as
     the object it is at run time.
     """
-    return steps.add(field, typing.cast("_LiteralForm", Literal)[tag.root], tag.root)
+    return steps.add(
+        field.root, typing.cast("_LiteralForm", Literal)[tag.root], tag.root
+    )
 
 
 class Plan(enum.Enum):
@@ -3949,7 +4093,7 @@ def test_a_variant_without_the_discriminator_is_a_diagnostic() -> None:
         View(
             name=ViewName("Unplanned"),
             source=Subscription,
-            step=steps.omit(FieldName("plan")),
+            step=steps.omit("plan"),
         ),
     )
 
@@ -4152,14 +4296,14 @@ def paid_or_free(*more: Payload) -> Union:
         FieldName("plan"),
         payload(
             PayloadName("PaidPatch"),
-            steps.retype_to(FieldName("plan"), Literal[Plan.PAID]),
+            steps.set_type("plan", Literal[Plan.PAID]),
         ),
         Payload(
             name=PayloadName("FreeInvoicePatch"),
             source=Invoice,
             step=steps.pipeline(
-                steps.omit(FieldName("plan")),
-                steps.add(FieldName("plan"), Literal[Plan.FREE]),
+                steps.omit("plan"),
+                steps.add("plan", Literal[Plan.FREE]),
             ),
         ),
         *more,
@@ -4200,9 +4344,7 @@ def test_a_union_of_payloads_compiles_with_its_variants_as_payloads() -> None:
 
 
 def test_compiling_a_union_of_payloads_as_views_is_only_that_diagnostic() -> None:
-    union = paid_or_free(
-        payload(PayloadName("Defective"), steps.omit(FieldName("missing")))
-    )
+    union = paid_or_free(payload(PayloadName("Defective"), steps.omit("missing")))
 
     assert union_diagnostics(union) == (
         diagnostics.PayloadUnionInViews(view=union.name),
@@ -4216,17 +4358,13 @@ def test_a_nested_union_of_payloads_compiles_before_the_union_it_is_nested_in() 
         *(
             payload(
                 PayloadName(f"Paid{status.name.title()}"),
-                steps.retype_to(FieldName("plan"), Literal[Plan.PAID]),
-                steps.retype_to(
-                    FieldName("status"), typing.cast("_LiteralForm", Literal)[status]
-                ),
+                steps.set_type("plan", Literal[Plan.PAID]),
+                steps.set_type("status", typing.cast("_LiteralForm", Literal)[status]),
             )
             for status in Status
         ),
     )
-    free = payload(
-        PayloadName("Free"), steps.retype_to(FieldName("plan"), Literal[Plan.FREE])
-    )
+    free = payload(PayloadName("Free"), steps.set_type("plan", Literal[Plan.FREE]))
     outer = union_of(UnionName("Writes"), FieldName("plan"), paid, free)
 
     compiled = compile_payload_unions(outer).unwrap()
@@ -4243,7 +4381,7 @@ def test_a_nested_union_of_payloads_compiles_before_the_union_it_is_nested_in() 
 
 
 def test_a_payload_without_the_discriminator_is_a_diagnostic() -> None:
-    unplanned = payload(PayloadName("Unplanned"), steps.omit(FieldName("plan")))
+    unplanned = payload(PayloadName("Unplanned"), steps.omit("plan"))
     union = paid_or_free(unplanned)
 
     assert payload_union_diagnostics(union) == (
@@ -4270,16 +4408,14 @@ def test_a_payload_typing_the_discriminator_by_no_one_tag_is_a_diagnostic() -> N
 def test_a_discriminator_defaulting_to_other_than_its_tag_is_a_diagnostic() -> None:
     defaulted = payload(
         PayloadName("Defaulted"),
-        steps.retype_to(FieldName("plan"), Literal[Plan.PAID]),
-        steps.default(FieldName("plan"), MISSING),
+        steps.set_type("plan", Literal[Plan.PAID]),
+        steps.default("plan", MISSING),
     )
     union = union_of(
         UnionName("Writes"),
         FieldName("plan"),
         defaulted,
-        payload(
-            PayloadName("Free"), steps.retype_to(FieldName("plan"), Literal[Plan.FREE])
-        ),
+        payload(PayloadName("Free"), steps.set_type("plan", Literal[Plan.FREE])),
     )
 
     assert payload_union_diagnostics(union) == (
@@ -4295,7 +4431,7 @@ def test_a_discriminator_defaulting_to_other_than_its_tag_is_a_diagnostic() -> N
 
 def test_payloads_sharing_a_tag_are_one_diagnostic() -> None:
     sharing = tuple(
-        payload(name, steps.retype_to(FieldName("plan"), Literal[Plan.PAID]))
+        payload(name, steps.set_type("plan", Literal[Plan.PAID]))
         for name in (PayloadName("Paid"), PayloadName("AlsoPaid"))
     )
     union = union_of(UnionName("Writes"), FieldName("plan"), *sharing)
@@ -4317,12 +4453,8 @@ def test_a_nested_union_whose_payloads_have_several_tags_is_a_diagnostic() -> No
         *(
             payload(
                 PayloadName(status.name.title()),
-                steps.retype_to(
-                    FieldName("status"), typing.cast("_LiteralForm", Literal)[status]
-                ),
-                steps.retype_to(
-                    FieldName("plan"), typing.cast("_LiteralForm", Literal)[plan]
-                ),
+                steps.set_type("status", typing.cast("_LiteralForm", Literal)[status]),
+                steps.set_type("plan", typing.cast("_LiteralForm", Literal)[plan]),
             )
             for status, plan in zip(Status, Plan, strict=True)
         ),
@@ -4354,7 +4486,7 @@ def test_a_view_mixed_with_a_nested_union_of_payloads_is_a_diagnostic() -> None:
 
 
 def test_a_union_of_a_defective_payload_reports_only_the_payloads_diagnostics() -> None:
-    defective = payload(PayloadName("Defective"), steps.omit(FieldName("missing")))
+    defective = payload(PayloadName("Defective"), steps.omit("missing"))
     union = paid_or_free(defective)
 
     assert [type(diagnostic) for diagnostic in payload_union_diagnostics(union)] == [
@@ -4372,7 +4504,7 @@ def test_a_union_of_a_defective_view_reports_only_the_views_diagnostics() -> Non
     defective = View(
         name=ViewName("Defective"),
         source=Subscription,
-        step=steps.omit(FieldName("missing")),
+        step=steps.omit("missing"),
     )
     union = union_of(
         UnionName("Subscriptions"),
@@ -4423,7 +4555,7 @@ def test_a_last_variant_keeping_every_row_is_no_diagnostic() -> None:
             name=ViewName("Rest"),
             source=Subscription,
             step=steps.pipeline(
-                steps.omit(FieldName("status")),
+                steps.omit("status"),
                 added_tag(FieldName("status"), Tag("rest")),
             ),
         ),
@@ -4443,7 +4575,7 @@ def test_a_variant_after_a_union_with_a_view_keeping_every_row_is_a_diagnostic()
             name=ViewName("FreeRest"),
             source=Subscription,
             step=steps.pipeline(
-                steps.omit(FieldName("status")),
+                steps.omit("status"),
                 added_tag(FieldName("status"), Tag("rest")),
             ),
         ),
@@ -4589,7 +4721,7 @@ def test_a_union_needs_two_variants() -> None:
             ),
             (
                 "Writes: the Variant Patch types 'plan' <enum 'Plan'>, which is not "
-                "one Tag. Type it with `retype_to`, or declare it with `add`, as a "
+                "one Tag. Type it with `set_type`, or declare it with `add`, as a "
                 "Literal of one enum member, string or integer."
             ),
         ),

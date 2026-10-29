@@ -79,7 +79,7 @@ catalog = Catalog(
         Payload(
             name=PayloadName("CompanyCreate"),
             source=Company,
-            step=steps.omit(FieldName("id")),
+            step=steps.omit("id"),
         )
     ],
     unions=[],

@@ -251,21 +251,22 @@ class SharedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class RetypeInView(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View's pipeline retypes a field. Its mapping copies each value unchanged,
-    so it cannot convert one to another type."""
+class MapTypeInView(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A View's pipeline maps a field's type. Its mapping copies each value
+    unchanged, so it cannot convert one to another type."""
 
     view: ViewName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: a View cannot retype its fields, because its "
-            "mapping copies each value unchanged. Retype in a Payload instead."
+            f"{self.view.root}: a View cannot change its fields' types, because its "
+            "mapping copies each value unchanged. Use `map_type` in a Payload "
+            "instead."
         )
 
 
-class RetypeNestedField(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`retype` selected a resolved field typed by the model of a nested pipeline.
+class MapTypeNestedField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`map_type` selected a resolved field typed by the model of a nested pipeline.
 
     That model is generated, so there is no type to give `transform`.
     """
@@ -276,7 +277,8 @@ class RetypeNestedField(pydantic.BaseModel, Diagnostic, frozen=True):
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: cannot retype {self.source.root}.{self.field.root}, "
+            f"{self.view.root}: cannot map the type of "
+            f"{self.source.root}.{self.field.root}, "
             "because its type is the model of a nested pipeline."
         )
 
@@ -498,21 +500,22 @@ class UnorderedFieldType(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class RequireInPayload(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Payload's pipeline requires a field. A Payload is a write model, so it
-    has no values to require."""
+class NonNullableInPayload(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Payload's pipeline makes a field non-nullable. A Payload is a write
+    model, so it has no values to require."""
 
     view: PayloadName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: a Payload cannot `require` a field, because it is "
+            f"{self.view.root}: a Payload cannot make a field `non_nullable`, "
+            "because it is "
             "a write model with no values to require."
         )
 
 
-class RequireOnRequiredField(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`require` named or selected a field whose type does not admit `None`, so
+class NonNullableOnRequiredField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`non_nullable` named or selected a field whose type does not admit `None`, so
     there is nothing to narrow."""
 
     view: DefinitionName
@@ -522,13 +525,14 @@ class RequireOnRequiredField(pydantic.BaseModel, Diagnostic, frozen=True):
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: cannot require {self.source.root}.{self.field.root}, "
+            f"{self.view.root}: cannot make {self.source.root}.{self.field.root} "
+            "non-nullable, "
             f"because its type {self.annotation!r} is already required."
         )
 
 
-class RequireOnAlwaysNoneField(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`require` named or selected a field a `where` keeps only `None` in, so the
+class NonNullableOnAlwaysNoneField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`non_nullable` named or selected a field a `where` keeps only `None` in, so the
     requirement is never met."""
 
     view: DefinitionName
@@ -537,14 +541,15 @@ class RequireOnAlwaysNoneField(pydantic.BaseModel, Diagnostic, frozen=True):
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: cannot require {self.source.root}.{self.field.root}, "
+            f"{self.view.root}: cannot make {self.source.root}.{self.field.root} "
+            "non-nullable, "
             "because a `where` keeps only the rows where it is None, so the "
             "requirement is never met."
         )
 
 
-class RequireAddedField(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`require` named or selected a field `add` declared, which has no value from
+class NonNullableAddedField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`non_nullable` named or selected a field `add` declared, which has no value from
     the subject to require."""
 
     view: DefinitionName
@@ -552,7 +557,8 @@ class RequireAddedField(pydantic.BaseModel, Diagnostic, frozen=True):
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: cannot require '{self.field.root}', because `add` "
+            f"{self.view.root}: cannot make '{self.field.root}' non-nullable, "
+            "because `add` "
             "declared it, so it has no value to require."
         )
 
@@ -589,7 +595,7 @@ class UntaggedVariant(pydantic.BaseModel, Diagnostic, frozen=True):
             case ViewName():
                 fix = "Narrow it to one value with `where`"
             case PayloadName():
-                fix = "Type it with `retype_to`"
+                fix = "Type it with `set_type`"
         return DiagnosticMessage(
             f"{self.view.root}: the Variant {self.variant.root} types "
             f"'{self.discriminator.root}' {self.annotation!r}, which is not one Tag. "
@@ -785,8 +791,8 @@ type CompileDiagnostic = (
     | AddOntoExistingField
     | AddWithoutDefault
     | SharedModelName
-    | RetypeInView
-    | RetypeNestedField
+    | MapTypeInView
+    | MapTypeNestedField
     | BaseFieldTypeMismatch
     | BaseFieldIsNestedModel
     | WhereInPayload
@@ -797,10 +803,10 @@ type CompileDiagnostic = (
     | ComparedTypesDiffer
     | OrderingOnOptionalField
     | UnorderedFieldType
-    | RequireInPayload
-    | RequireOnRequiredField
-    | RequireOnAlwaysNoneField
-    | RequireAddedField
+    | NonNullableInPayload
+    | NonNullableOnRequiredField
+    | NonNullableOnAlwaysNoneField
+    | NonNullableAddedField
     | model_names.InvalidUnionName
     | VariantWithoutDiscriminator
     | UntaggedVariant

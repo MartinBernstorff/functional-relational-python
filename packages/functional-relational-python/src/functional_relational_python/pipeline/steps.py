@@ -5,47 +5,78 @@ ones.
 """
 
 import functools
-from collections.abc import Callable, Iterable
+import operator
+from collections.abc import Callable, Iterable, Sequence
 from typing import overload
 
 import pydantic
+from pydantic import MISSING
 from pydantic.fields import FieldInfo
 
 from functional_relational_python.entity_graph.entity_graph import (
     EntityNode,
     FieldName,
 )
-from functional_relational_python.pipeline import ir
+from functional_relational_python.pipeline import ir, selectors
 
 type Step = Callable[[ir.Node], ir.Node]
 
+type Name = str
+"""A field's name."""
 
-def omit(fields: FieldName | ir.Select) -> Step:
-    """Removes the field named `fields`, or every field `fields` selects."""
+type Fields = Name | Sequence[Name] | ir.Selector
+"""The fields a step acts on: one name, several names, or a Selector (see
+`selectors`). Naming a field the relation lacks is a diagnostic."""
+
+
+def _selection(fields: Fields) -> ir.FieldSelection:
+    if isinstance(fields, str):
+        return ir.Named(names=(FieldName(fields),))
+    match fields:
+        case ir.Select() | ir.References():
+            return fields
+        case _:
+            return ir.Named(names=tuple(FieldName(name) for name in fields))
+
+
+def omit(fields: Fields) -> Step:
+    """Removes `fields`."""
+    selection = _selection(fields)
 
     def step(node: ir.Node) -> ir.Node:
-        return ir.Omit(input=node, fields=fields)
+        return ir.Omit(input=node, fields=selection)
+
+    return step
+
+
+def pick(fields: Fields) -> Step:
+    """Keeps only `fields`, in the Source's field order."""
+    selection = _selection(fields)
+
+    def step(node: ir.Node) -> ir.Node:
+        return ir.Pick(input=node, fields=selection)
 
     return step
 
 
 @overload
-def rename(fields: FieldName, new: FieldName) -> Step: ...
+def rename(fields: Name, new: Name) -> Step: ...
 
 
 @overload
-def rename(fields: ir.Select, new: ir.FieldRenaming) -> Step: ...
+def rename(fields: Fields, new: ir.FieldRenaming) -> Step: ...
 
 
-def rename(fields: FieldName | ir.Select, new: FieldName | ir.FieldRenaming) -> Step:
+def rename(fields: Fields, new: Name | ir.FieldRenaming) -> Step:
     """Renames the field named `fields` to `new`.
 
-    With a Select, renames every selected field to `new` of its old name.
+    With several fields, renames each to `new` of its old name.
     """
-    # The overloads keep a Select with a name, and a name with a function, out;
-    # this is what they would mean.
+    # The overloads keep several fields with a name, and a name with a function,
+    # out; this is what they would mean.
     match new:
-        case FieldName() as name:
+        case str():
+            name = FieldName(new)
 
             def renaming(_old: FieldName) -> FieldName:
                 return name
@@ -54,67 +85,79 @@ def rename(fields: FieldName | ir.Select, new: FieldName | ir.FieldRenaming) -> 
             renaming = new
 
     def step(node: ir.Node) -> ir.Node:
-        match fields:
-            case FieldName():
-                return ir.Rename(input=node, field=fields, new=renaming(fields))
-            case ir.Select():
-                return ir.RenameSelected(input=node, fields=fields, new=renaming)
+        if isinstance(fields, str):
+            field = FieldName(fields)
+            return ir.Rename(input=node, field=field, new=renaming(field))
+        return ir.RenameSelected(input=node, fields=_selection(fields), new=renaming)
 
     return step
 
 
-def retype(fields: FieldName | ir.Select, transform: ir.TypeTransform) -> Step:
-    """Gives the field named `fields`, or every field `fields` selects, the type
-    `transform` maps its type to.
+def map_type(fields: Fields, transform: ir.TypeTransform) -> Step:
+    """Gives each of `fields` the type `transform` maps its type to.
 
-    Only a Payload may retype. E.g. an update payload widens its fields with
-    `retype(select(...), lambda annotation: annotation | MISSING)`, then defaults
-    them to `MISSING`.
+    Only a Payload may map types. E.g. an update payload makes its fields
+    `partial`.
     """
+    selection = _selection(fields)
 
     def step(node: ir.Node) -> ir.Node:
-        return ir.Retype(input=node, fields=fields, transform=transform)
+        return ir.MapType(input=node, fields=selection, transform=transform)
 
     return step
 
 
-def retype_to(fields: FieldName | ir.Select, annotation: ir.RuntimeAnnotation) -> Step:
-    """Gives the field named `fields`, or every field `fields` selects, the type
-    `annotation`."""
+def set_type(fields: Fields, annotation: ir.RuntimeAnnotation) -> Step:
+    """Gives each of `fields` the type `annotation`."""
 
     def transform(_old: ir.RuntimeAnnotation) -> ir.RuntimeAnnotation:
         return annotation
 
-    return retype(fields, transform)
+    return map_type(fields, transform)
 
 
-def default(fields: FieldName | ir.Select, value: ir.UncheckedDefault) -> Step:
-    """Sets the default of the field named `fields`, or of every field `fields`
-    selects, in the generated model.
+def widen(fields: Fields, variant: ir.RuntimeAnnotation) -> Step:
+    """Gives each of `fields` its type or `variant`, e.g. `X | None` for `X`."""
+
+    def transform(old: ir.RuntimeAnnotation) -> ir.RuntimeAnnotation:
+        return operator.or_(old, variant)
+
+    return map_type(fields, transform)
+
+
+def default(fields: Fields, value: ir.UncheckedDefault) -> Step:
+    """Sets the default of each of `fields` in the generated model.
 
     `value` is a literal: `None`, `MISSING`, a number, a string, a boolean, an
     empty list or dict, or an enum member. A mapping still fills every field from
     the Source; the default only appears in the model.
     """
+    selection = _selection(fields)
 
     def step(node: ir.Node) -> ir.Node:
-        return ir.Default(input=node, fields=fields, value=value)
+        return ir.Default(input=node, fields=selection, value=value)
 
     return step
 
 
-@overload
-def add(name: FieldName, annotation: ir.AddedType) -> Step: ...
+def partial(fields: Fields) -> Step:
+    """Lets each of `fields` be left out: widens it with `MISSING`, its default.
+
+    Only a Payload may be partial, e.g. an update payload.
+    """
+    return pipeline(widen(fields, MISSING), default(fields, MISSING))
 
 
 @overload
-def add(
-    name: FieldName, annotation: ir.AddedType, default: ir.UncheckedDefault
-) -> Step: ...
+def add(name: Name, annotation: ir.AddedType) -> Step: ...
+
+
+@overload
+def add(name: Name, annotation: ir.AddedType, default: ir.UncheckedDefault) -> Step: ...
 
 
 def add(
-    name: FieldName,
+    name: Name,
     annotation: ir.AddedType,
     default: ir.UncheckedDefault = ir.NoDefault,
 ) -> Step:
@@ -132,20 +175,10 @@ def add(
     def step(node: ir.Node) -> ir.Node:
         return ir.Add(
             input=node,
-            name=name,
+            name=FieldName(name),
             info=FieldInfo.from_annotation(annotation),
             default=given,
         )
-
-    return step
-
-
-def project(fields: Iterable[ir.FieldName]) -> Step:
-    """Keeps only `fields`, in the Source's field order."""
-    kept = tuple(fields)
-
-    def step(node: ir.Node) -> ir.Node:
-        return ir.Project(input=node, fields=kept)
 
     return step
 
@@ -163,48 +196,36 @@ def where(condition: ir.Condition) -> Step:
     return step
 
 
-def require(fields: FieldName | ir.Select) -> Step:
-    """Narrows the field named `fields`, or every field `fields` selects, from
-    `X | None` to `X`, e.g. a submitted campaign's `name`.
+def non_nullable(fields: Fields) -> Step:
+    """Narrows each of `fields` from `X | None` to `X`, e.g. a submitted
+    campaign's `name`.
 
-    A required Reference, resolved or reversed, holds its Entity rather than
-    `None`. Requiring drops no row: a View result whose field is `None` is an
+    A non-nullable Reference, resolved or reversed, holds its Entity rather than
+    `None`. Narrowing drops no row: a View result whose field is `None` is an
     unmet requirement, which the InMemoryViewEngine reports and a mapping function
-    raises. Requiring a field that is not optional, or in a Payload, is a
+    raises. Narrowing a field that is not optional, or in a Payload, is a
     diagnostic.
     """
+    selection = _selection(fields)
 
     def step(node: ir.Node) -> ir.Node:
-        return ir.Require(input=node, fields=fields)
+        return ir.NonNullable(input=node, fields=selection)
 
     return step
 
 
-def select(predicate: ir.FieldPredicate) -> ir.Select:
-    """The fields `predicate` accepts, for a step that acts on several fields."""
-    return ir.Select(predicate=predicate)
-
-
-def references() -> ir.References:
-    """Every Reference, for `resolve`: fields typed `X` or `X | None` for an ID `X`.
-
-    Not a predicate for `select`, since which types are IDs depends on the
-    catalog's `IdBase`.
-    """
-    return ir.References()
-
-
-def resolve(fields: ir.Select | ir.References, *then: Step) -> Step:
+def resolve(fields: Fields, *then: Step) -> Step:
     """Replaces each Reference in `fields` with the Entity it points to.
 
     A `department_id` field becomes `department`. The steps in `then` form a
     pipeline applied to each referenced Entity; without them, the field holds the
     Entity itself.
     """
+    selection = _selection(fields)
     nested = pipeline(*then)
 
     def step(node: ir.Node) -> ir.Node:
-        return ir.Resolve(input=node, fields=fields, then=nested)
+        return ir.Resolve(input=node, fields=selection, then=nested)
 
     return step
 
@@ -222,12 +243,12 @@ def reverse(entity: type[pydantic.BaseModel], *then: Step) -> Step:
     return _reversing(entity, ir.SoleReference(), then)
 
 
-def reverse_via(entity: type[pydantic.BaseModel], via: FieldName, *then: Step) -> Step:
+def reverse_via(entity: type[pydantic.BaseModel], via: Name, *then: Step) -> Step:
     """Like `reverse`, following `entity`'s one-to-one Reference `via` backwards.
 
     For an `entity` with several one-to-one References to the subject.
     """
-    return _reversing(entity, via, then)
+    return _reversing(entity, FieldName(via), then)
 
 
 def _reversing(
@@ -243,21 +264,23 @@ def _reversing(
     return step
 
 
-def flatten(fields: FieldName | ir.Select) -> Step:
-    """Replaces the resolved field named `fields`, or every resolved field `fields`
-    selects, with the fields of the Entity it holds, in its place.
+def flatten(fields: Fields) -> Step:
+    """Replaces each resolved field in `fields` with the fields of the Entity it
+    holds, in its place.
 
-    `resolve(select(...), omit("id"))` then `flatten("department")` gives the
-    Department's `name` at top level. A Select passes over the fields that are not
-    resolved; naming one is a diagnostic. A lifted field may not take a name the
+    `resolve("department_id", omit("id"))` then `flatten("department")` gives the
+    Department's `name` at top level. A Selector passes over the fields that are
+    not resolved; naming one is a diagnostic. A lifted field may not take a name the
     relation already has: rename or omit it in the resolve's nested pipeline. A
     field lifted out of an optional Reference is optional, `None` when the
     Reference is. A lifted Reference can be resolved, and a lifted resolved field
     flattened, like any other.
     """
 
+    selection = _selection(fields)
+
     def step(node: ir.Node) -> ir.Node:
-        return ir.Flatten(input=node, fields=fields)
+        return ir.Flatten(input=node, fields=selection)
 
     return step
 
@@ -278,8 +301,8 @@ def is_primary_key(field: ir.RelationField) -> bool:
 
 
 def hydrate(*then: Step) -> Step:
-    """Resolves every Reference: `resolve(references(), *then)`."""
-    return resolve(references(), *then)
+    """Resolves every Reference: `resolve(selectors.references(), *then)`."""
+    return resolve(selectors.references(), *then)
 
 
 def pipeline(*steps: Step) -> Step:

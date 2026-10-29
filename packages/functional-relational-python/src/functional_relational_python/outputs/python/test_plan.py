@@ -245,7 +245,7 @@ def test_a_default_whose_enum_cannot_be_imported_is_reported_for_its_field() -> 
     view = View(
         name=ViewName.fake(),
         source=Company,
-        step=steps.default(field, LocalColour.RED),
+        step=steps.default(field.root, LocalColour.RED),
     )
 
     assert diagnostics_of(
@@ -445,9 +445,7 @@ def test_one_name_in_different_modules_is_allowed() -> None:
 def test_generating_into_a_module_that_defines_a_used_class_is_a_diagnostic(
     python: PythonLayout,
 ) -> None:
-    view = View(
-        name=ViewName.fake(), source=Company, step=steps.project([FieldName("name")])
-    )
+    view = View(name=ViewName.fake(), source=Company, step=steps.pick(["name"]))
 
     assert [
         (type(diagnostic), diagnostic.module)

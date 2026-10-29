@@ -34,6 +34,7 @@ from functional_relational_python.outputs.python.plan import (
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import FirstParty, ModulePath
 from functional_relational_python.pipeline import conditions, ir, steps
+from functional_relational_python.pipeline import selectors as sel
 from functional_relational_python.pipeline.payloads import (
     DefinitionName,
     Payload,
@@ -134,7 +135,7 @@ def test_golden_view_model() -> None:
             View(
                 name=ViewName("CompanySummary"),
                 source=Company,
-                step=steps.omit(FieldName("secret")),
+                step=steps.omit("secret"),
             )
         ],
         [],
@@ -170,14 +171,14 @@ def test_golden_payload_model_next_to_a_view_model() -> None:
             View(
                 name=ViewName("CompanySummary"),
                 source=Company,
-                step=steps.project([FieldName("name")]),
+                step=steps.pick(["name"]),
             )
         ],
         [
             Payload(
                 name=PayloadName("CompanyCreate"),
                 source=Company,
-                step=steps.project([FieldName("name"), FieldName("tags")]),
+                step=steps.pick(["name", "tags"]),
             )
         ],
         single_module(ModulePath("app.models")),
@@ -211,10 +212,8 @@ def update_payload() -> Payload:
         name=PayloadName("CompanyPatch"),
         source=Company,
         step=steps.pipeline(
-            steps.project([FieldName("name"), FieldName("parent"), FieldName("tags")]),
-            steps.retype(
-                steps.select(lambda _: True), lambda annotation: annotation | MISSING
-            ),
+            steps.pick(["name", "parent", "tags"]),
+            steps.widen(sel.all_fields(), MISSING),
         ),
     )
 
@@ -255,13 +254,13 @@ def base_payloads() -> list[Payload]:
         Payload(
             name=PayloadName("CompanyCreate"),
             source=Company,
-            step=steps.project([FieldName("name"), FieldName("tags")]),
+            step=steps.pick(["name", "tags"]),
             base=NamedBase,
         ),
         Payload(
             name=PayloadName("CompanyUpdate"),
             source=Company,
-            step=steps.project([FieldName("id"), FieldName("kind")]),
+            step=steps.pick(["id", "kind"]),
             base=PutModel[CompanyId],
         ),
     ]
@@ -304,7 +303,7 @@ def test_a_field_the_base_declares_is_declared_again_to_set_its_default() -> Non
     payload = Payload(
         name=PayloadName("CompanyCreate"),
         source=Company,
-        step=steps.pipeline(steps.project([parent]), steps.default(parent, None)),
+        step=steps.pipeline(steps.pick(parent.root), steps.default(parent.root, None)),
         base=ParentBase,
     )
 
@@ -314,13 +313,13 @@ def test_a_field_the_base_declares_is_declared_again_to_set_its_default() -> Non
 
 
 def test_nested_models_subclass_the_default_base() -> None:
-    parent = steps.select(lambda field: field.name == FieldName("parent"))
+    parent = sel.matching(lambda field: field.name == FieldName("parent"))
     tree = View(
         name=ViewName("CompanyTree"),
         source=Company,
         step=steps.pipeline(
-            steps.project([FieldName("name"), FieldName("parent")]),
-            steps.resolve(parent, steps.project([FieldName("tags")])),
+            steps.pick(["name", "parent"]),
+            steps.resolve(parent, steps.pick(["tags"])),
         ),
         base=NamedBase,
     )
@@ -337,8 +336,8 @@ def tagged_view() -> View:
         name=ViewName("CompanyTagged"),
         source=Company,
         step=steps.pipeline(
-            steps.project([FieldName("name")]),
-            steps.add(FieldName("type"), Literal["company"], default="company"),
+            steps.pick(["name"]),
+            steps.add("type", Literal["company"], default="company"),
         ),
     )
 
@@ -351,8 +350,8 @@ def test_golden_added_fields() -> None:
                 name=PayloadName("CompanyCreate"),
                 source=Company,
                 step=steps.pipeline(
-                    steps.project([FieldName("name")]),
-                    steps.add(FieldName("note"), Text | None),
+                    steps.pick(["name"]),
+                    steps.add("note", Text | None),
                 ),
             )
         ],
@@ -385,13 +384,13 @@ class CompanyCreate(BaseModel, frozen=True):
 
 def hydrated_views() -> list[View]:
     """A Reference resolved to the Entity itself, and one through a nested pipeline."""
-    parent = steps.select(lambda field: field.name == FieldName("parent"))
+    parent = sel.matching(lambda field: field.name == FieldName("parent"))
     return [
         View(
             name=ViewName("CompanyWithParent"),
             source=Company,
             step=steps.pipeline(
-                steps.project([FieldName("id"), FieldName("parent")]),
+                steps.pick(["id", "parent"]),
                 steps.hydrate(),
             ),
         ),
@@ -399,8 +398,8 @@ def hydrated_views() -> list[View]:
             name=ViewName("CompanyTree"),
             source=Company,
             step=steps.pipeline(
-                steps.project([FieldName("id"), FieldName("parent")]),
-                steps.resolve(parent, steps.project([FieldName("name")])),
+                steps.pick(["id", "parent"]),
+                steps.resolve(parent, steps.pick(["name"])),
             ),
         ),
     ]
@@ -440,7 +439,7 @@ class CompanyTree(BaseModel, frozen=True):
 
 
 def test_golden_nested_class_and_empty_model() -> None:
-    omit_inner = steps.omit(FieldName("inner"))
+    omit_inner = steps.omit("inner")
     files = generate(
         [
             View(name=ViewName("WithInner"), source=Outer, step=steps.pipeline()),
@@ -610,7 +609,8 @@ def test_golden_default(case: DefaultCase) -> None:
                 name=ViewName("Defaulted"),
                 source=Settings,
                 step=steps.pipeline(
-                    steps.project([case.field]), steps.default(case.field, case.value)
+                    steps.pick(case.field.root),
+                    steps.default(case.field.root, case.value),
                 ),
             )
         ],
@@ -637,8 +637,8 @@ def defaulted_settings() -> View:
         name=ViewName("DefaultedSettings"),
         source=Settings,
         step=steps.pipeline(
-            steps.default(FieldName("note"), None),
-            steps.default(FieldName("colour"), Colour.RED),
+            steps.default("note", None),
+            steps.default("colour", Colour.RED),
         ),
     )
 
@@ -837,7 +837,7 @@ def test_generated_modules_pass_the_type_checker(tmp_path: Path) -> None:
             View(
                 name=ViewName("CompanySummary"),
                 source=Company,
-                step=steps.omit(FieldName("secret")),
+                step=steps.omit("secret"),
             ),
             View(name=ViewName("WithInner"), source=Outer, step=steps.pipeline()),
             view(Stamped),
@@ -876,7 +876,7 @@ def company_variant(name: ViewName, tag: Text) -> View:
         source=Company,
         step=steps.pipeline(
             steps.where(conditions.eq(conditions.field(FieldName("name")), tag)),
-            steps.project([FieldName("name")]),
+            steps.pick(["name"]),
             test_compiler.added_tag(FieldName("variant"), test_compiler.Tag(tag.root)),
         ),
     )
@@ -904,18 +904,18 @@ def nested_company_union() -> Union:
                                 conditions.field(FieldName("name")), Text("Named")
                             )
                         ),
-                        steps.project([]),
-                        steps.add(FieldName("variant"), Literal["brand"], "brand"),
-                        steps.add(FieldName("name"), Literal["named"], "named"),
+                        steps.pick([]),
+                        steps.add("variant", Literal["brand"], "brand"),
+                        steps.add("name", Literal["named"], "named"),
                     ),
                 ),
                 View(
                     name=ViewName("UnnamedBrand"),
                     source=Company,
                     step=steps.pipeline(
-                        steps.project([]),
-                        steps.add(FieldName("variant"), Literal["brand"], "brand"),
-                        steps.add(FieldName("name"), Literal["unnamed"], "unnamed"),
+                        steps.pick([]),
+                        steps.add("variant", Literal["brand"], "brand"),
+                        steps.add("name", Literal["unnamed"], "unnamed"),
                     ),
                 ),
             ),

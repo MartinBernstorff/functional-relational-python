@@ -21,6 +21,7 @@ from functional_relational_python.entity_graph.id import (
 )
 from functional_relational_python.outputs import engine
 from functional_relational_python.pipeline import conditions, ir, steps
+from functional_relational_python.pipeline import selectors as sel
 from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
 from functional_relational_python.support.diagnostic import DiagnosticsError
@@ -93,7 +94,7 @@ def row_of(company: Company, *omitted: FieldName) -> engine.ViewRow:
 def test_a_view_returns_each_entity_without_the_omitted_fields(
     omitted: tuple[FieldName, ...],
 ) -> None:
-    view = view_of(steps.pipeline(*map(steps.omit, omitted)))
+    view = view_of(steps.pipeline(*(steps.omit(field.root) for field in omitted)))
     view_engine = make_engine(view)
     companies = [Company.fake(CompanyId(1)), Company.fake(CompanyId(2))]
     for company in companies:
@@ -106,7 +107,7 @@ def test_a_view_returns_each_entity_without_the_omitted_fields(
 
 def test_a_renamed_field_keeps_its_value_and_position_under_the_new_name() -> None:
     new = FieldName("title")
-    view = view_of(steps.rename(FieldName("name"), new))
+    view = view_of(steps.rename("name", new.root))
     view_engine = make_engine(view)
     company = Company.fake(CompanyId.fake())
     view_engine.put(company).unwrap()
@@ -121,7 +122,7 @@ def test_a_renamed_field_keeps_its_value_and_position_under_the_new_name() -> No
 
 
 def test_omitting_the_selected_primary_key_drops_it_from_each_row() -> None:
-    view = view_of(steps.omit(steps.select(steps.is_primary_key)))
+    view = view_of(steps.omit(sel.matching(steps.is_primary_key)))
     view_engine = make_engine(view)
     company = Company.fake(CompanyId.fake())
     view_engine.put(company).unwrap()
@@ -149,8 +150,8 @@ def test_selected_renamed_fields_keep_their_values_and_positions() -> None:
     ]
 
 
-def test_a_projected_view_returns_each_entity_with_only_the_listed_fields() -> None:
-    view = view_of(steps.project([FieldName("name")]))
+def test_a_picked_view_returns_each_entity_with_only_the_listed_fields() -> None:
+    view = view_of(steps.pick(["name"]))
     view_engine = make_engine(view)
     company = Company.fake(CompanyId.fake())
     view_engine.put(company).unwrap()
@@ -174,9 +175,7 @@ def test_an_added_field_holds_its_default_in_each_row(
 ) -> None:
     added = FieldName("kind")
     view = view_of(
-        steps.pipeline(
-            steps.project([FieldName("name")]), steps.add(added, object, default)
-        )
+        steps.pipeline(steps.pick(["name"]), steps.add(added.root, object, default))
     )
     view_engine = make_engine(view)
     company = Company.fake(CompanyId.fake())
@@ -208,9 +207,7 @@ def test_a_view_over_an_empty_engine_has_no_rows() -> None:
 
 def test_views_over_the_same_entities_are_independent() -> None:
     full = View(name=ViewName("Full"), source=Company, step=steps.pipeline())
-    public = View(
-        name=ViewName("Public"), source=Company, step=steps.omit(FieldName("secret"))
-    )
+    public = View(name=ViewName("Public"), source=Company, step=steps.omit("secret"))
     view_engine = make_engine(full, public)
     company = Company.fake(CompanyId.fake())
     view_engine.put(company).unwrap()
@@ -311,7 +308,7 @@ def employee_view(step: steps.Step) -> View:
 
 
 def named(*fields: FieldName) -> ir.Select:
-    return steps.select(lambda field: field.name in fields)
+    return sel.matching(lambda field: field.name in fields)
 
 
 def test_hydrate_replaces_each_reference_with_its_entity() -> None:
@@ -340,7 +337,7 @@ def test_a_nested_pipeline_runs_on_the_referenced_entity() -> None:
         steps.resolve(
             named(FieldName("department_id")),
             steps.hydrate(),
-            steps.omit(FieldName("id")),
+            steps.omit("id"),
         )
     )
     view_engine = hr_engine(view)
@@ -447,9 +444,7 @@ def profile_engine(*views: View) -> engine.InMemoryViewEngine:
 
 
 def test_reverse_gives_the_entity_referencing_each_row_or_none() -> None:
-    view = employee_view(
-        steps.pipeline(steps.project([FieldName("id")]), steps.reverse(Profile))
-    )
+    view = employee_view(steps.pipeline(steps.pick(["id"]), steps.reverse(Profile)))
     view_engine = profile_engine(view)
     department = DepartmentId(1)
     with_profile = Employee.fake(EmployeeId(1), department, None)
@@ -467,9 +462,9 @@ def test_reverse_gives_the_entity_referencing_each_row_or_none() -> None:
 def test_flattening_a_reversed_entity_lifts_its_values_or_none() -> None:
     view = employee_view(
         steps.pipeline(
-            steps.project([FieldName("id")]),
-            steps.reverse(Profile, steps.project([FieldName("bio")])),
-            steps.flatten(FieldName("profile")),
+            steps.pick(["id"]),
+            steps.reverse(Profile, steps.pick(["bio"])),
+            steps.flatten("profile"),
         )
     )
     view_engine = profile_engine(view)
@@ -487,9 +482,7 @@ def test_flattening_a_reversed_entity_lifts_its_values_or_none() -> None:
 
 
 def test_a_reverse_sees_the_entities_put_since_the_last_read() -> None:
-    view = employee_view(
-        steps.pipeline(steps.project([FieldName("id")]), steps.reverse(Profile))
-    )
+    view = employee_view(steps.pipeline(steps.pick(["id"]), steps.reverse(Profile)))
     view_engine = profile_engine(view)
     employee = Employee.fake(EmployeeId(1), DepartmentId(1), None)
     view_engine.put(employee).unwrap()
@@ -510,8 +503,8 @@ def test_a_reverse_sees_the_entities_put_since_the_last_read() -> None:
 def test_a_nested_pipeline_runs_on_the_reversed_entity() -> None:
     view = employee_view(
         steps.pipeline(
-            steps.project([FieldName("id")]),
-            steps.reverse(Profile, steps.project([FieldName("bio")])),
+            steps.pick(["id"]),
+            steps.reverse(Profile, steps.pick(["bio"])),
         )
     )
     view_engine = profile_engine(view)
@@ -579,10 +572,10 @@ def test_flatten_lifts_the_referenced_entitys_values_into_each_row() -> None:
         steps.pipeline(
             steps.resolve(
                 named(FieldName("department_id")),
-                steps.omit(FieldName("id")),
+                steps.omit("id"),
                 steps.hydrate(),
             ),
-            steps.flatten(FieldName("department")),
+            steps.flatten("department"),
         )
     )
     view_engine = hr_engine(view)
@@ -610,11 +603,11 @@ def test_fields_lifted_out_of_an_absent_reference_are_none() -> None:
             steps.resolve(
                 named(FieldName("mentor_id")),
                 steps.rename(
-                    steps.select(lambda _field: True),
+                    sel.all_fields(),
                     lambda field: FieldName(f"mentor_{field.root}"),
                 ),
             ),
-            steps.flatten(FieldName("mentor")),
+            steps.flatten("mentor"),
         )
     )
     view_engine = hr_engine(view)
@@ -645,16 +638,16 @@ def test_fields_lifted_out_of_an_absent_reference_are_none() -> None:
 def mentor_flattened(*then: steps.Step) -> steps.Step:
     """Lifts the mentor's fields, prefixed `mentor_`; `then` runs on the mentor."""
     return steps.pipeline(
-        steps.project([FieldName("id"), FieldName("mentor_id")]),
+        steps.pick(["id", "mentor_id"]),
         steps.resolve(
             named(FieldName("mentor_id")),
             steps.rename(
-                steps.select(lambda _field: True),
+                sel.all_fields(),
                 lambda field: FieldName(f"mentor_{field.root}"),
             ),
             *then,
         ),
-        steps.flatten(FieldName("mentor")),
+        steps.flatten("mentor"),
     )
 
 
@@ -674,10 +667,10 @@ def mentor_flattened(*then: steps.Step) -> steps.Step:
                 mentor_flattened(
                     steps.resolve(
                         named(FieldName("mentor_department_id")),
-                        steps.project([FieldName("name")]),
+                        steps.pick(["name"]),
                     )
                 ),
-                steps.flatten(FieldName("mentor_department")),
+                steps.flatten("mentor_department"),
             ),
             FieldName("name"),
             Department.name_of,
@@ -712,10 +705,10 @@ def test_a_dangling_reference_lifted_out_is_reported_on_its_entity() -> None:
         steps.pipeline(
             steps.resolve(
                 named(FieldName("department_id")),
-                steps.omit(FieldName("id")),
+                steps.omit("id"),
                 steps.hydrate(),
             ),
-            steps.flatten(FieldName("department")),
+            steps.flatten("department"),
         )
     )
     view_engine = hr_engine(view)
@@ -1033,7 +1026,7 @@ def test_an_excluded_row_is_no_view_result_even_with_a_dangling_reference() -> N
     ]
 
 
-# require.
+# non_nullable.
 
 
 def unmet(
@@ -1047,7 +1040,7 @@ def unmet(
 
 
 def test_every_unmet_requirement_is_reported_with_every_id() -> None:
-    view = employee_view(steps.require(FieldName("mentor_id")))
+    view = employee_view(steps.non_nullable("mentor_id"))
     view_engine = hr_engine(view)
     unmentored = (
         Employee.fake(EmployeeId(1), DepartmentId(1), None),
@@ -1068,9 +1061,7 @@ def test_every_unmet_requirement_is_reported_with_every_id() -> None:
 
 def test_a_requirement_in_a_nested_pipeline_names_the_referenced_entity() -> None:
     view = employee_view(
-        steps.resolve(
-            named(FieldName("mentor_id")), steps.require(FieldName("mentor_id"))
-        )
+        steps.resolve(named(FieldName("mentor_id")), steps.non_nullable("mentor_id"))
     )
     view_engine = hr_engine(view)
     # Only `mentor` is looked up, and it has no mentor of its own.
@@ -1090,7 +1081,7 @@ def test_a_required_reference_that_is_absent_is_unmet() -> None:
     view = employee_view(
         steps.pipeline(
             steps.resolve(named(FieldName("mentor_id"))),
-            steps.require(FieldName("mentor")),
+            steps.non_nullable("mentor"),
         )
     )
     view_engine = hr_engine(view)
@@ -1106,7 +1097,7 @@ def test_a_required_reference_that_is_absent_is_unmet() -> None:
 
 def test_a_required_reverse_that_finds_nothing_is_unmet() -> None:
     view = employee_view(
-        steps.pipeline(steps.reverse(Profile), steps.require(FieldName("profile")))
+        steps.pipeline(steps.reverse(Profile), steps.non_nullable("profile"))
     )
     view_engine = profile_engine(view)
     with_profile = Employee.fake(EmployeeId(1), DepartmentId(1), None)
@@ -1130,8 +1121,8 @@ def test_a_required_reverse_that_finds_nothing_is_unmet() -> None:
 def test_a_met_requirement_gives_the_value() -> None:
     view = employee_view(
         steps.pipeline(
-            steps.project([FieldName("id"), FieldName("mentor_id")]),
-            steps.require(FieldName("mentor_id")),
+            steps.pick(["id", "mentor_id"]),
+            steps.non_nullable("mentor_id"),
         )
     )
     view_engine = hr_engine(view)
@@ -1149,7 +1140,7 @@ def test_an_excluded_row_is_not_checked_for_requirements() -> None:
     view = employee_view(
         steps.pipeline(
             steps.where(conditions.eq(conditions.field(FieldName("id")), kept)),
-            steps.require(FieldName("mentor_id")),
+            steps.non_nullable("mentor_id"),
         )
     )
     view_engine = hr_engine(view)
@@ -1195,10 +1186,10 @@ def test_an_unmet_requirement_names_the_entity_the_field_and_the_ids(
 def test_a_required_field_lifted_through_a_missing_entity_is_unmet() -> None:
     view = employee_view(
         steps.pipeline(
-            steps.project([FieldName("id")]),
-            steps.reverse(Profile, steps.project([FieldName("bio")])),
-            steps.flatten(FieldName("profile")),
-            steps.require(FieldName("bio")),
+            steps.pick(["id"]),
+            steps.reverse(Profile, steps.pick(["bio"])),
+            steps.flatten("profile"),
+            steps.non_nullable("bio"),
         )
     )
     view_engine = profile_engine(view)
@@ -1255,7 +1246,7 @@ def open_or_closed() -> Union:
             ticket_view(
                 ViewName("ClosedTicket"),
                 has_status(TicketStatus.CLOSED),
-                steps.require(FieldName("assignee")),
+                steps.non_nullable("assignee"),
             ),
         ),
     )

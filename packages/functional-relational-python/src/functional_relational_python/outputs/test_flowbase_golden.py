@@ -55,6 +55,7 @@ from functional_relational_python.outputs.python.plan import PythonLayout, Pytho
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import FirstParty, ModulePath
 from functional_relational_python.pipeline import conditions, ir, steps
+from functional_relational_python.pipeline import selectors as sel
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
@@ -200,7 +201,7 @@ class ShopOrder(pydantic.BaseModel, frozen=True):
 
 
 def named(*fields: FieldName) -> ir.Select:
-    return steps.select(lambda field: field.name in fields)
+    return sel.matching(lambda field: field.name in fields)
 
 
 def hydrate_membership() -> steps.Step:
@@ -381,7 +382,7 @@ class LinkedInCampaign(pydantic.BaseModel, frozen=True):
 
 
 def campaign_view() -> View:
-    without_base = steps.omit(FieldName("channel_campaign_id"))
+    without_base = steps.omit("channel_campaign_id")
     return View(
         name=ViewName("ChannelCampaignDetails"),
         source=ChannelCampaign,
@@ -594,12 +595,12 @@ def with_detail(entity: type[pydantic.BaseModel], *then: steps.Step) -> steps.St
     return steps.pipeline(
         steps.reverse(
             entity,
-            steps.omit(FieldName("id")),
-            steps.omit(FieldName("channel_campaign_id")),
+            steps.omit("id"),
+            steps.omit("channel_campaign_id"),
             *then,
         ),
-        steps.require(field),
-        steps.flatten(field),
+        steps.non_nullable(field.root),
+        steps.flatten(field.root),
     )
 
 
@@ -622,7 +623,7 @@ def meta_campaign_variants() -> tuple[View, View, View]:
                         conditions.is_null(conditions.field(FieldName("submitted_at"))),
                     )
                 ),
-                steps.omit(FieldName("submit_state")),
+                steps.omit("submit_state"),
                 with_detail(MetaCampaignEntity),
             ),
         ),
@@ -647,8 +648,8 @@ def meta_campaign_variants() -> tuple[View, View, View]:
                         *instance, has(FieldName("submit_state"), SubmitState.SUBMITTED)
                     )
                 ),
-                steps.require(FieldName("submitted_at")),
-                with_detail(MetaCampaignEntity, steps.require(FieldName("name"))),
+                steps.non_nullable("submitted_at"),
+                with_detail(MetaCampaignEntity, steps.non_nullable("name")),
             ),
         ),
     )
@@ -934,17 +935,17 @@ def update_meta_campaign_payload() -> Union:
     """Flowbase's `UpdateDraftMetaCampaignPayload` and
     `UpdateSubmittedMetaCampaignPayload`, as one Union tagged by `submit_state`.
     An update may leave any field out; a submitted campaign keeps its name."""
-    every_field = steps.select(lambda _: True)
+    every_field = sel.all_fields()
 
     def update(name: PayloadName, tag: ir.AddedType, *retypes: steps.Step) -> Payload:
         return Payload(
             name=name,
             source=MetaCampaignEntity,
             step=steps.pipeline(
-                steps.project([FieldName("name"), FieldName("lifetime_budget")]),
+                steps.pick(["name", "lifetime_budget"]),
                 *retypes,
                 steps.default(every_field, MISSING),
-                steps.add(FieldName("submit_state"), tag),
+                steps.add("submit_state", tag),
             ),
         )
 
@@ -955,16 +956,13 @@ def update_meta_campaign_payload() -> Union:
             update(
                 PayloadName("UpdateDraftMetaCampaignPayload"),
                 Literal[SubmitState.DRAFT],
-                steps.retype(every_field, lambda annotation: annotation | MISSING),
+                steps.widen(every_field, MISSING),
             ),
             update(
                 PayloadName("UpdateSubmittedMetaCampaignPayload"),
                 Literal[SubmitState.SUBMITTED],
-                steps.retype_to(FieldName("name"), CampaignName | MISSING),
-                steps.retype(
-                    FieldName("lifetime_budget"),
-                    lambda annotation: annotation | MISSING,
-                ),
+                steps.set_type("name", CampaignName | MISSING),
+                steps.widen("lifetime_budget", MISSING),
             ),
         ),
     )

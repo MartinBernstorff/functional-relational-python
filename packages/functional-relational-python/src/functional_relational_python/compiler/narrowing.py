@@ -1,5 +1,5 @@
 """Narrows the types of a View's fields: by the Filters its rows pass, and by
-`require`.
+`non_nullable`.
 
 A Filter refers to the subject's own fields, so narrowing by it narrows every
 field whose value is the field it tests, under whatever name.
@@ -134,12 +134,12 @@ def required(
             annotation = lookup.annotation()
     narrowed = split(annotation)
     if narrowed.required == typing.Literal[None]:
-        return diagnostics.RequireOnAlwaysNoneField(
+        return diagnostics.NonNullableOnAlwaysNoneField(
             view=view, source=source, field=field.name
         )
     match narrowed.optionality:
         case Optionality.REQUIRED:
-            return diagnostics.RequireOnRequiredField(
+            return diagnostics.NonNullableOnRequiredField(
                 view=view, source=source, field=field.name, annotation=annotation
             )
         case Optionality.OPTIONAL:
@@ -161,5 +161,5 @@ def required(
             value_required = value.required()
             narrowed = field.narrowed(value_required.annotation())
         case ir.Added():
-            return diagnostics.RequireAddedField(view=view, field=field.name)
+            return diagnostics.NonNullableAddedField(view=view, field=field.name)
     return narrowed.model_copy(update={"value": value_required})

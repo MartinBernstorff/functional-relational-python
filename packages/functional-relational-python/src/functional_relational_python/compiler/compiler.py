@@ -408,15 +408,15 @@ def _check_node(
             ir.Omit()
             | ir.Rename()
             | ir.RenameSelected()
-            | ir.Retype()
-            | ir.Project()
+            | ir.MapType()
+            | ir.Pick()
             | ir.Resolve()
             | ir.Flatten()
             | ir.Reverse()
             | ir.Default()
             | ir.Add()
             | ir.Where()
-            | ir.Require()
+            | ir.NonNullable()
         ):
             match _check_node(entity_graph, view, node.input):
                 case ir.Relation() as relation:
@@ -433,70 +433,104 @@ def _check_step(
     node: ir.Omit
     | ir.Rename
     | ir.RenameSelected
-    | ir.Retype
-    | ir.Project
+    | ir.MapType
+    | ir.Pick
     | ir.Resolve
     | ir.Flatten
     | ir.Reverse
     | ir.Default
     | ir.Add
     | ir.Where
-    | ir.Require,
+    | ir.NonNullable,
     relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
     """Checks one step against the relation its input has."""
     checked: ir.Relation | Poisoned
     match node:
         case ir.Omit():
-            checked = _check_omit(view, node, relation)
+            checked = _check_omit(entity_graph, view, node, relation)
         case ir.Rename():
             checked = _check_rename(view, node, relation)
         case ir.RenameSelected():
-            checked = _check_rename_selected(view, node, relation)
-        case ir.Retype():
-            checked = _check_retype(view, node, relation)
-        case ir.Project():
-            checked = _check_project(view, node, relation)
+            checked = _check_rename_selected(entity_graph, view, node, relation)
+        case ir.MapType():
+            checked = _check_map_type(entity_graph, view, node, relation)
+        case ir.Pick():
+            checked = _check_pick(entity_graph, view, node, relation)
         case ir.Resolve():
             checked = _check_resolve(entity_graph, view, node, relation)
         case ir.Flatten():
-            checked = _check_flatten(view, node, relation)
+            checked = _check_flatten(entity_graph, view, node, relation)
         case ir.Reverse():
             checked = _check_reverse(entity_graph, view, node, relation)
         case ir.Default():
-            checked = _check_default(view, node, relation)
+            checked = _check_default(entity_graph, view, node, relation)
         case ir.Add():
             checked = _check_add(view, node, relation)
         case ir.Where():
             checked = _check_where(entity_graph, view, node, relation)
-        case ir.Require():
-            checked = _check_require(view, node, relation)
+        case ir.NonNullable():
+            checked = _check_non_nullable(entity_graph, view, node, relation)
     return checked
 
 
-def _check_omit(
-    view: DefinitionName, node: ir.Omit, relation: ir.Relation
-) -> ir.Relation | Poisoned:
-    match node.fields:
-        case ir.Select() as selected:
-            # Selecting no field is no defect, as for `resolve`.
-            return relation.without(relation.selected(selected))
-        case FieldName() as field if field in relation.field_names():
-            return relation.without((field,))
-        case FieldName() as field:
-            # Omitting a field that is not there leaves the relation unchanged, so
-            # that is an exact recovery.
-            return Poisoned(
-                recovered=relation,
-                diagnostics=(
-                    diagnostics.UnknownField(
-                        owner=view,
-                        source=relation.source,
-                        field=field,
-                        valid=relation.field_names(),
+class _Selection(pydantic.BaseModel, frozen=True):
+    """The fields a step acts on, in field order, with each name it gave that the
+    relation does not have."""
+
+    names: tuple[FieldName, ...]
+    unknown: tuple[diagnostics.UnknownField, ...]
+
+    @staticmethod
+    def of(
+        entity_graph: EntityGraph,
+        view: DefinitionName,
+        fields: ir.FieldSelection,
+        relation: ir.Relation,
+    ) -> _Selection:
+        match fields:
+            case ir.Named(names=named):
+                return _Selection(
+                    names=tuple(
+                        name for name in relation.field_names() if name in named
                     ),
-                ),
-            )
+                    unknown=tuple(
+                        diagnostics.UnknownField(
+                            owner=view,
+                            source=relation.source,
+                            field=name,
+                            valid=relation.field_names(),
+                        )
+                        for name in named
+                        if name not in relation.field_names()
+                    ),
+                )
+            case ir.Select():
+                return _Selection(names=relation.selected(fields), unknown=())
+            case ir.References():
+                return _Selection(
+                    names=tuple(
+                        field.name
+                        for field in relation.fields
+                        if fields.selects(field, entity_graph)
+                    ),
+                    unknown=(),
+                )
+
+
+def _check_omit(
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    node: ir.Omit,
+    relation: ir.Relation,
+) -> ir.Relation | Poisoned:
+    selection = _Selection.of(entity_graph, view, node.fields, relation)
+    omitted = relation.without(selection.names)
+    if not selection.unknown:
+        return omitted
+    # Omitting a field that is not there leaves it out anyway, so that is an
+    # exact recovery.
+    return Poisoned(recovered=omitted, diagnostics=selection.unknown)
 
 
 def _check_rename(
@@ -550,23 +584,27 @@ def _recovered_rename(node: ir.Rename, relation: ir.Relation) -> ir.Relation:
 
 
 def _check_rename_selected(
-    view: DefinitionName, node: ir.RenameSelected, relation: ir.Relation
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    node: ir.RenameSelected,
+    relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
-    """Renames every selected field at once, so selected fields can swap names.
+    """Renames every named or selected field at once, so they can swap names.
 
     A selected field renamed onto a name that an unselected field, a selected
     field renamed to its own name, or an earlier selected field ends up with is a
     diagnostic. It is dropped, so the field that has the name keeps it, as for a
     single rename.
     """
-    new_names = {old: node.new(old) for old in relation.selected(node.fields)}
+    selection = _Selection.of(entity_graph, view, node.fields, relation)
+    new_names = {old: node.new(old) for old in selection.names}
     kept = {
         name for name in relation.field_names() if new_names.get(name, name) == name
     }
     taken = set(kept)
     renames: dict[FieldName, FieldName] = {}
     dropped: list[FieldName] = []
-    reported: list[diagnostics.CompileDiagnostic] = []
+    reported: list[diagnostics.CompileDiagnostic] = list(selection.unknown)
     for old, new in new_names.items():
         if old in kept:
             continue
@@ -585,37 +623,29 @@ def _check_rename_selected(
     return Poisoned(recovered=renamed, diagnostics=tuple(reported))
 
 
-def _check_retype(
-    view: DefinitionName, node: ir.Retype, relation: ir.Relation
+def _check_map_type(
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    node: ir.MapType,
+    relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
-    """Retypes the named field, or every selected field, in place.
+    """Gives every named or selected field, in place, the type the transform maps
+    its type to.
 
-    In a View, retyping is a diagnostic. Its fields are still retyped, so later
-    steps are checked against the types the pipeline asks for.
+    In a View, mapping types is a diagnostic. Its fields still get their new
+    types, so later steps are checked against the types the pipeline asks for.
     """
     reported: list[diagnostics.CompileDiagnostic] = []
     match view:
         case ViewName():
-            reported.append(diagnostics.RetypeInView(view=view))
+            reported.append(diagnostics.MapTypeInView(view=view))
         case PayloadName():
             pass
-    match node.fields:
-        case ir.Select() as selected:
-            retyped = relation.selected(selected)
-        case FieldName() as field:
-            retyped = (field,)
-            if field not in relation.field_names():
-                reported.append(
-                    diagnostics.UnknownField(
-                        owner=view,
-                        source=relation.source,
-                        field=field,
-                        valid=relation.field_names(),
-                    )
-                )
+    selection = _Selection.of(entity_graph, view, node.fields, relation)
+    reported.extend(selection.unknown)
     fields: list[ir.RelationField] = []
     for field in relation.fields:
-        if field.name not in retyped:
+        if field.name not in selection.names:
             fields.append(field)
             continue
         match field:
@@ -624,7 +654,7 @@ def _check_retype(
             case ir.NestedField():
                 # Left as it is, so later steps still find it.
                 reported.append(
-                    diagnostics.RetypeNestedField(
+                    diagnostics.MapTypeNestedField(
                         view=view, source=relation.source, field=field.name
                     )
                 )
@@ -635,60 +665,43 @@ def _check_retype(
     return Poisoned(recovered=checked, diagnostics=tuple(reported))
 
 
-def _check_project(
-    view: DefinitionName, node: ir.Project, relation: ir.Relation
+def _check_pick(
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    node: ir.Pick,
+    relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
-    kept = relation.keeping(node.fields)
-    unknown = tuple(
-        diagnostics.UnknownField(
-            owner=view,
-            source=relation.source,
-            field=field,
-            valid=relation.field_names(),
-        )
-        for field in node.fields
-        if field not in relation.field_names()
-    )
-    if not unknown:
+    selection = _Selection.of(entity_graph, view, node.fields, relation)
+    kept = relation.keeping(selection.names)
+    if not selection.unknown:
         return kept
     # The known fields are kept, so later steps are checked against them.
-    return Poisoned(recovered=kept, diagnostics=unknown)
+    return Poisoned(recovered=kept, diagnostics=selection.unknown)
 
 
 def _check_default(
-    view: DefinitionName, node: ir.Default, relation: ir.Relation
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    node: ir.Default,
+    relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
     """Gives the named or selected fields the default, if it is a literal.
 
     A defective default leaves the relation unchanged, so that is an exact
     recovery: later steps never depend on a field's default.
     """
-    reported: list[diagnostics.CompileDiagnostic] = []
-    match node.fields:
-        case ir.Select() as selected:
-            # Selecting no field is no defect, as for `omit`.
-            names = relation.selected(selected)
-        case FieldName() as field if field in relation.field_names():
-            names = (field,)
-        case FieldName() as field:
-            names = ()
-            reported.append(
-                diagnostics.UnknownField(
-                    owner=view,
-                    source=relation.source,
-                    field=field,
-                    valid=relation.field_names(),
-                )
-            )
+    selection = _Selection.of(entity_graph, view, node.fields, relation)
     match _default_value(view, node.value):
         case diagnostics.NonLiteralDefault() as invalid:
-            return Poisoned(recovered=relation, diagnostics=(*reported, invalid))
+            return Poisoned(
+                recovered=relation, diagnostics=(*selection.unknown, invalid)
+            )
         case default:
             pass
-    defaulted = relation.defaulted(names, default)
-    if not reported:
+    defaulted = relation.defaulted(selection.names, default)
+    if not selection.unknown:
         return defaulted
-    return Poisoned(recovered=defaulted, diagnostics=tuple(reported))
+    return Poisoned(recovered=defaulted, diagnostics=selection.unknown)
 
 
 def _check_add(
@@ -759,39 +772,30 @@ def _subject(node: ir.Node) -> ir.FromSource:
     return node
 
 
-def _check_require(
-    view: DefinitionName, node: ir.Require, relation: ir.Relation
+def _check_non_nullable(
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    node: ir.NonNullable,
+    relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
     """Narrows the named or selected fields from `X | None` to `X`.
 
-    Each field that cannot be required is a diagnostic, and is left as it is, so
-    later steps still find it. Requiring in a Payload is a diagnostic; its fields
-    are still narrowed, so later steps are checked against the types the pipeline
-    asks for, as for `retype` in a View.
+    Each field that cannot be made non-nullable is a diagnostic, and is left as it
+    is, so later steps still find it. Doing so in a Payload is a diagnostic; its
+    fields are still narrowed, so later steps are checked against the types the
+    pipeline asks for, as for `map_type` in a View.
     """
     reported: list[diagnostics.CompileDiagnostic] = []
     match view:
         case PayloadName():
-            reported.append(diagnostics.RequireInPayload(view=view))
+            reported.append(diagnostics.NonNullableInPayload(view=view))
         case ViewName():
             pass
-    match node.fields:
-        case ir.Select() as selected:
-            names = relation.selected(selected)
-        case FieldName() as field:
-            names = (field,)
-            if field not in relation.field_names():
-                reported.append(
-                    diagnostics.UnknownField(
-                        owner=view,
-                        source=relation.source,
-                        field=field,
-                        valid=relation.field_names(),
-                    )
-                )
+    selection = _Selection.of(entity_graph, view, node.fields, relation)
+    reported.extend(selection.unknown)
     fields: list[ir.RelationField] = []
     for field in relation.fields:
-        if field.name not in names:
+        if field.name not in selection.names:
             fields.append(field)
             continue
         match narrowing.required(view, relation.source, field):
@@ -852,21 +856,18 @@ def _check_resolve(
     node: ir.Resolve,
     relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
-    def selected(field: ir.RelationField) -> bool:
-        match node.fields:
-            case ir.Select(predicate=predicate):
-                return predicate(field)
-            case ir.References() as references:
-                return references.selects(field, entity_graph)
-
+    selection = _Selection.of(entity_graph, view, node.fields, relation)
     checked = tuple(
         _resolve_field(entity_graph, view, node, relation, field)
-        if selected(field)
+        if field.name in selection.names
         else _CheckedField(field=field, diagnostics=())
         for field in relation.fields
     )
     resolved = relation.with_fields(tuple(check.field for check in checked))
-    reported = tuple(d for check in checked for d in check.diagnostics)
+    reported = (
+        *selection.unknown,
+        *(d for check in checked for d in check.diagnostics),
+    )
     if not reported:
         return resolved
     return Poisoned(recovered=resolved, diagnostics=reported)
@@ -1174,18 +1175,20 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
 
 
 def _check_flatten(
-    view: DefinitionName, node: ir.Flatten, relation: ir.Relation
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    node: ir.Flatten,
+    relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
-    """Replaces the named resolved field, or each selected one, with the fields
-    of the Entity it holds, each computed from the subject through the Lookups
-    that find the Entity.
+    """Replaces each named or selected resolved field with the fields of the
+    Entity it holds, each computed from the subject through the Lookups that find
+    the Entity.
 
-    A Select ignores the fields that are not resolved. A named field that is not
+    A Selector ignores the fields that are not resolved. A named field that is not
     resolved is a diagnostic, and stays. A lifted field named like a field the
     relation keeps, or an earlier lifted field, is a diagnostic, and is dropped:
     the existing field keeps its name, as for a rename.
     """
-    reported: list[diagnostics.CompileDiagnostic] = []
     held: dict[FieldName, _HeldEntity] = {}
     for field in relation.fields:
         match _HeldEntity.of(field):
@@ -1193,25 +1196,20 @@ def _check_flatten(
                 held[field.name] = entity
             case ir.Field():
                 pass
+    selection = _Selection.of(entity_graph, view, node.fields, relation)
+    reported: list[diagnostics.CompileDiagnostic] = list(selection.unknown)
     match node.fields:
-        case ir.Select() as selected:
-            flattened = {name for name in relation.selected(selected) if name in held}
-        case FieldName() as name if name in held:
-            flattened = {name}
-        case FieldName() as name:
-            flattened = set[FieldName]()
-            reported.append(
+        case ir.Named():
+            reported.extend(
                 diagnostics.NotAResolvedField(
                     view=view, source=relation.source, field=name
                 )
-                if name in relation.field_names()
-                else diagnostics.UnknownField(
-                    owner=view,
-                    source=relation.source,
-                    field=name,
-                    valid=relation.field_names(),
-                )
+                for name in selection.names
+                if name not in held
             )
+        case ir.Select() | ir.References():
+            pass
+    flattened = {name for name in selection.names if name in held}
     # The fields that stay, so their names are taken before any field is lifted.
     taken = {field.name for field in relation.fields if field.name not in flattened}
     fields: list[ir.RelationField] = []

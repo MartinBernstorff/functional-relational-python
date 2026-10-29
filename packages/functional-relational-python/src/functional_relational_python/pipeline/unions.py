@@ -33,7 +33,7 @@ class Union(pydantic.BaseModel, frozen=True):
     which may read different Sources. Each Payload generates its own model as if
     the Catalog listed it. A Union of Payloads is a write model, so it generates
     only its model, no mapping function. A Payload has no Filters, so its Tag is
-    a field `retype_to` types, or `add` declares, as a `Literal` of one value.
+    a field `set_type` types, or `add` declares, as a `Literal` of one value.
     """
 
     name: UnionName

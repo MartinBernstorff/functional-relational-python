@@ -21,6 +21,7 @@ from functional_relational_python.entity_graph.id import (
     OneToOneMarker,
 )
 from functional_relational_python.pipeline import conditions, ir, steps
+from functional_relational_python.pipeline import selectors as sel
 from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.views import View, ViewName
 
@@ -127,7 +128,7 @@ def annotation_of(view: compiler.CompiledView, name: FieldName) -> RuntimeAnnota
 
 
 def named(*fields: FieldName) -> ir.Select:
-    return steps.select(lambda field: field.name in fields)
+    return sel.matching(lambda field: field.name in fields)
 
 
 kind = conditions.field(FieldName("kind"))
@@ -204,11 +205,11 @@ def test_and_ed_terms_narrow_however_deeply_they_are_and_ed() -> None:
 def test_narrowing_follows_a_renamed_field() -> None:
     view = compile_campaign(
         steps.pipeline(
-            steps.rename(FieldName("kind"), FieldName("tag")),
+            steps.rename("kind", "tag"),
             steps.where(
                 conditions.eq(conditions.field(FieldName("tag")), Kind.TEMPLATE)
             ),
-            steps.rename(FieldName("tag"), FieldName("variant")),
+            steps.rename("tag", "variant"),
         )
     )
 
@@ -265,8 +266,8 @@ def test_a_reference_filtered_not_none_resolves_to_a_required_lookup() -> None:
 # Requiring.
 
 
-def test_require_narrows_an_optional_field_and_requires_its_value() -> None:
-    view = compile_campaign(steps.require(FieldName("name")))
+def test_non_nullable_narrows_an_optional_field_and_requires_its_value() -> None:
+    view = compile_campaign(steps.non_nullable("name"))
 
     field = field_of(view, FieldName("name"))
     assert isinstance(field, ir.Field)
@@ -276,9 +277,9 @@ def test_require_narrows_an_optional_field_and_requires_its_value() -> None:
     )
 
 
-def test_require_with_a_select_requires_each_selected_field() -> None:
+def test_non_nullable_with_a_select_requires_each_selected_field() -> None:
     view = compile_campaign(
-        steps.require(named(FieldName("name"), FieldName("submitted_at")))
+        steps.non_nullable(named(FieldName("name"), FieldName("submitted_at")))
     )
 
     assert (
@@ -300,12 +301,12 @@ def owner_lookup() -> ir.Lookup:
     "step",
     [
         steps.pipeline(
-            steps.require(FieldName("owner_id")),
+            steps.non_nullable("owner_id"),
             steps.resolve(named(FieldName("owner_id"))),
         ),
         steps.pipeline(
             steps.resolve(named(FieldName("owner_id"))),
-            steps.require(FieldName("owner")),
+            steps.non_nullable("owner"),
         ),
     ],
     ids=["before-resolve", "after-resolve"],
@@ -323,8 +324,8 @@ def test_requiring_a_resolved_field_with_a_nested_pipeline_requires_its_lookup()
 ):
     view = compile_campaign(
         steps.pipeline(
-            steps.resolve(named(FieldName("owner_id")), steps.omit(FieldName("id"))),
-            steps.require(FieldName("owner")),
+            steps.resolve(named(FieldName("owner_id")), steps.omit("id")),
+            steps.non_nullable("owner"),
         )
     )
 
@@ -333,11 +334,11 @@ def test_requiring_a_resolved_field_with_a_nested_pipeline_requires_its_lookup()
     assert field.value == owner_lookup().required()
 
 
-def test_require_in_a_nested_pipeline_requires_the_referenced_entitys_field() -> None:
+def test_non_nullable_in_a_nested_pipeline_requires_the_referenced_entitys_field() -> (
+    None
+):
     view = compile_campaign(
-        steps.resolve(
-            named(FieldName("owner_id")), steps.require(FieldName("nickname"))
-        )
+        steps.resolve(named(FieldName("owner_id")), steps.non_nullable("nickname"))
     )
 
     field = field_of(view, FieldName("owner"))
@@ -353,7 +354,7 @@ def test_require_in_a_nested_pipeline_requires_the_referenced_entitys_field() ->
 
 def test_requiring_a_reversed_field_requires_its_lookup() -> None:
     view = compile_campaign(
-        steps.pipeline(steps.reverse(Detail), steps.require(FieldName("detail")))
+        steps.pipeline(steps.reverse(Detail), steps.non_nullable("detail"))
     )
 
     field = field_of(view, FieldName("detail"))
@@ -370,7 +371,7 @@ def test_requiring_a_reversed_field_requires_its_lookup() -> None:
 def test_a_required_field_can_still_be_filtered_on() -> None:
     view = compile_campaign(
         steps.pipeline(
-            steps.require(FieldName("submit_state")),
+            steps.non_nullable("submit_state"),
             steps.where(conditions.eq(submit_state, SubmitState.DRAFT)),
         )
     )
@@ -386,18 +387,16 @@ def test_a_required_field_can_still_be_filtered_on() -> None:
 @pytest.mark.parametrize(
     ("step", "field", "annotation"),
     [
-        (steps.require(FieldName("kind")), FieldName("kind"), Kind),
+        (steps.non_nullable("kind"), FieldName("kind"), Kind),
         (
-            steps.pipeline(
-                steps.require(FieldName("name")), steps.require(FieldName("name"))
-            ),
+            steps.pipeline(steps.non_nullable("name"), steps.non_nullable("name")),
             FieldName("name"),
             Text,
         ),
         (
             steps.pipeline(
                 steps.where(conditions.ne(submitted_at, None)),
-                steps.require(FieldName("submitted_at")),
+                steps.non_nullable("submitted_at"),
             ),
             FieldName("submitted_at"),
             SubmittedAt,
@@ -409,7 +408,7 @@ def test_requiring_a_field_that_is_not_optional_is_a_diagnostic(
     step: steps.Step, field: FieldName, annotation: RuntimeAnnotation
 ) -> None:
     assert campaign_diagnostics(step) == (
-        diagnostics.RequireOnRequiredField(
+        diagnostics.NonNullableOnRequiredField(
             view=ViewName.fake(),
             source=ir.SourceName("Campaign"),
             field=field,
@@ -421,38 +420,38 @@ def test_requiring_a_field_that_is_not_optional_is_a_diagnostic(
 def test_requiring_an_added_field_is_a_diagnostic() -> None:
     assert campaign_diagnostics(
         steps.pipeline(
-            steps.add(FieldName("note"), Text | None, default=None),
-            steps.require(FieldName("note")),
+            steps.add("note", Text | None, default=None),
+            steps.non_nullable("note"),
         )
-    ) == (diagnostics.RequireAddedField(view=ViewName.fake(), field=FieldName("note")),)
+    ) == (
+        diagnostics.NonNullableAddedField(
+            view=ViewName.fake(), field=FieldName("note")
+        ),
+    )
 
 
 def test_requiring_an_unknown_field_is_a_diagnostic_and_later_steps_are_checked() -> (
     None
 ):
     reported = campaign_diagnostics(
-        steps.pipeline(
-            steps.require(FieldName("missing")), steps.require(FieldName("kind"))
-        )
+        steps.pipeline(steps.non_nullable("missing"), steps.non_nullable("kind"))
     )
 
     assert [type(diagnostic) for diagnostic in reported] == [
         diagnostics.UnknownField,
-        diagnostics.RequireOnRequiredField,
+        diagnostics.NonNullableOnRequiredField,
     ]
 
 
 @pytest.mark.parametrize(
     "step",
     [
-        steps.require(FieldName("name")),
-        steps.resolve(
-            named(FieldName("owner_id")), steps.require(FieldName("nickname"))
-        ),
+        steps.non_nullable("name"),
+        steps.resolve(named(FieldName("owner_id")), steps.non_nullable("nickname")),
     ],
     ids=["own", "nested"],
 )
-def test_require_in_a_payload_is_a_diagnostic(step: steps.Step) -> None:
+def test_non_nullable_in_a_payload_is_a_diagnostic(step: steps.Step) -> None:
     payload = PayloadName("CampaignUpdate")
 
     match compiler.compile_catalog(
@@ -461,14 +460,16 @@ def test_require_in_a_payload_is_a_diagnostic(step: steps.Step) -> None:
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
-            assert error.diagnostics == (diagnostics.RequireInPayload(view=payload),)
+            assert error.diagnostics == (
+                diagnostics.NonNullableInPayload(view=payload),
+            )
 
 
-def test_building_a_require_checks_nothing() -> None:
+def test_building_a_non_nullable_checks_nothing() -> None:
     root = ir.FromSource(source=Campaign)
 
-    assert steps.require(FieldName("missing"))(root) == ir.Require(
-        input=root, fields=FieldName("missing")
+    assert steps.non_nullable("missing")(root) == ir.NonNullable(
+        input=root, fields=ir.Named(names=(FieldName("missing"),))
     )
 
 
@@ -476,37 +477,37 @@ def test_building_a_require_checks_nothing() -> None:
     ("diagnostic", "message"),
     [
         (
-            diagnostics.RequireInPayload(view=PayloadName("CampaignUpdate")),
+            diagnostics.NonNullableInPayload(view=PayloadName("CampaignUpdate")),
             (
-                "CampaignUpdate: a Payload cannot `require` a field, because it is "
-                "a write model with no values to require."
+                "CampaignUpdate: a Payload cannot make a field `non_nullable`, "
+                "because it is a write model with no values to require."
             ),
         ),
         (
-            diagnostics.RequireOnRequiredField(
+            diagnostics.NonNullableOnRequiredField(
                 view=ViewName("Submitted"),
                 source=ir.SourceName("Campaign"),
                 field=FieldName("kind"),
                 annotation=int,
             ),
             (
-                "Submitted: cannot require Campaign.kind, because its type "
+                "Submitted: cannot make Campaign.kind non-nullable, because its type "
                 "<class 'int'> is already required."
             ),
         ),
         (
-            diagnostics.RequireAddedField(
+            diagnostics.NonNullableAddedField(
                 view=ViewName("Submitted"), field=FieldName("note")
             ),
             (
-                "Submitted: cannot require 'note', because `add` declared it, so it "
-                "has no value to require."
+                "Submitted: cannot make 'note' non-nullable, because `add` declared "
+                "it, so it has no value to require."
             ),
         ),
     ],
     ids=["payload", "required", "added"],
 )
-def test_a_require_diagnostic_message_names_the_offending_values(
+def test_a_non_nullable_diagnostic_message_names_the_offending_values(
     diagnostic: diagnostics.CompileDiagnostic, message: str
 ) -> None:
     assert diagnostic.describe().root == message
@@ -524,9 +525,9 @@ def detail_lookup() -> ir.ReverseLookup:
 def test_requiring_a_lifted_field_requires_the_entity_and_its_field() -> None:
     view = compile_campaign(
         steps.pipeline(
-            steps.reverse(Detail, steps.project([FieldName("objective")])),
-            steps.flatten(FieldName("detail")),
-            steps.require(FieldName("objective")),
+            steps.reverse(Detail, steps.pick(["objective"])),
+            steps.flatten("detail"),
+            steps.non_nullable("objective"),
         )
     )
 
@@ -548,11 +549,11 @@ def test_requiring_a_field_lifted_through_an_optional_entity_requires_the_entity
         steps.pipeline(
             steps.reverse(
                 Detail,
-                steps.project([FieldName("id")]),
-                steps.rename(FieldName("id"), FieldName("detail_id")),
+                steps.pick(["id"]),
+                steps.rename("id", "detail_id"),
             ),
-            steps.flatten(FieldName("detail")),
-            steps.require(FieldName("detail_id")),
+            steps.flatten("detail"),
+            steps.non_nullable("detail_id"),
         )
     )
 
@@ -571,10 +572,10 @@ def test_requiring_a_field_a_where_keeps_only_none_in_is_a_diagnostic() -> None:
     assert campaign_diagnostics(
         steps.pipeline(
             steps.where(conditions.eq(submitted_at, None)),
-            steps.require(FieldName("submitted_at")),
+            steps.non_nullable("submitted_at"),
         )
     ) == (
-        diagnostics.RequireOnAlwaysNoneField(
+        diagnostics.NonNullableOnAlwaysNoneField(
             view=ViewName.fake(),
             source=ir.SourceName("Campaign"),
             field=FieldName("submitted_at"),
@@ -583,15 +584,16 @@ def test_requiring_a_field_a_where_keeps_only_none_in_is_a_diagnostic() -> None:
 
 
 def test_the_always_none_requirement_message_names_the_field() -> None:
-    diagnostic = diagnostics.RequireOnAlwaysNoneField(
+    diagnostic = diagnostics.NonNullableOnAlwaysNoneField(
         view=ViewName("Template"),
         source=ir.SourceName("Campaign"),
         field=FieldName("submitted_at"),
     )
 
     assert diagnostic.describe().root == (
-        "Template: cannot require Campaign.submitted_at, because a `where` keeps "
-        "only the rows where it is None, so the requirement is never met."
+        "Template: cannot make Campaign.submitted_at non-nullable, because a "
+        "`where` keeps only the rows where it is None, so the requirement is never "
+        "met."
     )
 
 
@@ -625,7 +627,7 @@ def test_a_condition_is_checked_against_the_type_the_source_declares(
 def test_a_condition_on_a_required_field_may_test_for_none() -> None:
     view = compile_campaign(
         steps.pipeline(
-            steps.require(FieldName("name")),
+            steps.non_nullable("name"),
             steps.where(conditions.is_null(conditions.field(FieldName("name")))),
         )
     )
@@ -647,7 +649,7 @@ class Constrained(pydantic.BaseModel):
 @pytest.mark.parametrize(
     "step",
     [
-        steps.require(FieldName("label")),
+        steps.non_nullable("label"),
         steps.where(conditions.ne(conditions.field(FieldName("label")), None)),
     ],
     ids=["require", "where"],
@@ -677,7 +679,7 @@ class Stamped(pydantic.BaseModel):
 @pytest.mark.parametrize(
     "step",
     [
-        steps.require(FieldName("stamped_at")),
+        steps.non_nullable("stamped_at"),
         steps.where(conditions.ne(conditions.field(FieldName("stamped_at")), None)),
     ],
     ids=["require", "where"],
@@ -709,7 +711,7 @@ def test_a_required_annotated_alias_is_inherited_from_a_base_declaring_it() -> N
     view = View(
         name=ViewName.fake(),
         source=Stamped,
-        step=steps.require(FieldName("stamped_at")),
+        step=steps.non_nullable("stamped_at"),
         base=StampedBase,
     )
 
@@ -754,7 +756,7 @@ def test_a_required_reference_marked_outside_its_none_resolves() -> None:
         name=ViewName.fake(),
         source=MarkedDetail,
         step=steps.pipeline(
-            steps.require(FieldName("campaign_id")),
+            steps.non_nullable("campaign_id"),
             steps.resolve(named(FieldName("campaign_id"))),
         ),
     )
@@ -789,11 +791,9 @@ def test_requiring_a_lifted_field_typed_by_an_optional_alias_requires_it() -> No
                     name=ViewName.fake(),
                     source=Campaign,
                     step=steps.pipeline(
-                        steps.reverse(
-                            AliasedDetail, steps.project([FieldName("objective")])
-                        ),
-                        steps.flatten(FieldName("aliased_detail")),
-                        steps.require(FieldName("objective")),
+                        steps.reverse(AliasedDetail, steps.pick(["objective"])),
+                        steps.flatten("aliased_detail"),
+                        steps.non_nullable("objective"),
                     ),
                 )
             ],

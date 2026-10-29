@@ -82,6 +82,7 @@ from functional_relational_python.outputs.python.test_mappings import (
     into,
 )
 from functional_relational_python.pipeline import conditions, ir, steps
+from functional_relational_python.pipeline import selectors as sel
 from functional_relational_python.pipeline.constraints import (
     Check,
     ConstraintName,
@@ -377,7 +378,7 @@ def queries_of(views: Iterable[View]) -> FileText:
 
 
 def named(*names: FieldName) -> ir.Select:
-    return steps.select(lambda field: field.name in names)
+    return sel.matching(lambda field: field.name in names)
 
 
 def golden_views() -> list[View]:
@@ -390,13 +391,11 @@ def golden_views() -> list[View]:
             step=steps.pipeline(
                 steps.resolve(
                     named(FieldName("department_id")),
-                    steps.resolve(
-                        named(FieldName("company_id")), steps.omit(FieldName("id"))
-                    ),
+                    steps.resolve(named(FieldName("company_id")), steps.omit("id")),
                 ),
                 steps.resolve(
                     named(FieldName("mentor_id")),
-                    steps.project([FieldName("name"), FieldName("department_id")]),
+                    steps.pick(["name", "department_id"]),
                 ),
             ),
         ),
@@ -404,8 +403,8 @@ def golden_views() -> list[View]:
             name=ViewName("EmployeeTagged"),
             source=Employee,
             step=steps.pipeline(
-                steps.project([FieldName("id")]),
-                steps.add(FieldName("kind"), str, default="employee"),
+                steps.pick(["id"]),
+                steps.add("kind", str, default="employee"),
             ),
         ),
         View(name=ViewName("NoteFull"), source=Note, step=steps.pipeline()),
@@ -421,39 +420,35 @@ def flattened_employee() -> View:
         step=steps.pipeline(
             steps.resolve(
                 named(FieldName("department_id")),
-                steps.omit(FieldName("id")),
-                steps.rename(FieldName("name"), FieldName("department_name")),
+                steps.omit("id"),
+                steps.rename("name", "department_name"),
                 steps.resolve(
                     named(FieldName("company_id")),
-                    steps.project([FieldName("name")]),
-                    steps.rename(FieldName("name"), FieldName("company_name")),
+                    steps.pick(["name"]),
+                    steps.rename("name", "company_name"),
                 ),
-                steps.flatten(FieldName("company")),
+                steps.flatten("company"),
             ),
-            steps.flatten(FieldName("department")),
+            steps.flatten("department"),
             steps.resolve(
                 named(FieldName("mentor_id")),
-                steps.project(
+                steps.pick(
                     [
-                        FieldName("name"),
-                        FieldName("department_id"),
-                        FieldName("mentor_id"),
+                        "name",
+                        "department_id",
+                        "mentor_id",
                     ]
                 ),
                 steps.resolve(named(FieldName("department_id"))),
                 steps.resolve(
                     named(FieldName("mentor_id")),
-                    steps.project([FieldName("name"), FieldName("nickname")]),
-                    steps.rename(
-                        steps.select(lambda _field: True), prefixed(Text("grand"))
-                    ),
+                    steps.pick(["name", "nickname"]),
+                    steps.rename(sel.all_fields(), prefixed(Text("grand"))),
                 ),
-                steps.flatten(FieldName("mentor")),
-                steps.rename(
-                    steps.select(lambda _field: True), prefixed(Text("mentor"))
-                ),
+                steps.flatten("mentor"),
+                steps.rename(sel.all_fields(), prefixed(Text("mentor"))),
             ),
-            steps.flatten(FieldName("mentor")),
+            steps.flatten("mentor"),
         ),
     )
 
@@ -1435,15 +1430,13 @@ def read_views() -> list[View]:
         View(
             name=ViewName("SelfReference"),
             source=Employee,
-            step=steps.hydrate(steps.hydrate(steps.omit(FieldName("name")))),
+            step=steps.hydrate(steps.hydrate(steps.omit("name"))),
         ),
         flattened_employee(),
         View(
             name=ViewName("OnlyAdded"),
             source=Employee,
-            step=steps.pipeline(
-                steps.project([]), steps.add(FieldName("kind"), str, default="x")
-            ),
+            step=steps.pipeline(steps.pick([]), steps.add("kind", str, default="x")),
         ),
         View(
             name=ViewName("Reversed"),
@@ -1453,7 +1446,7 @@ def read_views() -> list[View]:
         View(
             name=ViewName("ReversedNested"),
             source=Employee,
-            step=steps.reverse(Badge, steps.project([FieldName("label")])),
+            step=steps.reverse(Badge, steps.pick(["label"])),
         ),
         View(
             name=ViewName("ReverseInNested"),
@@ -1485,8 +1478,8 @@ def read_views() -> list[View]:
             name=ViewName("ReversedFlattened"),
             source=Employee,
             step=steps.pipeline(
-                steps.reverse(Badge, steps.project([FieldName("level")])),
-                steps.flatten(FieldName("badge")),
+                steps.reverse(Badge, steps.pick(["level"])),
+                steps.flatten("badge"),
             ),
         ),
         # A NULL rank of a Badge found is `Rank(None)`; one of no Badge, `None`.
@@ -1495,10 +1488,8 @@ def read_views() -> list[View]:
             name=ViewName("FlattenedRank"),
             source=Employee,
             step=steps.pipeline(
-                steps.reverse(
-                    Badge, steps.project([FieldName("rank"), FieldName("stars")])
-                ),
-                steps.flatten(FieldName("badge")),
+                steps.reverse(Badge, steps.pick(["rank", "stars"])),
+                steps.flatten("badge"),
             ),
         ),
         View(
@@ -1582,7 +1573,7 @@ def read_views() -> list[View]:
                     )
                 ),
                 steps.reverse(Badge),
-                steps.require(FieldName("badge")),
+                steps.non_nullable("badge"),
             ),
         ),
     ]
@@ -2340,8 +2331,8 @@ def test_an_unimportable_class_a_field_is_read_through_names_the_field() -> None
         name=ViewName("CompanyScore"),
         source=Company,
         step=steps.pipeline(
-            steps.reverse(plaque_entity, steps.project([FieldName("score")])),
-            steps.flatten(FieldName("plaque")),
+            steps.reverse(plaque_entity, steps.pick(["score"])),
+            steps.flatten("plaque"),
         ),
     )
     compiled = compiler.compile_views(graph, [view], []).unwrap()
@@ -2522,7 +2513,7 @@ def filtered_pipelines(
     required = draw(st.lists(st.sampled_from(optional), max_size=1)) if optional else []
     where = draw(filters)
     return steps.pipeline(
-        *map(steps.require, required),
+        *(steps.non_nullable(field.root) for field in required),
         *map(steps.where, where),
         draw(pipelines(entity_graph(), source, Depth(2))),
     )
@@ -2899,17 +2890,15 @@ def test_generated_queries_pass_the_type_checker(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-# require.
+# non_nullable.
 
 
 @pytest.mark.parametrize(
     "step",
     [
-        steps.require(FieldName("nickname")),
-        steps.resolve(
-            named(FieldName("mentor_id")), steps.require(FieldName("nickname"))
-        ),
-        steps.reverse(Badge, steps.require(FieldName("label"))),
+        steps.non_nullable("nickname"),
+        steps.resolve(named(FieldName("mentor_id")), steps.non_nullable("nickname")),
+        steps.reverse(Badge, steps.non_nullable("label")),
     ],
     ids=["field", "nested", "nested-in-reverse"],
 )
@@ -2931,25 +2920,25 @@ def test_an_unmet_required_field_fails_the_view_models_validation(
         (
             steps.pipeline(
                 steps.resolve(named(FieldName("mentor_id"))),
-                steps.require(FieldName("mentor")),
+                steps.non_nullable("mentor"),
             ),
             "mentor_id is required, but there is none for Employee",
         ),
         (
-            steps.pipeline(steps.reverse(Badge), steps.require(FieldName("badge"))),
+            steps.pipeline(steps.reverse(Badge), steps.non_nullable("badge")),
             "a Badge by employee_id is required, but there is none for Employee",
         ),
         # The mentor's own mentor may be `None`, so validation alone would not
         # fail where there is no mentor.
         (
             steps.pipeline(
-                steps.require(FieldName("mentor_id")),
+                steps.non_nullable("mentor_id"),
                 steps.resolve(
                     named(FieldName("mentor_id")),
-                    steps.project([FieldName("mentor_id")]),
-                    steps.rename(FieldName("mentor_id"), FieldName("grand_mentor_id")),
+                    steps.pick(["mentor_id"]),
+                    steps.rename("mentor_id", "grand_mentor_id"),
                 ),
-                steps.flatten(FieldName("mentor")),
+                steps.flatten("mentor"),
             ),
             "mentor_id is required, but there is none for Employee",
         ),
@@ -2971,7 +2960,7 @@ def test_a_met_requirement_reads_like_the_engine() -> None:
     view = View(
         name=ViewName("NicknamedEmployee"),
         source=Employee,
-        step=steps.require(FieldName("nickname")),
+        step=steps.non_nullable("nickname"),
     )
     entities = tuple(
         entity.model_copy(update={"nickname": Text("nick")})

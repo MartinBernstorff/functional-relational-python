@@ -42,7 +42,7 @@ class _Column(pydantic.BaseModel, frozen=True):
     that field's type as the subject declares it.
 
     A Condition is checked against the declared type, not the one an earlier
-    `where` or `require` narrowed the View's field to: it tests the subject's
+    `where` or `non_nullable` narrowed the View's field to: it tests the subject's
     field, whatever the View makes of it.
     """
 

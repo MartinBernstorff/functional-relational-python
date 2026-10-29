@@ -48,10 +48,10 @@ class FromSource(pydantic.BaseModel, frozen=True):
 
 
 class Omit(pydantic.BaseModel, frozen=True):
-    """Removes one named field, or every selected field."""
+    """Removes every named or selected field."""
 
     input: Node
-    fields: FieldName | Select
+    fields: FieldSelection
 
 
 class Rename(pydantic.BaseModel, frozen=True):
@@ -65,13 +65,13 @@ type FieldRenaming = Callable[[FieldName], FieldName]
 
 
 class RenameSelected(pydantic.BaseModel, frozen=True):
-    """Renames every selected field to `new` of its name, all at once.
+    """Renames every named or selected field to `new` of its name, all at once.
 
     Because the renames happen together, selected fields can swap names.
     """
 
     input: Node
-    fields: Select
+    fields: FieldSelection
     new: FieldRenaming
 
 
@@ -79,21 +79,28 @@ type TypeTransform = Callable[[RuntimeAnnotation], RuntimeAnnotation]
 """Gives a field its new type from its old one."""
 
 
-class Retype(pydantic.BaseModel, frozen=True):
-    """Gives the named field, or every selected field, the type `transform` maps
-    its type to. Only a Payload may retype; a View's mapping copies each value
-    unchanged."""
+class MapType(pydantic.BaseModel, frozen=True):
+    """Gives every named or selected field the type `transform` maps its type to.
+    Only a Payload may map types; a View's mapping copies each value unchanged."""
 
     input: Node
-    fields: FieldName | Select
+    fields: FieldSelection
     transform: TypeTransform
 
 
-class Project(pydantic.BaseModel, frozen=True):
-    """Keeps only `fields`, in the input's field order: the complement of Omit."""
+class Pick(pydantic.BaseModel, frozen=True):
+    """Keeps only the named or selected fields, in the input's field order: the
+    complement of Omit."""
 
     input: Node
-    fields: tuple[FieldName, ...]
+    fields: FieldSelection
+
+
+class Named(pydantic.BaseModel, frozen=True):
+    """The fields named `names`, in field order. Naming a field the relation does
+    not have is a diagnostic."""
+
+    names: tuple[FieldName, ...]
 
 
 class Select(pydantic.BaseModel, frozen=True):
@@ -137,6 +144,14 @@ class References(pydantic.BaseModel, frozen=True):
                 return False
 
 
+type Selector = Select | References
+"""Fields chosen by what they are rather than by name. Selecting no field is no
+defect."""
+
+type FieldSelection = Named | Selector
+"""The fields a step acts on."""
+
+
 class Resolve(pydantic.BaseModel, frozen=True):
     """Replaces each selected Reference with the Entity it points to.
 
@@ -144,16 +159,16 @@ class Resolve(pydantic.BaseModel, frozen=True):
     """
 
     input: Node
-    fields: Select | References
+    fields: FieldSelection
     then: Callable[[Node], Node]
 
 
 class Flatten(pydantic.BaseModel, frozen=True):
-    """Replaces one named resolved field, or every selected one, with the fields
-    of the Entity it holds."""
+    """Replaces every named or selected resolved field with the fields of the
+    Entity it holds."""
 
     input: Node
-    fields: FieldName | Select
+    fields: FieldSelection
 
 
 class SoleReference(pydantic.BaseModel, frozen=True):
@@ -180,8 +195,7 @@ type UncheckedDefault = object
 
 
 class Default(pydantic.BaseModel, frozen=True):
-    """Sets the default of one named field, or of every selected field, in the
-    generated model.
+    """Sets the default of every named or selected field in the generated model.
 
     `value` is unchecked: the compiler checks that it is a literal a generated
     model can write out.
@@ -190,7 +204,7 @@ class Default(pydantic.BaseModel, frozen=True):
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
 
     input: Node
-    fields: FieldName | Select
+    fields: FieldSelection
     value: UncheckedDefault
 
 
@@ -297,15 +311,16 @@ class Where(pydantic.BaseModel, frozen=True):
     condition: Condition
 
 
-class Require(pydantic.BaseModel, frozen=True):
-    """Narrows the named field, or every selected field, from `X | None` to `X`.
+class NonNullable(pydantic.BaseModel, frozen=True):
+    """Narrows every named or selected field from `X | None` to `X`.
 
     It drops no row: a `None` there is an unmet requirement when the View runs. A
-    View may require anywhere, a nested pipeline included; a Payload may not.
+    View may make fields non-nullable anywhere, a nested pipeline included; a
+    Payload may not.
     """
 
     input: Node
-    fields: FieldName | Select
+    fields: FieldSelection
 
 
 type Node = (
@@ -313,15 +328,15 @@ type Node = (
     | Omit
     | Rename
     | RenameSelected
-    | Retype
-    | Project
+    | MapType
+    | Pick
     | Resolve
     | Flatten
     | Reverse
     | Default
     | Add
     | Where
-    | Require
+    | NonNullable
 )
 
 
