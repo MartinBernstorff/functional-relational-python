@@ -21,8 +21,10 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityNode,
     FieldName,
     NoEntityError,
+    NoParent,
     NotAReferenceError,
     Optionality,
+    Parent,
     RuntimeAnnotation,
     SpecialForm,
 )
@@ -36,7 +38,8 @@ class SourceName(pydantic.RootModel[str], frozen=True):
 
 
 class FromSource(pydantic.BaseModel, frozen=True):
-    """The root of every pipeline: all fields of a Source.
+    """The root of every pipeline: all fields of a Source, a child Entity's
+    inherited ones included, see `EntityGraph.fields_of`.
 
     A Source is any Pydantic model. It need not be an Entity in the EntityGraph.
     """
@@ -127,7 +130,7 @@ class References(pydantic.BaseModel, frozen=True):
                 return False
             case Field():
                 pass
-        match field.reference_source():
+        match field.reference_source(entity_graph):
             case (source, info):
                 pass
             case Field():
@@ -372,7 +375,8 @@ type DefaultValue = (
 
 
 class SourceField(pydantic.BaseModel, frozen=True):
-    """The value of one of the subject's own fields.
+    """The value of one of the subject's own fields, or of a child Entity's
+    inherited ones.
 
     The subject is the View's Source, or inside a resolved field the referenced
     Entity.
@@ -536,18 +540,20 @@ class Lifted(pydantic.BaseModel, frozen=True):
     def lookups(self) -> tuple[EntityLookup, ...]:
         return self.through
 
-    def declared(self) -> FieldInfo | Undeclared:
-        """The field this value reads, as the Entity found declares it."""
-        declared = self.through[-1].target.model_fields.get(self.field.field.root)
+    def declared(self, entity_graph: EntityGraph) -> FieldInfo | Undeclared:
+        """The field this value reads, as the Entity found declares it or
+        inherits it."""
+        fields = entity_graph.fields_of(self.through[-1].target)
+        declared = fields.get(self.field.field)
         if declared is None:
             return Undeclared()
         return declared
 
-    def required(self) -> Lifted:
+    def required(self, entity_graph: EntityGraph) -> Lifted:
         """This value, required by the View: every Lookup on the way must find an
         Entity, and its field must hold a value. An Undeclared field is left as it
         is."""
-        match self.declared():
+        match self.declared(entity_graph):
             case FieldInfo(annotation=annotation):
                 optionality = Optionality.of_aliased_annotation(annotation).optionality
             case Undeclared():
@@ -674,7 +680,9 @@ class Field(pydantic.BaseModel, frozen=True):
         type's constraints."""
         return self._annotated(annotation, ())
 
-    def reference_source(self) -> tuple[FieldName, FieldInfo] | Field:
+    def reference_source(
+        self, entity_graph: EntityGraph
+    ) -> tuple[FieldName, FieldInfo] | Field:
         """The subject's field this field's ID is read from, with that field's
         info, if it is read unchanged from one: the subject's own, or one of the
         Entity a lifted field is read off. Otherwise, this field itself.
@@ -685,11 +693,14 @@ class Field(pydantic.BaseModel, frozen=True):
         match self.value:
             case SourceField(field=source) | RequiredField(field=source):
                 return (source, self.info)
-            case Lifted(through=through, field=read):
-                declared = through[-1].target.model_fields.get(read.field.root)
+            case Lifted(field=read) as lifted:
                 # A field recovered from a defective step may name no field of
                 # the Entity; it is no Reference then.
-                return self if declared is None else (read.field, declared)
+                match lifted.declared(entity_graph):
+                    case FieldInfo() as declared:
+                        return (read.field, declared)
+                    case Undeclared():
+                        return self
             case Lookup() | ReverseLookup() | ChainedLookup() | Added():
                 return self
 
@@ -787,17 +798,17 @@ class Relation(pydantic.BaseModel, frozen=True):
     filters: tuple[Filter, ...]
 
     @staticmethod
-    def of(node: FromSource) -> Relation:
+    def of(node: FromSource, entity_graph: EntityGraph) -> Relation:
         return Relation(
             source=node.source_name(),
             fields=tuple(
                 Field(
-                    name=FieldName(name),
+                    name=name,
                     info=info,
-                    value=SourceField(field=FieldName(name)),
+                    value=SourceField(field=name),
                     default=NoDefault(),
                 )
-                for name, info in node.source.model_fields.items()
+                for name, info in entity_graph.fields_of(node.source).items()
             ),
             filters=(),
         )
@@ -892,3 +903,111 @@ class Relation(pydantic.BaseModel, frozen=True):
         return self.with_fields(
             tuple(field for field in self.fields if field.name in names),
         )
+
+
+class Parents(pydantic.BaseModel, frozen=True):
+    """The Lookup that finds each child Entity's parent by its parent link, see
+    `ParentLink`.
+
+    A Relation reads a field a child inherits as one of the child's own, as a
+    Django child model holds it. A backend holding each Entity without the fields
+    it inherits reads such a field off the parent instead.
+    """
+
+    lookups: Mapping[type[pydantic.BaseModel], Lookup]
+
+    @staticmethod
+    def of(entity_graph: EntityGraph) -> Parents:
+        lookups: dict[type[pydantic.BaseModel], Lookup] = {}
+        for model, node in entity_graph.entities.items():
+            match node.parent:
+                case Parent(link=link):
+                    lookups[model] = Lookup(
+                        reference=SourceField(field=link.field),
+                        id_type=link.id_type,
+                        target=link.target,
+                        optionality=Optionality.REQUIRED,
+                    )
+                case NoParent():
+                    pass
+        return Parents(lookups=lookups)
+
+    def through(
+        self, subject: type[pydantic.BaseModel], field: FieldName
+    ) -> tuple[Lookup, ...]:
+        """The Lookups that find the Entity declaring `subject`'s `field`, from
+        `subject`: none when `subject` declares it, or no ancestor does."""
+        found: list[Lookup] = []
+        while field.root not in subject.model_fields and subject in self.lookups:
+            found.append(self.lookups[subject])
+            subject = self.lookups[subject].target
+        return tuple(found) if field.root in subject.model_fields else ()
+
+    def read_off_parents(
+        self, relation: Relation, subject: type[pydantic.BaseModel]
+    ) -> Relation:
+        """`relation` over `subject`, with each value it reads off a field a child
+        inherits read off the parent declaring it, through `through`. Its Filters
+        are unchanged: they read the subject's fields as its own."""
+        return relation.with_fields(
+            tuple(self._field(field, subject) for field in relation.fields)
+        )
+
+    def _field(
+        self, field: RelationField, subject: type[pydantic.BaseModel]
+    ) -> RelationField:
+        match field:
+            case NestedField(value=found, relation=nested):
+                return field.model_copy(
+                    update={
+                        "value": self._found(found, subject),
+                        "relation": self.read_off_parents(
+                            nested, found.lookups()[-1].target
+                        ),
+                    }
+                )
+            case Field(value=value):
+                pass
+        read: Value
+        match value:
+            case SourceField() | RequiredField():
+                through = self.through(subject, value.field)
+                read = Lifted(through=through, field=value) if through else value
+            case Lookup() | ReverseLookup() | ChainedLookup():
+                read = self._found(value, subject)
+            case Lifted(through=through, field=column):
+                read = Lifted(
+                    through=(
+                        *self._chain(through, subject),
+                        *self.through(through[-1].target, column.field),
+                    ),
+                    field=column,
+                )
+            case Added():
+                read = value
+        return field.model_copy(update={"value": read})
+
+    def _chain(
+        self, lookups: Iterable[EntityLookup], subject: type[pydantic.BaseModel]
+    ) -> tuple[EntityLookup, ...]:
+        """`lookups`, followed from `subject`, each Lookup of an inherited
+        Reference after the Lookups that find the parent declaring it."""
+        chain: list[EntityLookup] = []
+        for lookup in lookups:
+            match lookup:
+                case Lookup(reference=reference):
+                    chain.extend(self.through(subject, reference.field))
+                case ReverseLookup():
+                    pass
+            chain.append(lookup)
+            subject = lookup.target
+        return tuple(chain)
+
+    def _found(
+        self, found: EntityValue, subject: type[pydantic.BaseModel]
+    ) -> EntityValue:
+        match self._chain(found.lookups(), subject):
+            case (only,):
+                return only
+            case chain:
+                return ChainedLookup(chain=chain)

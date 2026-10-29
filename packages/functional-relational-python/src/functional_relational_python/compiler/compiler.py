@@ -63,7 +63,9 @@ class Poisoned(pydantic.BaseModel, frozen=True):
 
 class CompiledView(pydantic.BaseModel, frozen=True):
     """A checked View: its Source, the Relation backends compute from it, the
-    base its model subclasses, and the names its generated code uses.
+    base its model subclasses, the names its generated code uses, and how a
+    backend holding Entities without the fields they inherit finds their
+    parents.
 
     Every kept field `base` declares has the type it declares."""
 
@@ -72,6 +74,7 @@ class CompiledView(pydantic.BaseModel, frozen=True):
     base: type[pydantic.BaseModel]
     relation: ir.Relation
     names: ViewModelNames
+    parents: ir.Parents
 
     def leaves(self) -> tuple[CompiledView]:
         """This View, as the one leaf of itself, like a Union's leaves."""
@@ -366,6 +369,7 @@ def _check_view(entity_graph: EntityGraph, view: View) -> CompiledView | Poisone
                 base=view.base,
                 relation=relation,
                 names=names,
+                parents=ir.Parents.of(entity_graph),
             )
         case Err(error):
             return PoisonedView(name=view.name, diagnostics=error.diagnostics)
@@ -403,7 +407,7 @@ def _check_node(
 ) -> ir.Relation | Poisoned:
     match node:
         case ir.FromSource():
-            return ir.Relation.of(node)
+            return ir.Relation.of(node, entity_graph)
         case (
             ir.Omit()
             | ir.Rename()
@@ -754,7 +758,9 @@ def _check_where(
     checked.
     """
     match condition_checker.ConditionChecker(
-        owner=view, relation=relation, subject=_subject(node).source
+        owner=view,
+        relation=relation,
+        subject_fields=entity_graph.fields_of(_subject(node).source),
     ).check(node.condition):
         case condition_checker.Defects(diagnostics=reported):
             return Poisoned(recovered=relation, diagnostics=reported)
@@ -798,7 +804,7 @@ def _check_non_nullable(
         if field.name not in selection.names:
             fields.append(field)
             continue
-        match narrowing.required(view, relation.source, field):
+        match narrowing.required(view, relation.source, field, entity_graph):
             case ir.Field() | ir.NestedField() as narrowed:
                 fields.append(narrowed)
             case diagnostic:
@@ -924,7 +930,7 @@ def _lookup(
             pass
         case ir.NestedField():
             return not_a_reference
-    match field.reference_source():
+    match field.reference_source(entity_graph):
         case (source, info):
             pass
         case ir.Field():
@@ -1125,7 +1131,9 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
     relation: ir.Relation
 
     @staticmethod
-    def of(field: ir.RelationField) -> _HeldEntity | ir.Field:
+    def of(
+        field: ir.RelationField, entity_graph: EntityGraph
+    ) -> _HeldEntity | ir.Field:
         """The Entity `field` holds, or `field` itself when it is not resolved."""
         match field:
             case ir.Field(
@@ -1134,7 +1142,9 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
                 chain = found.lookups()
                 return _HeldEntity(
                     chain=chain,
-                    relation=ir.Relation.of(ir.FromSource(source=chain[-1].target)),
+                    relation=ir.Relation.of(
+                        ir.FromSource(source=chain[-1].target), entity_graph
+                    ),
                 )
             case ir.NestedField(value=found, relation=relation):
                 return _HeldEntity(chain=found.lookups(), relation=relation)
@@ -1191,7 +1201,7 @@ def _check_flatten(
     """
     held: dict[FieldName, _HeldEntity] = {}
     for field in relation.fields:
-        match _HeldEntity.of(field):
+        match _HeldEntity.of(field, entity_graph):
             case _HeldEntity() as entity:
                 held[field.name] = entity
             case ir.Field():

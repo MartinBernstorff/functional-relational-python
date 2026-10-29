@@ -89,6 +89,27 @@ class OneToOne:
     """
 
 
+@dataclasses.dataclass(frozen=True)
+class ParentLink(OneToOne):
+    """Marks a required one-to-one Reference as the Entity's parent link: the
+    Entity inherits the fields of the Entity it references, as a child model of
+    Django's multi-table inheritance inherits its parent's.
+
+    >>> class MetaCampaign(pydantic.BaseModel):
+    ...     id: MetaCampaignId
+    ...     channel_campaign_id: Annotated[ChannelCampaignId, ParentLink()]
+    ...     objective: MetaObjective
+
+    A View or Payload over `MetaCampaign` has the fields of `ChannelCampaign`,
+    then its own. Its own `id` takes the place of the parent's: a child's `id` is
+    its parent link's value. An Entity has at most one parent link, and declares
+    none of its parent's fields but `id`.
+
+    A parent link is one-to-one, so the catalog's `OneToOneMarker` must be frp's
+    `OneToOne`.
+    """
+
+
 class OneToOneMarker(RootModel[Annotated[type, SkipValidation]], frozen=True):
     """The class whose instances mark a Reference as one-to-one, named by the
     catalog: frp's `OneToOne`, or an application's own:

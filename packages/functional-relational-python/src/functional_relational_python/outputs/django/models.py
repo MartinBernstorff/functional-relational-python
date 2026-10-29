@@ -25,6 +25,16 @@ An Entity the application already has a Django model for, e.g. a hand-written
 `Company`, gets none: a Reference to it is a foreign key to that model, which
 the module imports. See `ExistingDjangoModel`.
 
+A child Entity, see `ParentLink`, gets a child model of Django's multi-table
+inheritance: it subclasses its parent's model, then its own bases, and declares
+only its own fields, its parent link as the `OneToOneField` with
+`parent_link=True` that keys it. Its parent link deletes it with its parent,
+unless `on_delete` says otherwise. Its `Meta` is its own: Django gives it its
+parent's ordering, unless its options give it one, but none of its parent's
+constraints or indexes. A parent's `Meta` is not inherited by subclassing it,
+since a concrete model has no `Meta` attribute unless an abstract base gives it
+one.
+
 Everything here is pure: it builds file contents and touches no filesystem, and
 it never imports Django. Migrations are the user's to make.
 """
@@ -54,7 +64,9 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     EntityNode,
     FieldName,
+    NoParent,
     Optionality,
+    Parent,
     Reference,
     RuntimeAnnotation,
 )
@@ -476,6 +488,9 @@ class ReferencePrimaryKey(pydantic.BaseModel, frozen=True):
     Reference's. The model declares no `id`, so a base class declaring an `id`
     primary key, e.g. an abstract model with a UUID `id`, would give it two;
     give such an Entity bases of its own.
+
+    A child Entity's model is keyed by its parent link, see `ParentLink`,
+    whether its options give it an `OwnPrimaryKey` or this.
     """
 
     reference: FieldName
@@ -721,8 +736,9 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
 
     `field_types` overrides the built-in rule for a type, see `FieldTypes`.
     `on_delete` sets what deleting the referenced Entity does, per Reference; a
-    Reference not in it is `PROTECT`. `queries` holds a QuerySet and a Manager per
-    Entity, which its model's manager is, see `DjangoQueriesRenderer`.
+    Reference not in it is `PROTECT`, a parent link `CASCADE`. `queries` holds a
+    QuerySet and a Manager per Entity, which its model's manager is, see
+    `DjangoQueriesRenderer`.
     `constraints` are each Entity's constraints, which its model's `Meta` lists
     with those its field types imply, see `DjangoModelsRenderer`.
     Entity, which its model's manager is, see `DjangoQueriesRenderer`. `existing`
@@ -837,18 +853,22 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
                     self.model_name_of(entity), reference
                 )
 
-    def column_field_of(
-        self, entity: type[pydantic.BaseModel], field: FieldName
-    ) -> FieldName:
-        """The field of `entity` whose column holds its `field`: for the `id` of
-        a model keyed by a Reference, that Reference, else `field`."""
-        own = self.entity_model_options.get(entity, EntityModelOptions.inherited())
+    def column_field_of(self, node: EntityNode, field: FieldName) -> FieldName:
+        """The field of `node`'s Entity whose column holds its `field`: for the
+        `id` of a model keyed by a Reference, that Reference, else `field`. A
+        child's model is keyed by its parent link."""
+        if field != EntityNode.primary_key:
+            return field
+        match node.parent:
+            case Parent(link=link):
+                return link.field
+            case NoParent():
+                pass
+        own = self.entity_model_options.get(node.model, EntityModelOptions.inherited())
         match own.primary_key:
-            case ReferencePrimaryKey(reference=reference) if (
-                field == EntityNode.primary_key
-            ):
+            case ReferencePrimaryKey(reference=reference):
                 return reference
-            case ReferencePrimaryKey() | OwnPrimaryKey():
+            case OwnPrimaryKey():
                 return field
 
     def query_set_of(self, entity: type[pydantic.BaseModel]) -> Symbol:
@@ -949,6 +969,22 @@ class DefaultForReferencePrimaryKey(pydantic.BaseModel, Diagnostic, frozen=True)
             f"{self.entity.__qualname__}.{EntityNode.primary_key.root}: its Django "
             "model options give it a default, but its column is that of the "
             f"primary key '{self.reference.root}'."
+        )
+
+
+class ChildNotKeyedByParentLink(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A child Entity's model options key it by `field`, but its parent link
+    keys every child model of Django's multi-table inheritance."""
+
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+    parent_link: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.entity.__qualname__}.{self.field.root}: its Django model "
+            "options make it the primary key, but a child model is keyed by its "
+            f"parent link '{self.parent_link.root}'."
         )
 
 
@@ -1406,6 +1442,7 @@ type DjangoDiagnostic = (
     | PrimaryKeyOfNonOneToOne
     | OptionalPrimaryKeyReference
     | DefaultForReferencePrimaryKey
+    | ChildNotKeyedByParentLink
     | SharedDbTable
     | SharedIndexName
     | _ConstraintDiagnostic
@@ -2021,7 +2058,8 @@ class DjangoModelsRenderer:
         Its imports of `first_party` packages are first party.
 
         Models are in name order, and refer to each other by name, so the order of
-        Entities does not matter.
+        Entities does not matter; a child model follows the models it subclasses,
+        after every model with fewer ancestors.
         """
         types = FieldTypes(overrides=config.field_types)
         reported: list[DjangoDiagnostic] = []
@@ -2062,7 +2100,11 @@ class DjangoModelsRenderer:
         )
         reported.extend(DjangoModelsRenderer._misplaced_constraints(graph, config))
         for model, node in sorted(
-            graph.entities.items(), key=lambda item: config.model_name_of(item[0]).root
+            graph.entities.items(),
+            key=lambda item: (
+                len(graph.ancestors(item[0])),
+                config.model_name_of(item[0]).root,
+            ),
         ):
             if not config.generates(model):
                 # Its fields are unknown, but reverse accessors may still clash.
@@ -2071,15 +2113,31 @@ class DjangoModelsRenderer:
                 )
                 continue
             options = config.options_of(model)
-            reported.extend(
-                DjangoModelsRenderer._misplaced_options(
-                    model,
-                    node,
-                    config.entity_model_options.get(
-                        model, EntityModelOptions.inherited()
-                    ),
-                )
-            )
+            own = config.entity_model_options.get(model, EntityModelOptions.inherited())
+            match node.parent:
+                case Parent(link=link):
+                    options = options.model_copy(
+                        update={
+                            "bases": (
+                                config.model_of(link.target),
+                                *(
+                                    ()
+                                    if isinstance(own.bases, Inherited)
+                                    else own.bases
+                                ),
+                            ),
+                            "meta": options.meta.model_copy(
+                                update={
+                                    "ordering": ()
+                                    if isinstance(own.ordering, Inherited)
+                                    else own.ordering
+                                }
+                            ),
+                        }
+                    )
+                case NoParent():
+                    pass
+            reported.extend(DjangoModelsRenderer._misplaced_options(model, node, own))
             declarations: list[_Declaration] = []
             for declared in DjangoModelsRenderer._declarations(
                 model, node, types, config
@@ -2102,7 +2160,7 @@ class DjangoModelsRenderer:
                 )
             )
             constraints = DjangoModelsRenderer._constraints(
-                config, model, node, config.constraints.get(model, ()), types
+                graph, config, node, config.constraints.get(model, ()), types
             )
             reported.extend(constraints.diagnostics)
             planned.append(
@@ -2131,6 +2189,7 @@ class DjangoModelsRenderer:
                     for model in planned
                     for symbol in model.referred()
                     if not DjangoField.is_in_models_module(symbol)
+                    and symbol.module != config.module
                 ),
                 *(symbol.imported() for symbol in enums.symbols.values()),
                 *(
@@ -2201,12 +2260,24 @@ class DjangoModelsRenderer:
         | PrimaryKeyOfNonOneToOne
         | OptionalPrimaryKeyReference
         | DefaultForReferencePrimaryKey
+        | ChildNotKeyedByParentLink
     ]:
         """Defaults for fields the Entity lacks, related names for fields that
         are not its References, and a primary key Django cannot key by, in its
         own options."""
-        match options.primary_key:
-            case ReferencePrimaryKey(reference=field):
+        match node.parent, options.primary_key:
+            case Parent(link=link), ReferencePrimaryKey(reference=field) if (
+                field != link.field
+            ):
+                yield ChildNotKeyedByParentLink(
+                    entity=model, field=field, parent_link=link.field
+                )
+            case Parent(link=link), _:
+                if EntityNode.primary_key in options.defaults:
+                    yield DefaultForReferencePrimaryKey(
+                        entity=model, reference=link.field
+                    )
+            case NoParent(), ReferencePrimaryKey(reference=field):
                 match next(
                     (found for found in node.references if found.field == field),
                     None,
@@ -2222,7 +2293,7 @@ class DjangoModelsRenderer:
                         yield PrimaryKeyOfNonOneToOne(entity=model, field=field)
                 if EntityNode.primary_key in options.defaults:
                     yield DefaultForReferencePrimaryKey(entity=model, reference=field)
-            case OwnPrimaryKey():
+            case NoParent(), OwnPrimaryKey():
                 pass
         yield from (
             DefaultForNonField(entity=model, field=field)
@@ -2300,10 +2371,10 @@ class DjangoModelsRenderer:
         defaults = config.options_of(model).defaults
         references = {reference.field: reference for reference in node.references}
         for name in model.model_fields:
-            if config.column_field_of(model, FieldName(name)) != FieldName(name):
+            if config.column_field_of(node, FieldName(name)) != FieldName(name):
                 continue
             declared = DjangoModelsRenderer._declaration(
-                model, references, types, config, FieldName(name)
+                node, references, types, config, FieldName(name)
             )
             default = defaults.get(FieldName(name))
             if isinstance(declared, _Declaration) and default is not None:
@@ -2313,16 +2384,17 @@ class DjangoModelsRenderer:
 
     @staticmethod
     def _declaration(
-        model: type[pydantic.BaseModel],
+        node: EntityNode,
         references: Mapping[FieldName, Reference],
         types: FieldTypes,
         config: DjangoModels,
         field: FieldName,
     ) -> _Declaration | _DeclarationDiagnostic:
         """`references` are the Entity's, by their field."""
+        model = node.model
         match references.get(field):
             case Reference() as reference:
-                return DjangoModelsRenderer._foreign_key(model, reference, config)
+                return DjangoModelsRenderer._foreign_key(node, reference, config)
             case None:
                 pass
         info = model.model_fields[field.root]
@@ -2402,12 +2474,18 @@ class DjangoModelsRenderer:
 
     @staticmethod
     def attribute_of(
-        config: DjangoModels, node: EntityNode, field: FieldName
+        config: DjangoModels,
+        graph: EntityGraph,
+        entity: type[pydantic.BaseModel],
+        field: FieldName,
     ) -> FieldName:
-        """The Django model attribute holding the value of the Entity's `field`:
+        """The Django model attribute holding the value of `entity`'s `field`:
         the ID attribute of the foreign key for a Reference, also for the `id` of
-        a model keyed by it, else the field."""
-        field = config.column_field_of(node.model, field)
+        a model keyed by it, else the field. A child's model holds an inherited
+        field under the attribute its ancestor's does."""
+        declaring = graph.declaring(entity, field)
+        node = graph.entities[declaring]
+        field = config.column_field_of(node, field)
         if any(reference.field == field for reference in node.references):
             return DjangoModelsRenderer.id_attribute(
                 DjangoModelsRenderer.foreign_key_name(field)
@@ -2426,19 +2504,21 @@ class DjangoModelsRenderer:
     @staticmethod
     def column_optionality(
         config: DjangoModels,
-        node: EntityNode,
+        graph: EntityGraph,
+        entity: type[pydantic.BaseModel],
         field: FieldName,
         field_types: FieldTypes,
     ) -> Optionality:
-        """Whether the column holding the Entity's `field` may be NULL: an optional
+        """Whether the column holding `entity`'s `field` may be NULL: an optional
         Reference's, also for the `id` of a model keyed by it, or one whose type,
         or a type it wraps, admits `None`. A field without a Django field rule may
-        be."""
-        field = config.column_field_of(node.model, field)
-        for reference in node.references:
+        be. An inherited field's column is its ancestor's."""
+        declaring = graph.declaring(entity, field)
+        field = config.column_field_of(graph.entities[declaring], field)
+        for reference in graph.entities[declaring].references:
             if reference.field == field:
                 return reference.optionality
-        annotation = node.model.model_fields[field.root].rebuild_annotation()
+        annotation = declaring.model_fields[field.root].rebuild_annotation()
         match field_types.field_of(annotation, FieldRole.PLAIN):
             case Ok(typed):
                 return typed.optionality
@@ -2449,40 +2529,45 @@ class DjangoModelsRenderer:
     def columns(
         graph: EntityGraph, config: DjangoModels, field_types: FieldTypes
     ) -> conditions.DjangoColumns:
-        """The column holding each field of each Entity."""
+        """The column holding each field of each Entity, inherited ones
+        included."""
         return conditions.DjangoColumns(
             of_entity={
                 model: {
                     field: conditions.DjangoColumn(
                         attribute=DjangoModelsRenderer.attribute_of(
-                            config, node, field
+                            config, graph, model, field
                         ),
                         optionality=DjangoModelsRenderer.column_optionality(
-                            config, node, field, field_types
+                            config, graph, model, field, field_types
                         ),
                     )
-                    for field in map(FieldName, model.model_fields)
+                    for field in graph.fields_of(model)
                 }
-                for model, node in graph.entities.items()
+                for model in graph.entities
             }
         )
 
     @staticmethod
     def _constraints(
+        graph: EntityGraph,
         config: DjangoModels,
-        model: type[pydantic.BaseModel],
         node: EntityNode,
         declared: Iterable[Constraint],
         types: FieldTypes,
     ) -> _ModelConstraints:
-        """The constraints `declared` for `model`, checked against it, then those
-        its fields' types imply."""
+        """The constraints `declared` for `model`, checked against its own
+        fields, then those its fields' types imply. Django constrains a child
+        model's own columns only, so a child's constraints cannot test the fields
+        it inherits."""
+        model = node.model
         planned: list[_PlannedConstraint] = []
         reported: list[_ConstraintDiagnostic] = []
-        relation = ir.Relation.of(ir.FromSource(source=model))
+        own = {FieldName(name): info for name, info in model.model_fields.items()}
+        relation = ir.Relation.of(ir.FromSource(source=model), graph).keeping(own)
         for constraint in declared:
             checker = condition_checker.ConditionChecker(
-                owner=constraint.name, relation=relation, subject=model
+                owner=constraint.name, relation=relation, subject_fields=own
             )
             match constraint:
                 case Check(condition=condition):
@@ -2687,7 +2772,7 @@ class DjangoModelsRenderer:
         """The Django model field holding the Entity's `field`: the foreign key
         for a Reference, also for the `id` of a model keyed by it, else the
         field."""
-        field = config.column_field_of(node.model, field)
+        field = config.column_field_of(node, field)
         if any(reference.field == field for reference in node.references):
             return DjangoModelsRenderer.foreign_key_name(field)
         return field
@@ -2897,23 +2982,28 @@ class DjangoModelsRenderer:
 
     @staticmethod
     def _foreign_key(
-        model: type[pydantic.BaseModel],
-        reference: Reference,
-        config: DjangoModels,
+        node: EntityNode, reference: Reference, config: DjangoModels
     ) -> _Declaration:
         """A foreign key to the referenced Entity's model, named without `_id`: a
         `OneToOneField` for a one-to-one Reference, else a `ForeignKey`. Without a
         reverse accessor, its related name is `"+"`. A generated model is named
         by a string, since it may be defined further down, an existing one by
         its imported class."""
+        model = node.model
         bound = config.model_of(reference.target).bound_name().root
         target = ValueExpression(
             PythonString(bound).literal().root
             if config.generates(reference.target)
             else bound
         )
+        match node.parent:
+            case Parent(link=link) if link == reference:
+                links_parent = True
+            case Parent() | NoParent():
+                links_parent = False
         deleted = config.on_delete.get(
-            ReferenceKey(entity=model, field=reference.field), OnDelete.PROTECT
+            ReferenceKey(entity=model, field=reference.field),
+            OnDelete.CASCADE if links_parent else OnDelete.PROTECT,
         )
         match reference.cardinality:
             case Cardinality.MANY_TO_ONE:
@@ -2936,7 +3026,9 @@ class DjangoModelsRenderer:
                 pass
             case ForeignKeyConstraint.NOT_ENFORCED:
                 arguments[Identifier("db_constraint")] = ValueExpression("False")
-        if config.column_field_of(model, EntityNode.primary_key) == reference.field:
+        if links_parent:
+            arguments[Identifier("parent_link")] = ValueExpression("True")
+        if config.column_field_of(node, EntityNode.primary_key) == reference.field:
             arguments[Identifier("primary_key")] = ValueExpression("True")
         return _Declaration(
             name=DjangoModelsRenderer.foreign_key_name(reference.field),

@@ -3,6 +3,10 @@
 It runs compiled Views and Unions over Entities held in memory. Users can use it
 as a stateful fake in their own tests, and every other backend is compared
 against it.
+
+A child Entity, see `ParentLink`, is held without the fields it inherits, as a
+child model's table is stored without its parent's columns: they are read off
+the parent held with the child's `id`, which its parent link holds too.
 """
 
 from collections.abc import Iterable, Mapping
@@ -16,7 +20,9 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     EntityNode,
     FieldName,
+    NoParent,
     Optionality,
+    Parent,
 )
 from functional_relational_python.entity_graph.id import IdValue
 from functional_relational_python.pipeline import ir
@@ -59,6 +65,23 @@ class NotAnEntityError(Exception):
     def __init__(self, model: type[pydantic.BaseModel]) -> None:
         self.model = model
         super().__init__(f"{model.__name__} is not an Entity in the EntityGraph.")
+
+
+class ChildIdMismatchError(Exception):
+    """`put` got a child Entity whose `id` is not its parent link's value, which
+    a child model of Django's multi-table inheritance cannot store."""
+
+    def __init__(
+        self, entity: pydantic.BaseModel, parent_link: FieldName, id_value: IdValue
+    ) -> None:
+        self.entity = entity
+        self.parent_link = parent_link
+        self.id_value = id_value
+        super().__init__(
+            f"{type(entity).__name__} {id_value.root!r} has the parent link "
+            f"{parent_link.root} {getattr(entity, parent_link.root).root!r}, but a "
+            "child's id is its parent link's value."
+        )
 
 
 class UnknownViewError(Exception):
@@ -212,12 +235,13 @@ class _Read:
     field the View requires, by that Entity and field.
     """
 
-    def __init__(self, stored: _Stored) -> None:
+    def __init__(self, stored: _Stored, entity_graph: EntityGraph) -> None:
         self.missing = _IdsFound()
         self.shared = _IdsFound()
         self.unmet = _IdsFound()
         self.unreferenced = _IdsFound()
         self._stored = stored
+        self._entity_graph = entity_graph
         self._indexes: dict[
             tuple[type[pydantic.BaseModel], FieldName],
             dict[IdValue, list[pydantic.BaseModel]],
@@ -235,12 +259,43 @@ class _Read:
         if key not in self._indexes:
             index: dict[IdValue, list[pydantic.BaseModel]] = {}
             for entity in self._stored.get(lookup.target, {}).values():
-                index.setdefault(getattr(entity, lookup.via.root), []).append(entity)
+                match self.holder_of(entity, lookup.via):
+                    case None:
+                        pass
+                    case holder:
+                        index.setdefault(getattr(holder, lookup.via.root), []).append(
+                            entity
+                        )
             self._indexes[key] = index
         found = self._indexes[key].get(id_value, [])
         if len(found) > 1:
             self.shared.add(lookup.target, lookup.via, id_value)
         return found[0] if found else None
+
+    def holder_of(
+        self, entity: pydantic.BaseModel, field: FieldName
+    ) -> pydantic.BaseModel | None:
+        """The Entity holding `entity`'s `field`: `entity`, or for a field it
+        inherits the ancestor declaring it, or `None` when an ancestor on the way
+        is missing, which `missing` records as a dangling parent link."""
+        found = entity
+        for link in self._entity_graph.ancestry(type(entity), field):
+            id_value = getattr(found, link.field.root)
+            match self._stored.get(link.target, {}).get(id_value):
+                case None:
+                    self.missing.add(type(found), link.field, id_value)
+                    return None
+                case parent:
+                    found = parent
+        return found
+
+    def value(self, entity: pydantic.BaseModel, field: FieldName) -> FieldValue:
+        """`entity`'s `field`, see `holder_of`; `None` without a holder."""
+        match self.holder_of(entity, field):
+            case None:
+                return None
+            case holder:
+                return getattr(holder, field.root)
 
     def diagnostics(self) -> tuple[ReadDiagnostic, ...]:
         """One per Entity and field, each with every ID found."""
@@ -296,11 +351,22 @@ class InMemoryViewEngine:
             type[pydantic.BaseModel], dict[IdValue, pydantic.BaseModel]
         ] = {}
 
-    def put(self, entity: pydantic.BaseModel) -> Result[None, NotAnEntityError]:
+    def put(
+        self, entity: pydantic.BaseModel
+    ) -> Result[None, NotAnEntityError | ChildIdMismatchError]:
+        """Holds `entity`. A child Entity is held without its parent, which is
+        put on its own."""
         model = type(entity)
         if model not in self._entity_graph.entities:
             return Err(NotAnEntityError(model))
         primary_key = getattr(entity, EntityNode.primary_key.root)
+        match self._entity_graph.parent_of(model):
+            case Parent(link=link) if (
+                getattr(entity, link.field.root).root != primary_key.root
+            ):
+                return Err(ChildIdMismatchError(entity, link.field, primary_key))
+            case Parent() | NoParent():
+                pass
         self._entities.setdefault(model, {})[primary_key] = entity
         return Ok(None)
 
@@ -325,11 +391,11 @@ class InMemoryViewEngine:
                 pass
         if compiled.source not in self._entity_graph.entities:
             return Err(NonEntitySourceError(view, compiled.source))
-        run = _Read(self._entities)
+        run = _Read(self._entities, self._entity_graph)
         rows = tuple(
             self._row(compiled.relation, entity, run)
             for entity in self._entities.get(compiled.source, {}).values()
-            if InMemoryViewEngine._keeps(compiled, entity)
+            if InMemoryViewEngine._keeps(compiled, entity, run)
         )
         return DiagnosticsError.or_ok(run.diagnostics(), lambda: rows)
 
@@ -352,12 +418,12 @@ class InMemoryViewEngine:
                 pass
         if compiled.source not in self._entity_graph.entities:
             return Err(NonEntitySourceError(union, compiled.source))
-        run = _Read(self._entities)
+        run = _Read(self._entities, self._entity_graph)
         rows: list[VariantRow] = []
         leaves = compiled.leaves()
         for entity in self._entities.get(compiled.source, {}).values():
             kept_by = (
-                leaf for leaf in leaves if InMemoryViewEngine._keeps(leaf, entity)
+                leaf for leaf in leaves if InMemoryViewEngine._keeps(leaf, entity, run)
             )
             match next(kept_by, None):
                 case None:
@@ -371,10 +437,13 @@ class InMemoryViewEngine:
         return DiagnosticsError.or_ok(run.diagnostics(), lambda: tuple(rows))
 
     @staticmethod
-    def _keeps(view: compiler.CompiledView, subject: pydantic.BaseModel) -> bool:
+    def _keeps(
+        view: compiler.CompiledView, subject: pydantic.BaseModel, run: _Read
+    ) -> bool:
         """Whether every Filter of `view` is true of `subject`."""
         return all(
-            InMemoryViewEngine._holds(kept, subject) for kept in view.relation.filters
+            InMemoryViewEngine._holds(kept, subject, run)
+            for kept in view.relation.filters
         )
 
     def _row(
@@ -396,7 +465,7 @@ class InMemoryViewEngine:
         match value:
             case ir.SourceField() | ir.RequiredField():
                 InMemoryViewEngine._check_required(value, subject, run)
-                return getattr(subject, value.field.root)
+                return run.value(subject, value.field)
             case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
                 return self._follow(value.lookups(), subject, run)
             case ir.Lifted(through=through, field=read):
@@ -404,7 +473,7 @@ class InMemoryViewEngine:
                 if entity is None:
                     return None
                 InMemoryViewEngine._check_required(read, entity, run)
-                return getattr(entity, read.field.root)
+                return run.value(entity, read.field)
             case ir.Added():
                 return InMemoryViewEngine._default(field)
 
@@ -426,25 +495,29 @@ class InMemoryViewEngine:
         return found
 
     @staticmethod
-    def _holds(kept: ir.Filter, subject: pydantic.BaseModel) -> bool:
+    def _holds(kept: ir.Filter, subject: pydantic.BaseModel, run: _Read) -> bool:
         """Whether `kept` is true of `subject`, with Python's two-valued null
         semantics: `None == x` is false and `None != x` is true."""
         match kept:
             case ir.FilterComparison(operator=operator, field=field, operand=operand):
                 match operand:
                     case ir.SourceField():
-                        right = getattr(subject, operand.field.root)
+                        right = run.value(subject, operand.field)
                     case ir.ScalarLiteral() | ir.EnumLiteral() | ir.RootModelLiteral():
                         right = operand.value()
-                return InMemoryViewEngine._compare(operator, subject, field, right)
+                return InMemoryViewEngine._compare(operator, subject, field, right, run)
             case ir.FilterIsNull(field=field):
-                return getattr(subject, field.field.root) is None
+                return run.value(subject, field.field) is None
             case ir.FilterAnd(terms=terms):
-                return all(InMemoryViewEngine._holds(term, subject) for term in terms)
+                return all(
+                    InMemoryViewEngine._holds(term, subject, run) for term in terms
+                )
             case ir.FilterOr(terms=terms):
-                return any(InMemoryViewEngine._holds(term, subject) for term in terms)
+                return any(
+                    InMemoryViewEngine._holds(term, subject, run) for term in terms
+                )
             case ir.FilterNot(term=term):
-                return not InMemoryViewEngine._holds(term, subject)
+                return not InMemoryViewEngine._holds(term, subject, run)
 
     @staticmethod
     def _compare(
@@ -452,10 +525,16 @@ class InMemoryViewEngine:
         subject: pydantic.BaseModel,
         field: ir.SourceField,
         right: FieldValue,
+        run: _Read,
     ) -> bool:
         """`subject.<field> <operator> right` in Python. The compiler only lets
-        through an ordering of non-optional fields whose type defines it."""
-        left: _Comparable = getattr(subject, field.field.root)
+        through an ordering of non-optional fields whose type defines it. A field
+        no Entity holds, since an ancestor is missing, compares like `None`."""
+        match run.holder_of(subject, field.field):
+            case None:
+                return operator is ir.ComparisonOperator.NE
+            case holder:
+                left: _Comparable = getattr(holder, field.field.root)
         compared: object
         match operator:
             case ir.ComparisonOperator.EQ:
@@ -507,7 +586,11 @@ class InMemoryViewEngine:
             case ir.Lookup():
                 reference = lookup.reference.field
                 InMemoryViewEngine._check_required(lookup.reference, subject, run)
-                id_value = getattr(subject, reference.root)
+                match run.holder_of(subject, reference):
+                    case None:
+                        return None
+                    case holder:
+                        id_value: IdValue | None = getattr(holder, reference.root)
                 if id_value is None:
                     return None
                 match self._entities.get(lookup.target, {}).get(id_value):
@@ -533,7 +616,7 @@ class InMemoryViewEngine:
         """Records in `run` that `subject`'s field `column` is `None`, if the View
         requires it."""
         match column:
-            case ir.RequiredField(field=field) if getattr(subject, field.root) is None:
+            case ir.RequiredField(field=field) if run.value(subject, field) is None:
                 run.unmet.add(
                     type(subject), field, getattr(subject, EntityNode.primary_key.root)
                 )

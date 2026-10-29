@@ -7,7 +7,9 @@ carries that meaning rather than an enum variant. A View that resolves Reference
 also takes, per Entity it looks up, a keyword parameter mapping IDs to Entities; a
 dangling ID raises `KeyError` there. A View that reverses a one-to-one Reference
 takes a parameter mapping the IDs in that Reference to the Entities holding them;
-a missing ID gives `None`. A value the View requires goes through a function
+a missing ID gives `None`. A View over a child Entity, see `ParentLink`, reads a
+field the child inherits off its parent, which it looks up by the child's parent
+link like a resolved Reference. A value the View requires goes through a function
 `_required` the module defines, which raises `ValueError` naming the subject's
 field and ID when the value is `None`. A module of mapping functions imports only
 the Source, Entity and View model modules, so it runs and type checks without
@@ -896,7 +898,13 @@ class _FilterWriter(pydantic.BaseModel, frozen=True):
         )
 
     def _field(self, field: ir.SourceField) -> Expression:
-        return Expression(f"{FunctionPlan.source_parameter.root}.{field.field.root}")
+        """The Source's `field`, read off the parent declaring it if the Source
+        inherits it."""
+        holder = FunctionPlan.source_parameter.root
+        for lookup in self.function.filtered_through.get(field.field, ()):
+            parameter = self.function.parameter_of(lookup).root
+            holder = f"{parameter}[{holder}.{lookup.reference.field.root}]"
+        return Expression(f"{holder}.{field.field.root}")
 
     def _operand(self, operand: ir.SourceField | ir.FilterLiteral) -> Expression:
         match operand:

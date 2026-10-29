@@ -1,3 +1,5 @@
+from typing import Annotated
+
 import pydantic
 import pytest
 from safe_result import Err, Ok
@@ -5,7 +7,12 @@ from safe_result import Err, Ok
 from functional_relational_python.compiler import compiler, test_compiler
 from functional_relational_python.compiler.model_names import InvalidModelName
 from functional_relational_python.entity_graph.entity_graph import FieldName
-from functional_relational_python.entity_graph.id import Id, IdBase, OneToOneMarker
+from functional_relational_python.entity_graph.id import (
+    Id,
+    IdBase,
+    OneToOneMarker,
+    ParentLink,
+)
 from functional_relational_python.outputs.django.models import (
     DjangoModels,
     NoDjangoFieldRule,
@@ -140,6 +147,33 @@ invalid_view_and_django_catalog = invalid_catalog.model_copy(
 not_a_catalog = Text("catalog")
 
 
+class BranchId(Id[int]):
+    pass
+
+
+class Branch(pydantic.BaseModel):
+    """A child of `Company`, which inherits its fields."""
+
+    id: BranchId
+    company_id: Annotated[CompanyId, ParentLink()]
+    city: Text
+
+
+class FranchiseId(Id[int]):
+    pass
+
+
+class Franchise(pydantic.BaseModel):
+    id: FranchiseId
+    company_id: Annotated[CompanyId, ParentLink()]
+    branch_id: Annotated[BranchId, ParentLink()]
+
+
+several_parent_links_catalog = catalog.model_copy(
+    update={"entities": [Company, Branch, Franchise]}
+)
+
+
 def project(catalog_path: ImportPath) -> tuple[InMemoryFileSystem, Directory]:
     filesystem, root = InMemoryFileSystem(), Directory.fake()
     config = ProjectConfig.default().model_copy(update={"catalog": catalog_path})
@@ -256,6 +290,7 @@ def test_check_reports_an_edited_file() -> None:
             in_this_module(Text("django_into_a_python_module_catalog")),
             DiagnosticsError,
         ),
+        (in_this_module(Text("several_parent_links_catalog")), DiagnosticsError),
     ],
 )
 def test_generate_reports_why_it_cannot_run(
@@ -412,3 +447,56 @@ def test_generate_reports_a_model_the_layout_places_nowhere_once() -> None:
                     returned=ReturnedText.of(None),
                 ),
             )
+
+
+child_catalog = catalog.model_copy(
+    update={
+        "entities": [Company, Branch],
+        "views": [
+            View(
+                name=ViewName("BranchCard"),
+                source=Branch,
+                step=steps.pipeline(
+                    steps.where(
+                        conditions.ne(conditions.field(FieldName("name")), Text(""))
+                    ),
+                    steps.omit("company_id"),
+                ),
+            )
+        ],
+        "payloads": [
+            Payload(
+                name=PayloadName("BranchCreate"),
+                source=Branch,
+                step=steps.pick(["name", "city"]),
+            )
+        ],
+    }
+)
+
+
+def test_generate_writes_a_child_entity_as_a_child_model_its_views_read_through() -> (
+    None
+):
+    filesystem, root = project(in_this_module(Text("child_catalog")))
+    _ = commands.generate(filesystem, root).unwrap()
+
+    def written(module: ModulePath) -> FileText:
+        return filesystem.files[root.file(module.file_path())]
+
+    assert "class Branch(Company):\n" in written(DjangoModels.fake().module).root
+    assert "        parent_link=True,\n" in written(DjangoModels.fake().module).root
+    assert (
+        "class BranchCard(BaseModel, frozen=True):\n    id: BranchId\n    name: Text\n"
+        in written(ModulePath("app.cards")).root
+    )
+    assert (
+        "class BranchCreate(BaseModel, frozen=True):\n    name: Text\n    city: Text\n"
+        in written(ModulePath("app.payloads")).root
+    )
+    assert (
+        "company_by_id[source.company_id].name"
+        in written(ModulePath("app.mappings")).root
+    )
+    assert '"name": row.name,' in written(DjangoModels.fake().queries).root
+    assert commands.check(filesystem, root) == Ok(None)

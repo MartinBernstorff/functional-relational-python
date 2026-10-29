@@ -3,12 +3,15 @@ the Filter backends run."""
 
 import types
 import typing
+from collections.abc import Mapping
 from typing import Annotated
 
 import pydantic
+from pydantic.fields import FieldInfo
 
 from functional_relational_python.compiler import diagnostics, literals, narrowing
 from functional_relational_python.entity_graph.entity_graph import (
+    FieldName,
     Optionality,
     RuntimeAnnotation,
     SplitAnnotation,
@@ -74,12 +77,15 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
 
     Every defective term is reported, not only the first. `owner` is what the
     Condition belongs to: a View's or Payload's `where`, or a constraint, whose
-    relation is its Entity's.
+    relation is its Entity's. `subject_fields` are the subject's fields, as it
+    declares or inherits them.
     """
+
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
 
     owner: ConditionOwner
     relation: ir.Relation
-    subject: type[pydantic.BaseModel]
+    subject_fields: Mapping[FieldName, FieldInfo]
 
     def check(self, condition: ir.Condition) -> ir.Filter | Defects:
         checked: ir.Filter | Defects
@@ -132,7 +138,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
                 ) as field,
                 *_,
             ]:
-                declared = self.subject.model_fields.get(column.root)
+                declared = self.subject_fields.get(column)
                 return _Column(
                     field=field,
                     source=ir.SourceField(field=column),

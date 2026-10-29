@@ -15,6 +15,7 @@ from functional_relational_python.entity_graph.id import (
     IdBase,
     OneToOne,
     OneToOneMarker,
+    ParentLink,
 )
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
@@ -692,3 +693,209 @@ def test_the_id_base_itself_is_not_an_id_type() -> None:
 def test_an_id_base_is_a_strict_subclass_of_root_model(base: object) -> None:
     with pytest.raises(ValueError, match="strict subclass of RootModel"):
         _ = IdBase.model_validate(base)
+
+
+class ProjectBriefId(Id[int]):
+    pass
+
+
+class ProjectBrief(BaseModel):
+    """A child of `Project`, which inherits its fields."""
+
+    id: ProjectBriefId
+    project_id: Annotated[ProjectId, ParentLink()]
+    goal: Name
+
+
+class SummaryId(Id[int]):
+    pass
+
+
+class Summary(BaseModel):
+    """A child of the child `ProjectBrief`."""
+
+    id: SummaryId
+    brief_id: Annotated[ProjectBriefId, ParentLink()]
+    text: Name
+
+
+def test_a_child_has_its_parents_fields_its_own_id_in_place_of_the_parents() -> None:
+    graph = entity_graph.EntityGraph.build(
+        [Department, Employee, Project, ProjectBrief, Summary],
+        IdBase.fake(),
+        OneToOneMarker.fake(),
+    ).unwrap()
+
+    assert {
+        name.root: info.annotation for name, info in graph.fields_of(Summary).items()
+    } == {
+        "id": SummaryId,
+        "owner_id": EmployeeId,
+        "department_id": DepartmentId | None,
+        "project_id": ProjectId,
+        "goal": Name,
+        "brief_id": ProjectBriefId,
+        "text": Name,
+    }
+    assert list(graph.fields_of(Summary)) == [
+        entity_graph.FieldName(name)
+        for name in (
+            "id",
+            "owner_id",
+            "department_id",
+            "project_id",
+            "goal",
+            "brief_id",
+            "text",
+        )
+    ]
+
+
+def test_an_inherited_field_is_read_through_each_parent_link_to_its_declarer() -> None:
+    graph = entity_graph.EntityGraph.build(
+        [Department, Employee, Project, ProjectBrief, Summary],
+        IdBase.fake(),
+        OneToOneMarker.fake(),
+    ).unwrap()
+
+    assert [
+        (link.field.root, link.target)
+        for link in graph.ancestry(Summary, entity_graph.FieldName("owner_id"))
+    ] == [("brief_id", ProjectBrief), ("project_id", Project)]
+    assert graph.ancestry(Summary, entity_graph.FieldName("id")) == ()
+
+
+def test_a_plain_one_to_one_reference_inherits_nothing() -> None:
+    graph = entity_graph.EntityGraph.build(
+        [Department, Employee, Project, ProjectDetail],
+        IdBase.fake(),
+        OneToOneMarker.fake(),
+    ).unwrap()
+
+    assert list(graph.fields_of(ProjectDetail)) == list(
+        map(entity_graph.FieldName, ProjectDetail.model_fields)
+    )
+    assert graph.entities[ProjectDetail].parent == entity_graph.NoParent()
+
+
+class TwoParents(BaseModel):
+    id: ProjectBriefId
+    project_id: Annotated[ProjectId, ParentLink()]
+    department_id: Annotated[DepartmentId, ParentLink()]
+
+
+class OptionalParent(BaseModel):
+    id: ProjectBriefId
+    project_id: Annotated[ProjectId | None, ParentLink()]
+
+
+class RedeclaresOwner(BaseModel):
+    id: ProjectBriefId
+    project_id: Annotated[ProjectId, ParentLink()]
+    owner_id: EmployeeId
+
+
+class OwnParent(BaseModel):
+    id: ProjectBriefId
+    brief_id: Annotated[ProjectBriefId, ParentLink()]
+
+
+class ChickenId(Id[int]):
+    pass
+
+
+class EggId(Id[int]):
+    pass
+
+
+class Chicken(BaseModel):
+    id: ChickenId
+    egg_id: Annotated[EggId, ParentLink()]
+
+
+class Egg(BaseModel):
+    id: EggId
+    chicken_id: Annotated[ChickenId, ParentLink()]
+
+
+class MarkedParentPlainField(BaseModel):
+    id: ProjectBriefId
+    name: Annotated[Name, ParentLink()]
+
+
+@pytest.mark.parametrize(
+    ("child", "expected"),
+    [
+        (
+            TwoParents,
+            entity_graph.SeveralParentLinks(
+                entity=TwoParents,
+                fields=(
+                    entity_graph.FieldName("project_id"),
+                    entity_graph.FieldName("department_id"),
+                ),
+            ),
+        ),
+        (
+            OptionalParent,
+            entity_graph.OptionalParentLink(
+                entity=OptionalParent, field=entity_graph.FieldName("project_id")
+            ),
+        ),
+        (
+            RedeclaresOwner,
+            entity_graph.InheritedFieldClash(
+                entity=RedeclaresOwner,
+                field=entity_graph.FieldName("owner_id"),
+                parent=Project,
+            ),
+        ),
+        (
+            OwnParent,
+            entity_graph.InheritanceCycle(entities=frozenset({OwnParent})),
+        ),
+        (
+            MarkedParentPlainField,
+            entity_graph.OneToOneOnNonReference(
+                entity=MarkedParentPlainField,
+                field=entity_graph.FieldName("name"),
+                one_to_one_marker=OneToOneMarker.fake(),
+            ),
+        ),
+    ],
+    ids=[
+        "several parent links",
+        "optional parent link",
+        "inherited field declared again",
+        "its own parent",
+        "not a reference",
+    ],
+)
+def test_a_defective_parent_link_is_a_diagnostic(
+    child: type[BaseModel], expected: entity_graph.EntityGraphDiagnostic
+) -> None:
+    assert _diagnostics([Department, Employee, Project, child]) == {expected}
+
+
+def test_entities_inheriting_from_each_other_are_one_cycle() -> None:
+    assert _diagnostics([Chicken, Egg]) == {
+        entity_graph.InheritanceCycle(entities=frozenset({Chicken, Egg}))
+    }
+
+
+def test_a_parent_link_is_no_parent_link_unless_frp_marks_one_to_one() -> None:
+    match entity_graph.EntityGraph.build(
+        [Department, Employee, Project, ProjectBrief],
+        IdBase.fake(),
+        OneToOneMarker(AppOneToOne),
+    ):
+        case Ok(graph):
+            pytest.fail(f"Expected diagnostics, got {graph}")
+        case Err(error):
+            assert error.diagnostics == (
+                entity_graph.UnconfiguredOneToOne(
+                    entity=ProjectBrief,
+                    field=entity_graph.FieldName("project_id"),
+                    one_to_one_marker=OneToOneMarker(AppOneToOne),
+                ),
+            )

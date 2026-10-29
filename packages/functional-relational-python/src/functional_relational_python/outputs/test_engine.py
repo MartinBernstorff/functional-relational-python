@@ -18,6 +18,7 @@ from functional_relational_python.entity_graph.id import (
     IdBase,
     OneToOne,
     OneToOneMarker,
+    ParentLink,
 )
 from functional_relational_python.outputs import engine
 from functional_relational_python.pipeline import conditions, ir, steps
@@ -222,8 +223,10 @@ def test_put_rejects_a_model_that_is_not_an_entity() -> None:
     match make_engine().put(Memo(body=Text("note"))):
         case Ok():
             pytest.fail("expected NotAnEntityError")
-        case Err(error):
+        case Err(engine.NotAnEntityError() as error):
             assert error.model is Memo
+        case Err(error):
+            pytest.fail(f"expected NotAnEntityError, got {error!r}")
 
 
 def test_reading_a_view_over_a_source_that_is_not_an_entity_is_an_error() -> None:
@@ -1377,3 +1380,145 @@ def test_reading_a_union_over_a_source_that_is_not_an_entity_is_an_error() -> No
             assert (error.view, error.source) == (union.name, Memo)
         case result:
             pytest.fail(f"expected NonEntitySourceError, got {result}")
+
+
+class Seniority(enum.StrEnum):
+    JUNIOR = "junior"
+    SENIOR = "senior"
+
+
+class StaffId(Id[int]):
+    pass
+
+
+class Staff(pydantic.BaseModel, frozen=True):
+    id: StaffId
+    department_id: DepartmentId
+    seniority: Seniority
+    nickname: Text | None
+
+
+class ManagerId(Id[int]):
+    pass
+
+
+class Manager(pydantic.BaseModel, frozen=True):
+    """A child of `Staff`: it inherits every field of `Staff` but `id`."""
+
+    id: ManagerId
+    staff_id: Annotated[StaffId, ParentLink()]
+    title: Text
+
+
+def staff_engine(*views: View) -> engine.InMemoryViewEngine:
+    graph = EntityGraph.build(
+        [Company, Department, Staff, Manager], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+    match compiler.compile_views(graph, views):
+        case Ok(compiled):
+            return engine.InMemoryViewEngine(graph, compiled)
+        case Err(error):
+            pytest.fail(f"expected compiled views, got {error}")
+
+
+def manager_view(step: steps.Step) -> View:
+    return View(name=ViewName.fake(), source=Manager, step=step)
+
+
+def managing(staff: Staff, title: Text) -> Manager:
+    return Manager(id=ManagerId(staff.id.root), staff_id=staff.id, title=title)
+
+
+def test_a_view_over_a_child_filters_on_and_reads_its_parents_fields() -> None:
+    view = manager_view(
+        steps.pipeline(
+            steps.where(
+                conditions.eq(
+                    conditions.field(FieldName("seniority")), Seniority.SENIOR
+                )
+            ),
+            steps.non_nullable("nickname"),
+            steps.omit("staff_id"),
+        )
+    )
+    view_engine = staff_engine(view)
+    department = Department.fake(DepartmentId(1), CompanyId.fake())
+    junior, senior = (
+        Staff(
+            id=StaffId(index),
+            department_id=department.id,
+            seniority=seniority,
+            nickname=Text(seniority.value),
+        )
+        for index, seniority in enumerate(Seniority)
+    )
+    for entity in (
+        department,
+        senior,
+        junior,
+        managing(senior, Text("head")),
+        managing(junior, Text("lead")),
+    ):
+        view_engine.put(entity).unwrap()
+
+    assert read(view_engine, view.name) == (
+        engine.ViewRow(
+            {
+                FieldName("id"): ManagerId(senior.id.root),
+                FieldName("department_id"): department.id,
+                FieldName("seniority"): Seniority.SENIOR,
+                FieldName("nickname"): senior.nickname,
+                FieldName("title"): Text("head"),
+            }
+        ),
+    )
+
+
+def test_a_reference_a_child_inherits_resolves_to_its_entity() -> None:
+    view = manager_view(steps.resolve("department_id"))
+    view_engine = staff_engine(view)
+    department = Department.fake(DepartmentId(1), CompanyId.fake())
+    staff = Staff(
+        id=StaffId(1),
+        department_id=department.id,
+        seniority=Seniority.SENIOR,
+        nickname=None,
+    )
+    for entity in (department, staff, managing(staff, Text("head"))):
+        view_engine.put(entity).unwrap()
+
+    assert [
+        row.root[FieldName("department")] for row in read(view_engine, view.name)
+    ] == [department]
+
+
+def test_a_child_without_its_parent_is_a_dangling_parent_link() -> None:
+    view = manager_view(steps.pipeline())
+    view_engine = staff_engine(view)
+    orphan = Manager(id=ManagerId(7), staff_id=StaffId(7), title=Text("head"))
+    view_engine.put(orphan).unwrap()
+
+    match view_engine.read(view.name):
+        case Err(DiagnosticsError(diagnostics=reported)):
+            assert reported == (
+                engine.DanglingReference(
+                    entity=Manager,
+                    field=FieldName("staff_id"),
+                    missing=(orphan.staff_id,),
+                ),
+            )
+        case result:
+            pytest.fail(f"expected a dangling parent link, got {result}")
+
+
+def test_put_rejects_a_child_whose_id_is_not_its_parent_links() -> None:
+    staff_id = StaffId(1)
+    child = Manager(
+        id=ManagerId(staff_id.root + 1), staff_id=staff_id, title=Text("head")
+    )
+
+    match staff_engine().put(child):
+        case Err(engine.ChildIdMismatchError() as error):
+            assert (error.entity, error.parent_link) == (child, FieldName("staff_id"))
+        case result:
+            pytest.fail(f"expected ChildIdMismatchError, got {result}")

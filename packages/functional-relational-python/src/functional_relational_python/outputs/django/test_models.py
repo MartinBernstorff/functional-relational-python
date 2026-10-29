@@ -31,6 +31,7 @@ from functional_relational_python.entity_graph.id import (
     IdBase,
     OneToOne,
     OneToOneMarker,
+    ParentLink,
 )
 from functional_relational_python.outputs.django.conditions import DjangoColumn
 from functional_relational_python.outputs.django.models import (
@@ -41,6 +42,7 @@ from functional_relational_python.outputs.django.models import (
     BareDecorator,
     CalledDecorator,
     CatalogModelOptions,
+    ChildNotKeyedByParentLink,
     ConstraintNameClash,
     ConstraintsForNonEntity,
     ConstraintsOnExistingModel,
@@ -106,7 +108,7 @@ from functional_relational_python.outputs.python.symbols import (
     Symbol,
     ValueExpression,
 )
-from functional_relational_python.pipeline import conditions
+from functional_relational_python.pipeline import conditions, ir
 from functional_relational_python.pipeline.constraints import (
     Check,
     Constraint,
@@ -1379,13 +1381,21 @@ def test_on_delete_for_a_reference_of_an_existing_model_is_a_diagnostic() -> Non
     )
 
 
+class TypeErrorKind(pydantic.RootModel[str], frozen=True):
+    """A kind of error the type checker reports, e.g. `bad-override`."""
+
+
 def django_project_passes_checks(
-    project: Directory, apps: Sequence[AppLabel], migrated: AppLabel
+    project: Directory,
+    apps: Sequence[AppLabel],
+    migrated: AppLabel,
+    type_errors_off: Sequence[TypeErrorKind],
 ) -> None:
     """The Django project in `project`, with `apps` installed, passes the type
-    checker over `migrated`, Django's system checks, `makemigrations` of
-    `migrated`, and `migrate`. `django.contrib.postgres` is installed too, for
-    the `ArrayField` of a list."""
+    checker over `migrated`, but for the kinds of error in `type_errors_off`,
+    Django's system checks, `makemigrations` of `migrated`, and `migrate`.
+    `django.contrib.postgres` is installed too, for the `ArrayField` of a
+    list."""
     directory = project.root
     installed = ["django.contrib.postgres", *(app.root for app in apps)]
     _ = (directory / "settings.py").write_text(
@@ -1408,7 +1418,8 @@ def django_project_passes_checks(
         f'project-includes = ["{migrated.root}"]\n'
         f'search-path = ["{directory}"]\n'
         f'python-interpreter-path = "{sys.executable}"\n'
-        'preset = "all"\n',
+        'preset = "all"\n'
+        "[errors]\n" + "".join(f"{kind.root} = false\n" for kind in type_errors_off),
         encoding="utf-8",
     )
 
@@ -1513,7 +1524,7 @@ def test_generated_models_referencing_an_existing_model_make_migrations(
     )
 
     django_project_passes_checks(
-        Directory(tmp_path), (AppLabel("crm"), AppLabel("app")), AppLabel("app")
+        Directory(tmp_path), (AppLabel("crm"), AppLabel("app")), AppLabel("app"), ()
     )
 
 
@@ -1698,7 +1709,7 @@ def test_generated_models_type_check_and_make_migrations(
     )
 
     django_project_passes_checks(
-        Directory(tmp_path), (AppLabel("app"),), AppLabel("app")
+        Directory(tmp_path), (AppLabel("app"),), AppLabel("app"), ()
     )
     _ = (tmp_path / "rejected.py").write_text(
         textwrap.dedent(
@@ -2642,3 +2653,217 @@ def test_a_unique_naming_a_field_twice_is_rejected() -> None:
             fields=(FieldName("name"), FieldName("name")),
             where=EveryRow(),
         )
+
+
+class BranchId(Id[int]):
+    pass
+
+
+class Branch(pydantic.BaseModel):
+    """A child of `Company`, named to sort before it."""
+
+    id: BranchId
+    company_id: Annotated[CompanyId, ParentLink()]
+    motto: Text
+
+
+def branch_models() -> DjangoModels:
+    """A check each on `Company` and `Branch`. Every model is ordered by name,
+    but for `Branch`, which Django gives its parent's ordering."""
+    return config({}, {}).model_copy(
+        update={
+            "model_options": CatalogModelOptions.default().model_copy(
+                update={"ordering": (OrderingTerm("name"),)}
+            ),
+            "constraints": {
+                Company: [
+                    Check(
+                        name=ConstraintName("company_is_named"),
+                        condition=conditions.ne(
+                            conditions.field(FieldName("name")), Text("")
+                        ),
+                    )
+                ],
+                Branch: [
+                    Check(
+                        name=ConstraintName("branch_has_a_motto"),
+                        condition=conditions.ne(
+                            conditions.field(FieldName("motto")), Text("")
+                        ),
+                    )
+                ],
+            },
+        }
+    )
+
+
+def test_golden_child_model_subclasses_its_parents() -> None:
+    text = render([Branch, Company], branch_models())
+
+    assert text.root.split("\n\n\n", 1)[1] == (
+        """\
+class Company(models.Model):
+    objects: ClassVar[CompanyManager] = CompanyManager()
+    id = models.BigIntegerField(primary_key=True)
+    name = models.TextField()
+    parent = models.ForeignKey(
+        "Company", on_delete=models.PROTECT, related_name="+", null=True
+    )
+
+    class Meta:
+        app_label = "app"
+        ordering = ["name"]
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(
+                    name="",
+                ),
+                name="company_is_named",
+            ),
+        ]
+
+
+class Branch(Company):
+    objects: ClassVar[BranchManager] = BranchManager()
+    company = models.OneToOneField(
+        "Company",
+        on_delete=models.CASCADE,
+        related_name="branch_by_company",
+        parent_link=True,
+        primary_key=True,
+    )
+    motto = models.TextField()
+
+    class Meta:
+        app_label = "app"
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(
+                    motto="",
+                ),
+                name="branch_has_a_motto",
+            ),
+        ]
+"""
+    )
+
+
+def branch_options() -> EntityModelOptions:
+    """A base of `Branch`'s own, an ordering of its own, and a decorator
+    following its parent link, as `reversion.register(follow=...)` does. It is
+    keyed by its parent link, as it is without saying so."""
+    return keyed_by(FieldName("company_id")).model_copy(
+        update={
+            "bases": (ProjectBases.symbol(Identifier("Described")),),
+            "ordering": (OrderingTerm("-motto"),),
+            "decorators": (
+                CalledDecorator(
+                    function=ProjectBases.symbol(Identifier("following")),
+                    arguments={Identifier("follow"): ValueExpression('["company"]')},
+                ),
+            ),
+        }
+    )
+
+
+def test_a_child_model_has_its_own_bases_after_its_parent_and_its_own_ordering() -> (
+    None
+):
+    models = branch_models().model_copy(
+        update={"entity_model_options": {Branch: branch_options()}}
+    )
+
+    text = render([Branch, Company], models).root
+
+    assert (
+        '\n@following(follow=["company"])\nclass Branch(Company, Described):\n'
+    ) in text
+    assert (
+        '    class Meta:\n        app_label = "app"\n        ordering = ["-motto"]\n'
+    ) in text.split("class Branch(", 1)[1]
+
+
+def test_a_child_model_keyed_otherwise_than_by_its_parent_link_is_a_diagnostic() -> (
+    None
+):
+    models = branch_models().model_copy(
+        update={"entity_model_options": {Branch: keyed_by(FieldName("motto"))}}
+    )
+
+    assert diagnostics([Branch, Company], models) == (
+        ChildNotKeyedByParentLink(
+            entity=Branch,
+            field=FieldName("motto"),
+            parent_link=FieldName("company_id"),
+        ),
+    )
+
+
+def test_a_childs_constraint_cannot_test_a_field_it_inherits() -> None:
+    """Django constrains a child model's own columns only."""
+    models = branch_models().model_copy(
+        update={
+            "constraints": {
+                Branch: [
+                    Check(
+                        name=ConstraintName("branch_is_named"),
+                        condition=conditions.ne(
+                            conditions.field(FieldName("name")), Text("")
+                        ),
+                    )
+                ]
+            }
+        }
+    )
+
+    assert diagnostics([Branch, Company], models) == (
+        UnknownField(
+            owner=ConstraintName("branch_is_named"),
+            source=ir.SourceName("Branch"),
+            field=FieldName("name"),
+            valid=(FieldName("id"), FieldName("company_id"), FieldName("motto")),
+        ),
+    )
+
+
+def test_a_child_model_makes_a_multi_table_inheritance_migration(
+    tmp_path: Path,
+) -> None:
+    """A child's manager is not its parent's, which a type checker reports as an
+    inconsistent override: the project turns those reports off."""
+    models = branch_models().model_copy(
+        update={"entity_model_options": {Branch: branch_options()}}
+    )
+    graph = EntityGraph.build(
+        [Branch, Company], IdBase.fake(), OneToOneMarker.fake()
+    ).unwrap()
+    files = GeneratedFiles.merged(
+        [
+            DjangoModelsRenderer.render(
+                graph, models, first_party=generated_by(models)
+            ).unwrap(),
+            DjangoQueriesRenderer.render(
+                graph,
+                models,
+                (),
+                PlacedModels(modules={}),
+                first_party=generated_by(models),
+            ).unwrap(),
+        ]
+    ).unwrap()
+    files.write(LocalFileSystem(), Directory(tmp_path)).unwrap()
+    _ = (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
+    _ = (tmp_path / "app" / "base.py").write_text(
+        ProjectBases.source.root, encoding="utf-8"
+    )
+
+    django_project_passes_checks(
+        Directory(tmp_path),
+        (AppLabel("app"),),
+        AppLabel("app"),
+        (TypeErrorKind("bad-override"), TypeErrorKind("missing-override-decorator")),
+    )
+    migration = (tmp_path / "app" / "migrations" / "0001_initial.py").read_text(
+        encoding="utf-8"
+    )
+    assert "bases=('app.company', app.base.Described)" in migration

@@ -2,7 +2,12 @@ import pytest
 
 from functional_relational_python.entity_graph.entity_graph import FieldName
 from functional_relational_python.pipeline import ir, steps
-from functional_relational_python.pipeline.test_ir import Department, Employee, lookup
+from functional_relational_python.pipeline.test_ir import (
+    Department,
+    Employee,
+    lookup,
+    of_source,
+)
 
 
 def employee_field(name: FieldName, source: FieldName) -> ir.Field:
@@ -40,7 +45,7 @@ def test_the_subjects_id_is_the_primary_key_under_any_name(field: ir.Field) -> N
         ir.NestedField(
             name=FieldName("department"),
             value=lookup(FieldName("department_id"), Department),
-            relation=ir.Relation.of(ir.FromSource(source=Department)),
+            relation=of_source(Department),
             default=ir.NoDefault(),
         ),
     ],

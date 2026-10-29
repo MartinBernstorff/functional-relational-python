@@ -7,10 +7,11 @@ import pytest
 from pydantic.fields import FieldInfo
 
 from functional_relational_python.entity_graph.entity_graph import (
+    EntityGraph,
     FieldName,
     Optionality,
 )
-from functional_relational_python.entity_graph.id import Id
+from functional_relational_python.entity_graph.id import Id, IdBase, OneToOneMarker
 from functional_relational_python.pipeline import ir
 
 
@@ -63,6 +64,12 @@ def lookup(
     )
 
 
+def of_source(source: type[pydantic.BaseModel]) -> ir.Relation:
+    """The relation of all fields of `source`, which is no Entity."""
+    graph = EntityGraph.build([], IdBase.fake(), OneToOneMarker.fake()).unwrap()
+    return ir.Relation.of(ir.FromSource(source=source), graph)
+
+
 def new_model(
     name: ir.SourceName, fields: Mapping[FieldName, ir.RuntimeAnnotation]
 ) -> type[pydantic.BaseModel]:
@@ -81,7 +88,7 @@ def new_model(
 
 def own_field(name: FieldName, annotation: ir.RuntimeAnnotation) -> ir.Field:
     model = new_model(ir.SourceName("Model"), {name: annotation})
-    match ir.Relation.of(ir.FromSource(source=model)).fields:
+    match of_source(model).fields:
         case (ir.Field() as field,):
             return field
         case fields:
@@ -257,4 +264,4 @@ def test_admitting_none_keeps_the_fields_constraints_inside_the_none() -> None:
 
 
 def test_a_relation_of_own_fields_has_no_lookups() -> None:
-    assert ir.Relation.of(ir.FromSource(source=Employee)).lookups() == ()
+    assert of_source(Employee).lookups() == ()

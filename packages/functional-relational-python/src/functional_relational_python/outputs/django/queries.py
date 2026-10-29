@@ -51,6 +51,10 @@ function `_required` the module defines, as in a module of mapping functions: a
 field read through it may be optional, so validation alone would not catch it.
 Both are a `ValueError`.
 
+A child Entity's Django model holds the fields it inherits, see `ParentLink`, so
+a View over it reads and filters them as the model's own: Django joins the
+parent's table itself.
+
 A one-to-one Reference is followed backwards through the reverse accessor the
 Django models give it. Django raises for a reverse accessor that found no row, so
 the row reader asks `hasattr` first. Following a one-to-one Reference and then
@@ -1256,16 +1260,13 @@ class _ReadThrough:
         config: DjangoModels,
         field_types: FieldTypes,
     ) -> _ThroughRootModel | _ReadAsStored:
-        match lifted.declared():
+        match lifted.declared(graph):
             case FieldInfo(annotation=annotation):
                 split = narrowing.split(annotation)
             case ir.Undeclared():
                 return _ReadAsStored()
         column = DjangoModelsRenderer.column_optionality(
-            config,
-            graph.entities[lifted.through[-1].target],
-            lifted.field.field,
-            field_types,
+            config, graph, lifted.through[-1].target, lifted.field.field, field_types
         )
         match split.optionality, column, split.required:
             case Optionality.REQUIRED, Optionality.OPTIONAL, type() as root_model if (
@@ -1308,13 +1309,12 @@ class _RowReader(pydantic.BaseModel, frozen=True):
 
     def entity(self, entity: type[pydantic.BaseModel], row: Expression) -> Expression:
         """A dict with every field of `entity`, read from its Django model's `row`."""
-        node = self.graph.entities[entity]
         return self._dict(
             (
                 FieldName(name),
                 Expression(
                     f"{row.root}."
-                    f"{DjangoModelsRenderer.attribute_of(self.config, node, FieldName(name)).root}"
+                    f"{DjangoModelsRenderer.attribute_of(self.config, self.graph, entity, FieldName(name)).root}"
                 ),
             )
             for name in entity.model_fields
@@ -1346,9 +1346,8 @@ class _RowReader(pydantic.BaseModel, frozen=True):
         match value:
             case ir.SourceField() | ir.RequiredField():
                 # A required field that is `None` fails the View model's validation.
-                node = self.graph.entities[reached.trail.subject]
                 attribute = DjangoModelsRenderer.attribute_of(
-                    self.config, node, value.field
+                    self.config, self.graph, reached.trail.subject, value.field
                 )
                 return self._through(
                     read_as, Expression(f"{row.root}.{attribute.root}")
@@ -1364,9 +1363,8 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                 )
             case ir.Lifted(through=through, field=read_field):
                 followed = self._followed(through, reached)
-                node = self.graph.entities[through[-1].target]
                 attribute = DjangoModelsRenderer.attribute_of(
-                    self.config, node, read_field.field
+                    self.config, self.graph, through[-1].target, read_field.field
                 )
                 lifted = self._through(
                     read_as,

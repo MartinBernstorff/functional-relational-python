@@ -3335,7 +3335,10 @@ def test_where_keeps_every_field_and_filters_by_the_sources_own_field() -> None:
         steps.where(conditions.eq(conditions.field(FieldName("name")), acme))
     )
 
-    assert view.relation.fields == ir.Relation.of(ir.FromSource(source=Deal)).fields
+    assert (
+        view.relation.fields
+        == ir.Relation.of(ir.FromSource(source=Deal), empty_graph()).fields
+    )
     assert view.relation.filters == (
         ir.FilterComparison(
             operator=ir.ComparisonOperator.EQ,

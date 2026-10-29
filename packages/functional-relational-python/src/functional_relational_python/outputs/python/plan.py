@@ -570,14 +570,38 @@ class FunctionPlan(MappingFunctionPlan, frozen=True):
     view: ViewName
     model: ModelPlan
     filters: tuple[ir.Filter, ...]
+    filtered_through: Mapping[FieldName, tuple[ir.Lookup, ...]]
     literals: Mapping[type, Symbol]
 
     @staticmethod
     def of(
         view: compiler.CompiledView, model: ModelPlan, module: ModulePath
     ) -> Result[FunctionPlan, DiagnosticsError[PlanDiagnostic]]:
-        """The View's mapping function, generated into `module`, building `model`."""
-        lookups = view.relation.lookups()
+        """The View's mapping function, generated into `module`, building `model`.
+
+        `view`'s Relation reads each field a child inherits off its parent, see
+        `ir.Parents.read_off_parents`. `filtered_through` has the Lookups that
+        find the parent declaring each field a Filter tests that the Source
+        inherits.
+        """
+        filtered_through = {
+            column.field: through
+            for kept in view.relation.filters
+            for column in FunctionPlan._columns(kept)
+            if (through := view.parents.through(view.source, column.field))
+        }
+        lookups = tuple(
+            dict.fromkeys(
+                (
+                    *view.relation.lookups(),
+                    *(
+                        lookup
+                        for through in filtered_through.values()
+                        for lookup in through
+                    ),
+                )
+            )
+        )
         used = _DefinitionsUsed(view.name, module)
         symbols: dict[type, Symbol] = {}
         diagnostics: list[PlanDiagnostic] = []
@@ -626,12 +650,28 @@ class FunctionPlan(MappingFunctionPlan, frozen=True):
                     for lookup in lookups
                 ),
                 filters=view.relation.filters,
+                filtered_through=filtered_through,
                 literals={
                     literal_type: symbols[literal_type]
                     for literal_type in literal_types
                 },
             ),
         )
+
+    @staticmethod
+    def _columns(kept: ir.Filter) -> tuple[ir.SourceField, ...]:
+        """Every field of the Source `kept` tests."""
+        match kept:
+            case ir.FilterComparison(field=field, operand=ir.SourceField() as operand):
+                return (field, operand)
+            case ir.FilterComparison(field=field) | ir.FilterIsNull(field=field):
+                return (field,)
+            case ir.FilterAnd(terms=terms) | ir.FilterOr(terms=terms):
+                return tuple(
+                    column for term in terms for column in FunctionPlan._columns(term)
+                )
+            case ir.FilterNot(term=term):
+                return FunctionPlan._columns(term)
 
     @staticmethod
     def _literal_types(kept: ir.Filter) -> tuple[type, ...]:
@@ -1213,8 +1253,15 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         models: dict[ModulePath, list[ModelPlan]] = {}
         functions: dict[ModulePath, list[FunctionPlan]] = {}
         mapped: dict[ViewName | UnionName, FunctionPlan | UnionFunctionPlan] = {}
-        for view in compiled.views:
-            match NoModuleFromLayout.check(layout.models, LayoutRole.MODELS, view):
+        for placed in compiled.views:
+            view = placed.model_copy(
+                update={
+                    "relation": placed.parents.read_off_parents(
+                        placed.relation, placed.source
+                    )
+                }
+            )
+            match NoModuleFromLayout.check(layout.models, LayoutRole.MODELS, placed):
                 case NoModuleFromLayout() as unplaced:
                     diagnostics[unplaced] = None
                     continue
@@ -1230,7 +1277,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                     continue
                 case mappings:
                     pass
-            match NoModuleFromLayout.check(mappings, LayoutRole.MAPPINGS, view):
+            match NoModuleFromLayout.check(mappings, LayoutRole.MAPPINGS, placed):
                 case NoModuleFromLayout() as unplaced:
                     diagnostics[unplaced] = None
                     continue

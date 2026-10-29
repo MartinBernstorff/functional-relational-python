@@ -123,7 +123,10 @@ def _narrowed_by(term: ir.Filter, column: FieldName, field: ir.Field) -> ir.Fiel
 
 
 def required(
-    view: DefinitionName, source: ir.SourceName, field: ir.RelationField
+    view: DefinitionName,
+    source: ir.SourceName,
+    field: ir.RelationField,
+    entity_graph: EntityGraph,
 ) -> ir.RelationField | diagnostics.CompileDiagnostic:
     """`field` narrowed from `X | None` to `X`, with a value the View requires; or
     why it cannot be."""
@@ -155,7 +158,7 @@ def required(
             value_required = ir.RequiredField(field=column)
             narrowed = field.without_none()
         case ir.Lifted():
-            value_required = value.required()
+            value_required = value.required(entity_graph)
             narrowed = field.without_none()
         case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
             value_required = value.required()

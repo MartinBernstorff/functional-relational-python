@@ -27,7 +27,9 @@ from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     EntityNode,
     FieldName,
+    NoParent,
     Optionality,
+    Parent,
 )
 from functional_relational_python.entity_graph.id import (
     Id,
@@ -35,6 +37,7 @@ from functional_relational_python.entity_graph.id import (
     IdValue,
     OneToOne,
     OneToOneMarker,
+    ParentLink,
 )
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.django.models import (
@@ -201,6 +204,18 @@ class Badge(pydantic.BaseModel, frozen=True):
     level: Level
     rank: Rank
     stars: Stars
+
+
+class LeadId(Id[int]):
+    pass
+
+
+class Lead(pydantic.BaseModel, frozen=True):
+    """A child of `Employee`: its Django model subclasses `Employee`'s."""
+
+    id: LeadId
+    employee_id: Annotated[EmployeeId, ParentLink()]
+    motto: Text | None
 
 
 class Note(pydantic.BaseModel, frozen=True):
@@ -1076,6 +1091,8 @@ class Database:
 
     generated: ClassVar[DjangoModels] = Modules.config()
     """The config with every Django model generated."""
+    organisation_graph: ClassVar[EntityGraph] = entity_graph()
+    """The Entities most tests store."""
 
     @staticmethod
     def configure() -> None:
@@ -1114,10 +1131,11 @@ class Database:
         views: Iterable[View],
         unions: Iterable[Union] = (),
         config: DjangoModels = generated,
+        graph: EntityGraph = organisation_graph,
     ) -> GeneratedFiles:
         """The View and Union models, Django models and queries of `views` and
-        `unions`."""
-        compiled = compile_all(views, unions)
+        `unions`, over the Entities of `graph`."""
+        compiled = compiler.compile_views(graph, views, unions).unwrap()
         plan = PythonPlan.of(
             compiler.CompiledCatalog(
                 views=compiled.views,
@@ -1139,14 +1157,14 @@ class Database:
                     )
                 ),
                 DjangoModelsRenderer.render(
-                    entity_graph(),
+                    graph,
                     config,
                     first_party=generated_by(
                         config, placed_into(Generated.models, compiled)
                     ),
                 ).unwrap(),
                 DjangoQueriesRenderer.render(
-                    entity_graph(),
+                    graph,
                     config,
                     (*compiled.views, *compiled.unions),
                     placed_into(Generated.models, compiled),
@@ -1169,6 +1187,7 @@ class Database:
         unions: Iterable[Union] = (),
         config: DjangoModels = generated,
         existing: Iterable[tuple[ModulePath, FileText]] = (),
+        graph: EntityGraph = organisation_graph,
     ) -> Generator[types.ModuleType]:
         """The module of Django models, with a table per model, for `views` and
         `unions`. `existing` are the modules of the Django models `config` names
@@ -1178,7 +1197,7 @@ class Database:
         again.
         """
         Database.configure()
-        files = Database.files(views, unions, config)
+        files = Database.files(views, unions, config, graph)
         label = config.app_label.root
         sys.modules[Generated.models.root] = Executed.models(
             Database.text(files, Generated.models)
@@ -1225,27 +1244,35 @@ class Database:
     def put(
         entities: Iterable[pydantic.BaseModel],
         config: DjangoModels = generated,
+        graph: EntityGraph = organisation_graph,
     ) -> None:
         """Stores each Entity as a row of its Django model, in one transaction, so
         References are checked once every row is stored. An enum is stored as its
         value, as Django stores one it has a built-in rule for."""
         with transaction.atomic():
             for entity in entities:
-                Database.create(entity, config)
+                Database.create(entity, config, graph)
 
     @staticmethod
-    def create(entity: pydantic.BaseModel, config: DjangoModels) -> None:
-        """Stores `entity` as a row of its Django model."""
-        model = Database.model_of(type(entity), config)
-        node = entity_graph().entities[type(entity)]
-        _ = model.objects.create(
+    def create(
+        entity: pydantic.BaseModel, config: DjangoModels, graph: EntityGraph
+    ) -> None:
+        """Stores `entity` as a row of its Django model. A child is stored
+        without its parent, which is stored on its own: saved raw, a child model
+        saves only its own table."""
+        row = Database.model_of(type(entity), config)(
             **{
                 DjangoModelsRenderer.attribute_of(
-                    config, node, FieldName(name)
+                    config, graph, type(entity), FieldName(name)
                 ).root: value
                 for name, value in entity.model_dump(mode="json").items()
             }
         )
+        match graph.parent_of(type(entity)):
+            case Parent():
+                row.save_base(raw=True, force_insert=True)
+            case NoParent():
+                row.save(force_insert=True)
 
     @staticmethod
     def primary_key(entity: pydantic.BaseModel) -> IdValue:
@@ -1268,12 +1295,12 @@ class Database:
         with transaction.atomic():
             for entity in entities:
                 if type(entity) is not source:
-                    Database.create(entity, config)
+                    Database.create(entity, config, Database.organisation_graph)
             for entity in entities:
                 if type(entity) is source:
                     try:
                         with transaction.atomic():
-                            Database.create(entity, config)
+                            Database.create(entity, config, Database.organisation_graph)
                     except IntegrityError:
                         refused.add(Database.primary_key(entity))
             transaction.set_rollback(True)
@@ -3053,3 +3080,120 @@ def test_the_database_refuses_a_second_row_a_unique_keeps() -> None:
         refused = Database.rejected([company, *named], Department, config)
 
     assert refused == {DepartmentId(1)}
+
+
+def lead_graph() -> EntityGraph:
+    """The organisation, with Leads."""
+    return EntityGraph.build(
+        [Company, Department, Employee, Badge, Lead],
+        IdBase.fake(),
+        OneToOneMarker.fake(),
+    ).unwrap()
+
+
+def leads(entities: Iterable[pydantic.BaseModel]) -> tuple[Lead, ...]:
+    """A Lead per Employee but the first, every other one with a motto."""
+    employees = [entity for entity in entities if isinstance(entity, Employee)]
+    return tuple(
+        Lead(
+            id=LeadId(employee.id.root),
+            employee_id=employee.id,
+            motto=Text(f"motto {index}") if index % 2 else None,
+        )
+        for index, employee in enumerate(employees[1:])
+    )
+
+
+def lead_views() -> list[View]:
+    return [
+        View(name=ViewName("LeadPlain"), source=Lead, step=steps.pipeline()),
+        View(
+            name=ViewName("LeadNicknamed"),
+            source=Lead,
+            step=steps.pipeline(
+                steps.where(
+                    conditions.ne(conditions.field(FieldName("nickname")), None)
+                ),
+                steps.omit("employee_id"),
+            ),
+        ),
+        View(
+            name=ViewName("LeadInDepartment"),
+            source=Lead,
+            step=steps.pipeline(
+                steps.resolve("department_id"), steps.resolve("mentor_id")
+            ),
+        ),
+    ]
+
+
+@pytest.mark.parametrize("view", lead_views(), ids=lambda view: view.name.root)
+def test_a_view_over_a_child_reads_in_one_query_like_the_engine(view: View) -> None:
+    """The child's Django model holds its parent's fields, so the query reads,
+    filters and selects related through them as the child's own."""
+    graph = lead_graph()
+    employees = organisation()
+    entities = (*employees, *leads(employees))
+    (compiled,) = compiler.compile_views(graph, [view]).unwrap().views
+    held = engine.InMemoryViewEngine(
+        graph, compiler.CompiledViews(views=(compiled,), unions=())
+    )
+    for entity in entities_by_id(entities):
+        held.put(entity).unwrap()
+
+    with Database.of([view], (), Database.generated, (), graph) as django_models:
+        Database.put(entities, Database.generated, graph)
+        rows = Database.read(django_models, compiled, every_row)
+
+    assert rows
+    assert rows == held.read(view.name).unwrap()
+
+
+def test_golden_queries_of_a_view_over_a_child() -> None:
+    graph = lead_graph()
+    compiled = compiler.compile_views(graph, lead_views()[1:2]).unwrap()
+
+    (file,) = (
+        DjangoQueriesRenderer.render(
+            graph,
+            Modules.config(),
+            compiled.views,
+            placed_into(Generated.models, compiled),
+            first_party=generated_by(
+                Modules.config(), placed_into(Generated.models, compiled)
+            ),
+        )
+        .unwrap()
+        .files
+    )
+
+    queryset, from_row = file.text.root.split("\n\n\n")[1:3]
+    assert (queryset, from_row) == (
+        """\
+def lead_nicknamed_queryset(
+    queryset: "django.db.models.QuerySet[frp_generated_django.Lead]",
+) -> "django.db.models.QuerySet[frp_generated_django.Lead]":
+    kept = queryset.defer(None)
+    kept.query.add_q(
+        django.db.models.Q(
+            nickname__isnull=False,
+        ),
+    )
+    return kept""",
+        """\
+def lead_nicknamed_from_row(
+    row: "frp_generated_django.Lead",
+) -> frp_generated_models.LeadNicknamed:
+    return frp_generated_models.LeadNicknamed.model_validate(
+        {
+            "id": row.employee_id,
+            "name": row.name,
+            "nickname": row.nickname,
+            "role": row.role,
+            "department_id": row.department_id,
+            "mentor_id": row.mentor_id,
+            "motto": row.motto,
+        },
+        strict=False,
+    )""",
+    )
