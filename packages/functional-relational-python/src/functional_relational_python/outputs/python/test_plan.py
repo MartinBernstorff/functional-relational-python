@@ -130,7 +130,7 @@ def test_a_view_is_planned_into_the_modules_its_layout_gives() -> None:
     assert function.symbol == Symbol(
         module=mappings, qualname=(Identifier("employee_overview"),)
     )
-    assert function.source == symbol(Employee)
+    assert function.from_model == symbol(Employee)
     assert [
         (parameter.name, parameter.target, parameter.id_type)
         for parameter in function.lookups
@@ -166,8 +166,8 @@ def test_lookup_parameters_are_named_after_the_entity_and_its_key(
     assert LookupParameter.name_for(entity, keyed_by) == Identifier(expected)
 
 
-def local_entity_and_source() -> tuple[type[pydantic.BaseModel], ...]:
-    """An Entity, its ID type and a Source, all defined in a function."""
+def local_entity_and_from_model() -> tuple[type[pydantic.BaseModel], ...]:
+    """An Entity, its ID type and a from_model, all defined in a function."""
 
     class LocalTeamId(Id[int]):
         pass
@@ -182,7 +182,7 @@ def local_entity_and_source() -> tuple[type[pydantic.BaseModel], ...]:
 
 
 def test_whatever_cannot_be_imported_is_reported_once() -> None:
-    team, team_id, player = local_entity_and_source()
+    team, team_id, player = local_entity_and_from_model()
     view = View(
         name=ViewName.fake(),
         query=steps.from_(player, steps.hydrate()),
@@ -209,7 +209,7 @@ def test_whatever_cannot_be_imported_is_reported_once() -> None:
 
 
 def test_a_models_only_layout_reports_only_what_the_models_cannot_import() -> None:
-    team, _, player = local_entity_and_source()
+    team, _, player = local_entity_and_from_model()
     view = View(
         name=ViewName.fake(),
         query=steps.from_(player, steps.hydrate()),
@@ -302,10 +302,10 @@ def company_view(name: ViewName) -> View:
     )
 
 
-def hydrated(source: type[pydantic.BaseModel]) -> View:
+def hydrated(from_model: type[pydantic.BaseModel]) -> View:
     return View(
         name=ViewName.fake(),
-        query=steps.from_(source, steps.hydrate()),
+        query=steps.from_(from_model, steps.hydrate()),
     )
 
 

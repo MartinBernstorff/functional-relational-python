@@ -203,7 +203,7 @@ class Badge(pydantic.BaseModel, frozen=True):
 
 
 class Note(pydantic.BaseModel, frozen=True):
-    """A Source that is not an Entity."""
+    """A from_model that is not an Entity."""
 
     text: Text
 
@@ -1275,19 +1275,19 @@ class Database:
     @staticmethod
     def rejected(
         entities: Iterable[pydantic.BaseModel],
-        source: type[pydantic.BaseModel],
+        from_model: type[pydantic.BaseModel],
         config: DjangoModels,
     ) -> frozenset[IdValue]:
-        """The IDs of the `source` Entities the database refuses to store, each
+        """The IDs of the `from_model` Entities the database refuses to store, each
         stored on its own after every other Entity. Nothing is kept, so a refused
         row leaves no Reference to it dangling."""
         refused: set[IdValue] = set()
         with transaction.atomic():
             for entity in entities:
-                if type(entity) is not source:
+                if type(entity) is not from_model:
                     Database.create(entity, config)
             for entity in entities:
-                if type(entity) is source:
+                if type(entity) is from_model:
                     try:
                         with transaction.atomic():
                             Database.create(entity, config)
@@ -1303,9 +1303,9 @@ class Database:
         query: Query,
         config: DjangoModels = generated,
     ) -> tuple[engine.ViewRow, ...]:
-        """The View's results, from `query` of the Source's QuerySet, checking
+        """The View's results, from `query` of the from_model's QuerySet, checking
         they took one database query."""
-        model = getattr(django_models, config.model_name_of(view.source).root)
+        model = getattr(django_models, config.model_name_of(view.from_model).root)
         method = f"as_{view.names.function.root}"
         with CaptureQueriesContext(connection) as captured:
             rows = tuple(
@@ -1319,10 +1319,10 @@ class Database:
     def read_union(
         django_models: types.ModuleType, union: compiler.CompiledUnion, query: Query
     ) -> tuple[engine.VariantRow, ...]:
-        """The Union's results, from `query` of the Source's QuerySet, each with
+        """The Union's results, from `query` of the from_model's QuerySet, each with
         the Variant View whose model it is, checking they took one database
         query."""
-        model = getattr(django_models, union.source.__name__)
+        model = getattr(django_models, union.from_model.__name__)
         method = f"as_{union.names.function.root}"
         by_model = {leaf.names.model.name.root: leaf.name for leaf in union.leaves()}
         with CaptureQueriesContext(connection) as captured:
@@ -1644,7 +1644,7 @@ def test_a_view_reads_in_one_query_like_the_engine(view: View) -> None:
 
 @pytest.mark.parametrize(
     "view",
-    [view for view in read_views() if view.query.from_ is not Company],
+    [view for view in read_views() if view.query.from_model is not Company],
     ids=lambda view: view.name.root,
 )
 def test_a_view_reads_through_an_existing_model_like_the_engine(view: View) -> None:
@@ -2508,16 +2508,18 @@ def entities(draw: st.DrawFn) -> tuple[pydantic.BaseModel, ...]:
 @st.composite
 def field_conditions(
     draw: st.DrawFn,
-    source: type[pydantic.BaseModel],
+    from_model: type[pydantic.BaseModel],
     stored: tuple[pydantic.BaseModel, ...],
     depth: Depth,
 ) -> ir.Condition:
-    """A Condition over `source`'s fields, comparing them with each other, with
+    """A Condition over `from_model`'s fields, comparing them with each other, with
     `None`, or with values `stored` Entities have, so that it keeps some rows."""
     if depth.root > 0 and draw(st.booleans()):
         smaller = Depth(depth.root - 1)
         terms = draw(
-            st.lists(field_conditions(source, stored, smaller), min_size=1, max_size=3)
+            st.lists(
+                field_conditions(from_model, stored, smaller), min_size=1, max_size=3
+            )
         )
         match draw(st.sampled_from(["and", "or", "not"])):
             case "and":
@@ -2526,20 +2528,20 @@ def field_conditions(
                 return conditions.or_(*terms)
             case _:
                 return conditions.not_(terms[0])
-    name = draw(st.sampled_from(list(source.model_fields)))
+    name = draw(st.sampled_from(list(from_model.model_fields)))
     field = conditions.field(FieldName(name))
-    split = narrowing.split(source.model_fields[name].annotation)
+    split = narrowing.split(from_model.model_fields[name].annotation)
     # A literal is never `None`, nor a RootModel of it.
     values = [
         value
         for entity in stored
-        if type(entity) is source
+        if type(entity) is from_model
         and (value := getattr(entity, name)) is not None
         and value not in (Rank(None), Stars(Rank(None)))
     ]
     same_type = [
         other
-        for other, info in source.model_fields.items()
+        for other, info in from_model.model_fields.items()
         if narrowing.split(info.annotation).required == split.required
     ]
     atoms: list[ir.Condition] = [
@@ -2570,17 +2572,17 @@ def field_conditions(
 @st.composite
 def filtered_pipelines(
     draw: st.DrawFn,
-    source: type[pydantic.BaseModel],
+    from_model: type[pydantic.BaseModel],
     filters: st.SearchStrategy[list[ir.Condition]],
 ) -> steps.Step:
-    """A random pipeline over `source`, after maybe requiring one of its
+    """A random pipeline over `from_model`, after maybe requiring one of its
     optional fields, and then filtering by each of `filters`.
 
     Filtering after requiring, so that a requirement is never of a field a
     Filter keeps `None`, which the compiler rejects."""
     optional = [
         FieldName(name)
-        for name, info in source.model_fields.items()
+        for name, info in from_model.model_fields.items()
         if narrowing.split(info.annotation).optionality is Optionality.OPTIONAL
     ]
     required = draw(st.lists(st.sampled_from(optional), max_size=1)) if optional else []
@@ -2588,7 +2590,7 @@ def filtered_pipelines(
     return steps.pipeline(
         *map(steps.require, required),
         *map(steps.where, where),
-        draw(pipelines(entity_graph(), source, Depth(2))),
+        draw(pipelines(entity_graph(), from_model, Depth(2))),
     )
 
 
@@ -2604,20 +2606,21 @@ def differential_cases(draw: st.DrawFn) -> DifferentialCase:
     filter, and maybe a Union of such Views, each tagged, all filtered but maybe
     the last."""
     stored = draw(entities())
-    sources = [Company, Department, Employee, Badge]
+    from_models = [Company, Department, Employee, Badge]
     views: list[View] = []
     for index in range(draw(st.integers(min_value=1, max_value=3))):
-        source = draw(st.sampled_from(sources))
+        from_model = draw(st.sampled_from(from_models))
         views.append(
             View(
                 name=ViewName(f"View{index}"),
                 query=steps.from_(
-                    source,
+                    from_model,
                     draw(
                         filtered_pipelines(
-                            source,
+                            from_model,
                             st.lists(
-                                field_conditions(source, stored, Depth(2)), max_size=1
+                                field_conditions(from_model, stored, Depth(2)),
+                                max_size=1,
                             ),
                         )
                     ),
@@ -2626,19 +2629,19 @@ def differential_cases(draw: st.DrawFn) -> DifferentialCase:
         )
     unions: list[Union] = []
     if draw(st.booleans()):
-        source = draw(st.sampled_from(sources))
+        from_model = draw(st.sampled_from(from_models))
         count = draw(st.integers(min_value=2, max_value=3))
         unfiltered_last = draw(st.booleans())
         variants = tuple(
             View(
                 name=ViewName(f"Variant{index}"),
                 query=steps.from_(
-                    source,
+                    from_model,
                     draw(
                         filtered_pipelines(
-                            source,
+                            from_model,
                             st.lists(
-                                field_conditions(source, stored, Depth(1)),
+                                field_conditions(from_model, stored, Depth(1)),
                                 min_size=0
                                 if unfiltered_last and index == count - 1
                                 else 1,
@@ -2678,7 +2681,7 @@ def engine_result(
         tuple[engine.ViewRow, ...] | tuple[engine.VariantRow, ...],
         engine.UnknownViewError
         | engine.UnknownUnionError
-        | engine.NonEntitySourceError
+        | engine.NonEntityFromModelError
         | DiagnosticsError[engine.ReadDiagnostic],
     ],
 ) -> ReadResult:
@@ -3060,7 +3063,7 @@ def test_a_met_requirement_reads_like_the_engine() -> None:
 
 
 class ConstraintCase(pydantic.BaseModel, frozen=True):
-    source: type[pydantic.BaseModel]
+    from_model: type[pydantic.BaseModel]
     condition: ir.Condition
     entities: tuple[pydantic.BaseModel, ...]
 
@@ -3068,10 +3071,10 @@ class ConstraintCase(pydantic.BaseModel, frozen=True):
 @st.composite
 def constraint_cases(draw: st.DrawFn) -> ConstraintCase:
     stored = draw(entities())
-    source = draw(st.sampled_from([Company, Department, Employee, Badge]))
+    from_model = draw(st.sampled_from([Company, Department, Employee, Badge]))
     return ConstraintCase(
-        source=source,
-        condition=draw(field_conditions(source, stored, Depth(2))),
+        from_model=from_model,
+        condition=draw(field_conditions(from_model, stored, Depth(2))),
         entities=stored,
     )
 
@@ -3087,7 +3090,7 @@ def test_the_database_refuses_exactly_the_rows_a_check_is_false_for(
     Condition does not keep it in the InMemoryViewEngine."""
     view = View(
         name=ViewName("Kept"),
-        query=steps.from_(case.source, steps.where(case.condition)),
+        query=steps.from_(case.from_model, steps.where(case.condition)),
     )
     compiled = compile_all([view])
     kept = {
@@ -3096,16 +3099,16 @@ def test_the_database_refuses_exactly_the_rows_a_check_is_false_for(
     }
     check = Check(name=ConstraintName("checked"), condition=case.condition)
     config = Modules.config().model_copy(
-        update={"constraints": {case.source: (check,)}}
+        update={"constraints": {case.from_model: (check,)}}
     )
 
     with Database.of([view], (), config):
-        refused = Database.rejected(case.entities, case.source, config)
+        refused = Database.rejected(case.entities, case.from_model, config)
 
     rows = {
         Database.primary_key(entity)
         for entity in case.entities
-        if type(entity) is case.source
+        if type(entity) is case.from_model
     }
     event(f"refuses some rows: {bool(refused)}")
     event(f"stores some rows: {refused != rows}")

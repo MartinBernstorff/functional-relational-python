@@ -86,10 +86,10 @@ def compile_catalog(
     ).unwrap()
 
 
-def view(source: type[pydantic.BaseModel]) -> View:
+def view(from_model: type[pydantic.BaseModel]) -> View:
     return View(
-        name=ViewName(f"{source.__name__}View"),
-        query=steps.from_(source),
+        name=ViewName(f"{from_model.__name__}View"),
+        query=steps.from_(from_model),
     )
 
 
@@ -815,7 +815,7 @@ def valid_stamped() -> Stamped:
     ],
     ids=["naive", "future", "optional-future", "not-positive", "out-of-range"],
 )
-def test_a_view_model_validates_as_its_source_does(
+def test_a_view_model_validates_as_its_from_model_does(
     field: FieldName, invalid: object
 ) -> None:
     module = types.ModuleType("app_views")
@@ -829,7 +829,7 @@ def test_a_view_model_validates_as_its_source_does(
     assert [error["loc"] for error in raised.value.errors()] == [(field.root,)]
 
 
-def test_a_view_model_runs_its_sources_validators() -> None:
+def test_a_view_model_runs_its_from_models_validators() -> None:
     module = types.ModuleType("app_views")
     exec(stamped_module().root, module.__dict__)
     row = valid_stamped().model_dump() | {"label": " padded "}

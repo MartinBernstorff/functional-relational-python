@@ -24,13 +24,13 @@ class Union(pydantic.BaseModel, frozen=True):
 
     A Union of Views has Views and nested Unions of Views as Variants. Each View
     generates its own model and mapping function as if the Catalog listed it, and
-    so does each nested Union. Every Variant reads one Source. A Source row gives
+    so does each nested Union. Every Variant reads one from_model. A from_model row gives
     the result of the first Variant, in order, whose Filters keep it; a row no
-    Variant keeps gives no result. A Variant's Tag is a Source column its `where`
+    Variant keeps gives no result. A Variant's Tag is a from_model column its `where`
     narrows with `==`, or a field `add` declares.
 
     A Union of WriteModels has WriteModels and nested Unions of WriteModels as Variants,
-    which may read different Sources. Each WriteModel generates its own model as if
+    which may read different from_models. Each WriteModel generates its own model as if
     the Catalog listed it. A Union of WriteModels is itself a WriteModel, so it generates
     only its model, no mapping function. A WriteModel has no Filters, so its Tag is
     a field `retype_to` types, or `add` declares, as a `Literal` of one value.

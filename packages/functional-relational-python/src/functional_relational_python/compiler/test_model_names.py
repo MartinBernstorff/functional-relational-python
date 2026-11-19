@@ -88,11 +88,11 @@ def renaming_to(new: FieldName) -> View:
 
 
 def invalid_field(
-    source: type[pydantic.BaseModel], field: FieldName
+    from_model: type[pydantic.BaseModel], field: FieldName
 ) -> InvalidFieldName:
     return InvalidFieldName(
         view=ViewName.fake(),
-        source=ir.SourceName(source.__name__),
+        from_model=ir.FromModelName(from_model.__name__),
         field=field,
     )
 
@@ -216,7 +216,7 @@ def test_a_compile_defect_and_an_invalid_view_name_are_reported_together() -> No
             assert error.diagnostics == (
                 diagnostics.UnknownField(
                     owner=defective.name,
-                    source=ir.SourceName("Employee"),
+                    from_model=ir.FromModelName("Employee"),
                     field=unknown,
                     valid=tuple(map(FieldName, Employee.model_fields)),
                 ),
@@ -234,7 +234,7 @@ def test_a_view_that_does_not_compile_still_reports_its_invalid_name() -> None:
     assert compiled_names(view) == (
         diagnostics.UnknownField(
             owner=view.name,
-            source=ir.SourceName("Employee"),
+            from_model=ir.FromModelName("Employee"),
             field=unknown,
             valid=tuple(map(FieldName, Employee.model_fields)),
         ),
@@ -263,7 +263,7 @@ def test_a_view_that_does_not_compile_still_reports_its_invalid_name() -> None:
         (
             InvalidFieldName(
                 view=ViewName("KeywordedView"),
-                source=ir.SourceName("Keyworded"),
+                from_model=ir.FromModelName("Keyworded"),
                 field=FieldName("class"),
             ),
             (

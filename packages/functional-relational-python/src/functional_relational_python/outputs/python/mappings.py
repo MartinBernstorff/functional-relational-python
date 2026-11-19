@@ -1,6 +1,6 @@
 """Renders the planned mapping functions: compiled Views as plain Python functions.
 
-Each View becomes a function from one instance of its Source to its View model.
+Each View becomes a function from one instance of its from_model to its View model.
 A filtered View's function returns `None` for a row its Filters exclude: the
 ticket that introduced `where` specifies that it "returns nothing", so `None`
 carries that meaning rather than an enum variant. A View that resolves References
@@ -10,7 +10,7 @@ takes a parameter mapping the IDs in that Reference to the Entities holding them
 a missing ID gives `None`. A value the View requires goes through a function
 `_required` the module defines, which raises `ValueError` naming the subject's
 field and ID when the value is `None`. A module of mapping functions imports only
-the Source, Entity and View model modules, so it runs and type checks without
+the from_model, Entity and View model modules, so it runs and type checks without
 this library installed.
 
 A Union becomes a function that calls its Variants' functions in turn, and
@@ -368,7 +368,7 @@ class MappingsRenderer:
     header: typing.ClassVar[FileText] = FileText(
         f"{GeneratedFiles.header.root}"
         "# Regenerate with `frp generate`; `frp check` fails when this is stale.\n"
-        "# Maps each View's Source to its View model.\n"
+        "# Maps each View's from_model to its View model.\n"
     )
 
     @staticmethod
@@ -468,7 +468,7 @@ class MappingsRenderer:
         return Expression(
             f"def {function.symbol.bound_name().root}(\n"
             f"    {FunctionPlan.source_parameter.root}: "
-            f"{function.source.qualified().root},\n"
+            f"{function.from_model.qualified().root},\n"
             f"{keyword_only}"
             f") -> {returned}:\n"
         )
@@ -579,7 +579,7 @@ class _Construction(pydantic.BaseModel, frozen=True):
             case ir.Field(value=value):
                 pass
         match value:
-            case ir.SourceField() | ir.RequiredField():
+            case ir.SubjectField() | ir.RequiredField():
                 return self.column(value, subject)
             case ir.ReverseLookup():
                 return self._reverse(value, subject)
@@ -641,7 +641,7 @@ class _Construction(pydantic.BaseModel, frozen=True):
         requires it."""
         value = Expression(f"{subject.root}.{column.field.root}")
         match column:
-            case ir.SourceField():
+            case ir.SubjectField():
                 return value
             case ir.RequiredField():
                 return self.required(value, subject, _Construction._what(column))
@@ -863,7 +863,7 @@ class _FilterWriter(pydantic.BaseModel, frozen=True):
 
     def _operand_lines(
         self,
-        operand: ir.SourceField | ir.FilterLiteral,
+        operand: ir.SubjectField | ir.FilterLiteral,
         indent: Indent,
         prefix: Expression,
     ) -> tuple[Expression, ...]:
@@ -895,12 +895,12 @@ class _FilterWriter(pydantic.BaseModel, frozen=True):
             Expression(f"{indent.pad().root})"),
         )
 
-    def _field(self, field: ir.SourceField) -> Expression:
+    def _field(self, field: ir.SubjectField) -> Expression:
         return Expression(f"{FunctionPlan.source_parameter.root}.{field.field.root}")
 
-    def _operand(self, operand: ir.SourceField | ir.FilterLiteral) -> Expression:
+    def _operand(self, operand: ir.SubjectField | ir.FilterLiteral) -> Expression:
         match operand:
-            case ir.SourceField():
+            case ir.SubjectField():
                 return self._field(operand)
             case ir.ScalarLiteral(root=str() as text):
                 return Expression(PythonString(text).literal().root)

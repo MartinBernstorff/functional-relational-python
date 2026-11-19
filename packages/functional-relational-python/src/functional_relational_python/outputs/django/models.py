@@ -1770,14 +1770,14 @@ class _TypedField(pydantic.BaseModel, frozen=True):
 class _Declaration(pydantic.BaseModel, frozen=True):
     """One attribute of a Django model, e.g. `name = models.TextField()`.
 
-    `name` is not yet checked to be one Django accepts. `source` is the Entity
+    `name` is not yet checked to be one Django accepts. `entity_field` is the Entity
     field it holds.
     """
 
     name: FieldName
     field: DjangoField
     positional: tuple[ValueExpression, ...]
-    source: FieldName
+    entity_field: FieldName
     role: FieldRole
 
     def defaulted(self, default: FieldDefault) -> _Declaration:
@@ -2144,7 +2144,9 @@ class DjangoModelsRenderer:
         imported_names = frozenset(symbol.bound_name() for symbol in imports)
         reported.extend(
             InvalidDjangoFieldName(
-                entity=model.entity, field=declaration.source, name=declaration.name
+                entity=model.entity,
+                field=declaration.entity_field,
+                name=declaration.name,
             )
             for model in planned
             for declaration in model.declarations
@@ -2349,7 +2351,7 @@ class DjangoModelsRenderer:
             name=field,
             field=django_field,
             positional=(),
-            source=field,
+            entity_field=field,
             role=role,
         )
 
@@ -2479,7 +2481,7 @@ class DjangoModelsRenderer:
         its fields' types imply."""
         planned: list[_PlannedConstraint] = []
         reported: list[_ConstraintDiagnostic] = []
-        relation = ir.Relation.of(ir.FromSource(source=model))
+        relation = ir.Relation.of(ir.FromModel(from_model=model))
         for constraint in declared:
             checker = condition_checker.ConditionChecker(
                 owner=constraint.name, relation=relation, subject=model
@@ -2497,7 +2499,7 @@ class DjangoModelsRenderer:
                     unknown = [
                         diagnostics.UnknownField(
                             owner=constraint.name,
-                            source=relation.source,
+                            from_model=relation.from_model,
                             field=field,
                             valid=relation.field_names(),
                         )
@@ -2577,7 +2579,7 @@ class DjangoModelsRenderer:
                     name=ConstraintName(f"{snake}_{name}_{suffix}"),
                     compared=ir.FilterComparison(
                         operator=compared_by,
-                        field=ir.SourceField(field=field),
+                        field=ir.SubjectField(field=field),
                         operand=ir.ScalarLiteral(value.root),
                     ),
                 )
@@ -2942,7 +2944,7 @@ class DjangoModelsRenderer:
             name=DjangoModelsRenderer.foreign_key_name(reference.field),
             field=DjangoField.builtin(field_class, arguments),
             positional=(target,),
-            source=reference.field,
+            entity_field=reference.field,
             role=FieldRole.FOREIGN_KEY,
         )
 
@@ -2953,7 +2955,7 @@ class DjangoModelsRenderer:
         bound: dict[FieldName, list[FieldName]] = {}
         for declaration in declarations:
             for attribute in declaration.attributes():
-                bound.setdefault(attribute, []).append(declaration.source)
+                bound.setdefault(attribute, []).append(declaration.entity_field)
         for name, fields in bound.items():
             if len(fields) > 1:
                 yield DjangoFieldNameClash(

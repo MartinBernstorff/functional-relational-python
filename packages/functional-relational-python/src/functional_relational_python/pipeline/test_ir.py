@@ -56,7 +56,7 @@ def lookup(
         Employee: EmployeeId,
     }
     return ir.Lookup(
-        reference=ir.SourceField(field=reference),
+        reference=ir.SubjectField(field=reference),
         id_type=id_types[target],
         target=target,
         optionality=optionality,
@@ -64,7 +64,7 @@ def lookup(
 
 
 def new_model(
-    name: ir.SourceName, fields: Mapping[FieldName, ir.RuntimeAnnotation]
+    name: ir.FromModelName, fields: Mapping[FieldName, ir.RuntimeAnnotation]
 ) -> type[pydantic.BaseModel]:
     annotations = {field.root: annotation for field, annotation in fields.items()}
     model = types.new_class(
@@ -80,8 +80,8 @@ def new_model(
 
 
 def own_field(name: FieldName, annotation: ir.RuntimeAnnotation) -> ir.Field:
-    model = new_model(ir.SourceName("Model"), {name: annotation})
-    match ir.Relation.of(ir.FromSource(source=model)).fields:
+    model = new_model(ir.FromModelName("Model"), {name: annotation})
+    match ir.Relation.of(ir.FromModel(from_model=model)).fields:
         case (ir.Field() as field,):
             return field
         case fields:
@@ -129,7 +129,9 @@ def test_a_nested_field_is_as_optional_as_its_lookup() -> None:
     field = ir.NestedField(
         name=FieldName("mentor"),
         value=lookup(FieldName("mentor_id"), Employee, Optionality.OPTIONAL),
-        relation=ir.Relation(source=ir.SourceName("Employee"), fields=(), filters=()),
+        relation=ir.Relation(
+            from_model=ir.FromModelName("Employee"), fields=(), filters=()
+        ),
         default=ir.NoDefault(),
     )
 
@@ -169,20 +171,20 @@ def test_lookups_are_one_per_entity_nested_included_in_first_use_order() -> None
     mentor = lookup(FieldName("mentor_id"), Employee, Optionality.OPTIONAL)
     company = lookup(FieldName("company_id"), Company)
     relation = ir.Relation(
-        source=ir.SourceName("Employee"),
+        from_model=ir.FromModelName("Employee"),
         fields=(
             own_field(FieldName("id"), EmployeeId),
             ir.NestedField(
                 name=FieldName("mentor"),
                 value=mentor,
                 relation=ir.Relation(
-                    source=ir.SourceName("Employee"),
+                    from_model=ir.FromModelName("Employee"),
                     fields=(
                         ir.NestedField(
                             name=FieldName("department"),
                             value=department,
                             relation=ir.Relation(
-                                source=ir.SourceName("Department"),
+                                from_model=ir.FromModelName("Department"),
                                 fields=(
                                     ir.Field.looked_up(
                                         FieldName("company"), company, ir.NoDefault()
@@ -210,7 +212,7 @@ def test_a_lifted_field_looks_up_each_entity_on_its_way_outermost_first() -> Non
     department = lookup(FieldName("department_id"), Department)
     company = lookup(FieldName("company_id"), Company)
     relation = ir.Relation(
-        source=ir.SourceName("Employee"),
+        from_model=ir.FromModelName("Employee"),
         fields=(
             ir.Field.looked_up(
                 FieldName("mentor_company"),
@@ -222,7 +224,7 @@ def test_a_lifted_field_looks_up_each_entity_on_its_way_outermost_first() -> Non
                 info=FieldInfo.from_annotation(str | None),
                 value=ir.Lifted(
                     through=(mentor, department),
-                    field=ir.SourceField(field=FieldName("name")),
+                    field=ir.SubjectField(field=FieldName("name")),
                 ),
                 default=ir.NoDefault(),
             ),
@@ -257,4 +259,4 @@ def test_admitting_none_keeps_the_fields_constraints_inside_the_none() -> None:
 
 
 def test_a_relation_of_own_fields_has_no_lookups() -> None:
-    assert ir.Relation.of(ir.FromSource(source=Employee)).lookups() == ()
+    assert ir.Relation.of(ir.FromModel(from_model=Employee)).lookups() == ()

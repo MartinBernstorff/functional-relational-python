@@ -62,13 +62,13 @@ class Poisoned(pydantic.BaseModel, frozen=True):
 
 
 class CompiledView(pydantic.BaseModel, frozen=True):
-    """A checked View: its Source, the Relation backends compute from it, the
+    """A checked View: its from_model, the Relation backends compute from it, the
     base its model subclasses, and the names its generated code uses.
 
     Every kept field `base` declares has the type it declares."""
 
     name: ViewName
-    source: type[pydantic.BaseModel]
+    from_model: type[pydantic.BaseModel]
     base: type[pydantic.BaseModel]
     relation: ir.Relation
     names: ViewModelNames
@@ -84,7 +84,7 @@ class PoisonedView(pydantic.BaseModel, frozen=True):
 
 
 class CompiledUnion(pydantic.BaseModel, frozen=True):
-    """A checked Union of Views: the Source its Variants read, its Discriminator,
+    """A checked Union of Views: the from_model its Variants read, its Discriminator,
     its checked Variants, and the names its generated code uses.
 
     Every View among its leaves has the Discriminator, typed by a Tag no other
@@ -92,13 +92,13 @@ class CompiledUnion(pydantic.BaseModel, frozen=True):
     """
 
     name: UnionName
-    source: type[pydantic.BaseModel]
+    from_model: type[pydantic.BaseModel]
     discriminator: FieldName
     variants: tuple[CompiledView | CompiledUnion, ...]
     names: UnionModelNames
 
     def leaves(self) -> tuple[CompiledView, ...]:
-        """The Views a Source row may be a result of, in the order they are tried:
+        """The Views a from_model row may be a result of, in the order they are tried:
         the first whose Filters keep the row gives the result."""
         return tuple(leaf for variant in self.variants for leaf in variant.leaves())
 
@@ -121,14 +121,14 @@ class CompiledViews(pydantic.BaseModel, frozen=True):
 
 
 class CompiledWriteModel(pydantic.BaseModel, frozen=True):
-    """A checked WriteModel: its Source, the Relation its model is generated from,
+    """A checked WriteModel: its from_model, the Relation its model is generated from,
     the base its model subclasses, and the names of its models. A WriteModel has no
     mapping function.
 
     Every kept field `base` declares has the type it declares."""
 
     name: WriteModelName
-    source: type[pydantic.BaseModel]
+    from_model: type[pydantic.BaseModel]
     base: type[pydantic.BaseModel]
     relation: ir.Relation
     names: ModelNames
@@ -140,7 +140,7 @@ class CompiledWriteModel(pydantic.BaseModel, frozen=True):
 
 class CompiledWriteModelUnion(pydantic.BaseModel, frozen=True):
     """A checked Union of WriteModels: its Discriminator, its checked Variants, and
-    the name of its model. Its Variants may read different Sources. Like a
+    the name of its model. Its Variants may read different from_models. Like a
     WriteModel, it has no mapping function.
 
     Every WriteModel among its leaves has the Discriminator, typed by a Tag no other
@@ -302,7 +302,7 @@ class PoisonedWriteModel(pydantic.BaseModel, frozen=True):
 def _check_relation(
     entity_graph: EntityGraph, definition: View | WriteModel
 ) -> ir.Relation | Poisoned:
-    """The Relation a View's or WriteModel's pipeline builds over its Source, checked
+    """The Relation a View's or WriteModel's pipeline builds over its from_model, checked
     against its base, before its model names are checked."""
     name = definition.name
     match _check_node(
@@ -372,7 +372,7 @@ def _check_view(entity_graph: EntityGraph, view: View) -> CompiledView | Poisone
         case Ok(names):
             return CompiledView(
                 name=view.name,
-                source=view.query.from_,
+                from_model=view.query.from_model,
                 base=view.base,
                 relation=relation,
                 names=names,
@@ -401,7 +401,7 @@ def _check_write_model(
         case Ok(names):
             return CompiledWriteModel(
                 name=write_model.name,
-                source=write_model.query.from_,
+                from_model=write_model.query.from_model,
                 base=write_model.base,
                 relation=relation,
                 names=names,
@@ -416,7 +416,7 @@ def _check_node(
     entity_graph: EntityGraph, view: DefinitionName, node: ir.Node
 ) -> ir.Relation | Poisoned:
     match node:
-        case ir.FromSource():
+        case ir.FromModel():
             return ir.Relation.of(node)
         case (
             ir.Omit()
@@ -505,7 +505,7 @@ def _check_omit(
                 diagnostics=(
                     diagnostics.UnknownField(
                         owner=view,
-                        source=relation.source,
+                        from_model=relation.from_model,
                         field=field,
                         valid=relation.field_names(),
                     ),
@@ -521,7 +521,10 @@ def _check_rename(
     if node.field not in names:
         reported.append(
             diagnostics.UnknownField(
-                owner=view, source=relation.source, field=node.field, valid=names
+                owner=view,
+                from_model=relation.from_model,
+                field=node.field,
+                valid=names,
             )
         )
     # Renaming a field to its own name changes nothing, so it is no defect.
@@ -531,7 +534,7 @@ def _check_rename(
                 view=view, renamed=node.field, field=node.new
             )
         )
-    reported.extend(ViewModelNames.check_field(view, relation.source, node.new))
+    reported.extend(ViewModelNames.check_field(view, relation.from_model, node.new))
     if not reported:
         return relation.renamed({node.field: node.new})
     return Poisoned(
@@ -556,7 +559,7 @@ def _recovered_rename(node: ir.Rename, relation: ir.Relation) -> ir.Relation:
             ir.Field(
                 name=node.new,
                 info=FieldInfo(),
-                value=ir.SourceField(field=node.field),
+                value=ir.SubjectField(field=node.field),
                 default=ir.NoDefault(),
             ),
         )
@@ -584,7 +587,7 @@ def _check_rename_selected(
     for old, new in new_names.items():
         if old in kept:
             continue
-        reported.extend(ViewModelNames.check_field(view, relation.source, new))
+        reported.extend(ViewModelNames.check_field(view, relation.from_model, new))
         if new in taken:
             reported.append(
                 diagnostics.RenameOntoExistingField(view=view, renamed=old, field=new)
@@ -622,7 +625,7 @@ def _check_retype(
                 reported.append(
                     diagnostics.UnknownField(
                         owner=view,
-                        source=relation.source,
+                        from_model=relation.from_model,
                         field=field,
                         valid=relation.field_names(),
                     )
@@ -639,7 +642,7 @@ def _check_retype(
                 # Left as it is, so later steps still find it.
                 reported.append(
                     diagnostics.RetypeNestedField(
-                        view=view, source=relation.source, field=field.name
+                        view=view, from_model=relation.from_model, field=field.name
                     )
                 )
                 fields.append(field)
@@ -656,7 +659,7 @@ def _check_project(
     unknown = tuple(
         diagnostics.UnknownField(
             owner=view,
-            source=relation.source,
+            from_model=relation.from_model,
             field=field,
             valid=relation.field_names(),
         )
@@ -689,7 +692,7 @@ def _check_default(
             reported.append(
                 diagnostics.UnknownField(
                     owner=view,
-                    source=relation.source,
+                    from_model=relation.from_model,
                     field=field,
                     valid=relation.field_names(),
                 )
@@ -719,7 +722,7 @@ def _check_add(
     collides = node.name in relation.field_names()
     if collides:
         reported.append(diagnostics.AddOntoExistingField(view=view, field=node.name))
-    reported.extend(ViewModelNames.check_field(view, relation.source, node.name))
+    reported.extend(ViewModelNames.check_field(view, relation.from_model, node.name))
     default: ir.DefaultValue | ir.NoDefault
     match node.default:
         case ir.NoDefault():
@@ -755,7 +758,7 @@ def _check_where(
     checked.
     """
     match condition_checker.ConditionChecker(
-        owner=view, relation=relation, subject=_subject(node).source
+        owner=view, relation=relation, subject=_subject(node).from_model
     ).check(node.condition):
         case condition_checker.Defects(diagnostics=reported):
             return Poisoned(recovered=relation, diagnostics=reported)
@@ -765,10 +768,10 @@ def _check_where(
             )
 
 
-def _subject(node: ir.Node) -> ir.FromSource:
+def _subject(node: ir.Node) -> ir.FromModel:
     """What the pipeline that `node` ends started from, however the relation has
-    changed since: the View's Source, or the Entity a nested pipeline runs on."""
-    while not isinstance(node, ir.FromSource):
+    changed since: the View's from_model, or the Entity a nested pipeline runs on."""
+    while not isinstance(node, ir.FromModel):
         node = node.input
     return node
 
@@ -798,7 +801,7 @@ def _check_require(
                 reported.append(
                     diagnostics.UnknownField(
                         owner=view,
-                        source=relation.source,
+                        from_model=relation.from_model,
                         field=field,
                         valid=relation.field_names(),
                     )
@@ -808,7 +811,7 @@ def _check_require(
         if field.name not in names:
             fields.append(field)
             continue
-        match narrowing.required(view, relation.source, field):
+        match narrowing.required(view, relation.from_model, field):
             case ir.Field() | ir.NestedField() as narrowed:
                 fields.append(narrowed)
             case diagnostic:
@@ -905,12 +908,15 @@ def _resolve_field(
             field=field,
             diagnostics=(
                 diagnostics.ResolvedNameCollision(
-                    view=view, source=relation.source, field=field.name, existing=name
+                    view=view,
+                    from_model=relation.from_model,
+                    field=field.name,
+                    existing=name,
                 ),
             ),
         )
     if name != field.name and (
-        invalid := ViewModelNames.check_field(view, relation.source, name)
+        invalid := ViewModelNames.check_field(view, relation.from_model, name)
     ):
         return _CheckedField(field=field, diagnostics=invalid)
     return _resolved(entity_graph, view, node.then, name, found)
@@ -928,7 +934,7 @@ def _lookup(
         field=field,
         diagnostics=(
             diagnostics.NotAReference(
-                view=view, source=relation.source, field=field.name
+                view=view, from_model=relation.from_model, field=field.name
             ),
         ),
     )
@@ -937,15 +943,15 @@ def _lookup(
             pass
         case ir.NestedField():
             return not_a_reference
-    match field.reference_source():
-        case (source, info):
+    match field.read_from():
+        case (read, info):
             pass
         case ir.Field():
             return not_a_reference
-    match entity_graph.reference_of(source, info):
+    match entity_graph.reference_of(read, info):
         case Ok(reference):
             lookup = ir.Lookup(
-                reference=ir.SourceField(field=reference.field),
+                reference=ir.SubjectField(field=reference.field),
                 id_type=reference.id_type,
                 target=reference.target,
                 optionality=reference.optionality,
@@ -976,7 +982,7 @@ def _lookup(
                 diagnostics=(
                     diagnostics.UnresolvableReference(
                         view=view,
-                        source=relation.source,
+                        from_model=relation.from_model,
                         field=field.name,
                         id_type=id_type,
                     ),
@@ -997,28 +1003,30 @@ def _check_reverse(
     existing field keeps it, as for `add`. A Reference that cannot be followed
     backwards recovers with a field of unknown type, so later steps still find it.
     """
-    source = relation.source
+    from_model = relation.from_model
     name = FieldName(PascalCase(node.entity.__name__).snake_case().root)
     reported: list[diagnostics.CompileDiagnostic] = []
     collides = name in relation.field_names()
     if collides:
         reported.append(
             diagnostics.ReverseOntoExistingField(
-                view=view, source=source, entity=node.entity, field=name
+                view=view, from_model=from_model, entity=node.entity, field=name
             )
         )
-    reported.extend(ViewModelNames.check_field(view, source, name))
+    reported.extend(ViewModelNames.check_field(view, from_model, name))
     subject = _subject(node)
     non_entities: list[diagnostics.CompileDiagnostic] = []
-    if subject.source not in entity_graph.entities:
+    if subject.from_model not in entity_graph.entities:
         non_entities.append(
             diagnostics.ReverseFromNonEntity(
-                view=view, source=source, entity=node.entity
+                view=view, from_model=from_model, entity=node.entity
             )
         )
     if node.entity not in entity_graph.entities:
         non_entities.append(
-            diagnostics.ReverseOfNonEntity(view=view, source=source, entity=node.entity)
+            diagnostics.ReverseOfNonEntity(
+                view=view, from_model=from_model, entity=node.entity
+            )
         )
     reported.extend(non_entities)
     field: ir.RelationField = ir.Field(
@@ -1028,7 +1036,7 @@ def _check_reverse(
         to_subject = tuple(
             reference
             for reference in entity_graph.entities[node.entity].references
-            if reference.target is subject.source
+            if reference.target is subject.from_model
         )
         one_to_one = tuple(
             reference
@@ -1043,14 +1051,14 @@ def _check_reverse(
                 unchosen = (
                     diagnostics.AmbiguousReverse(
                         view=view,
-                        source=source,
+                        from_model=from_model,
                         entity=node.entity,
                         references=tuple(reference.field for reference in chosen),
                     )
                     if chosen
                     else diagnostics.NoOneToOneReference(
                         view=view,
-                        source=source,
+                        from_model=from_model,
                         entity=node.entity,
                         many_to_one=tuple(
                             reference.field
@@ -1066,7 +1074,7 @@ def _check_reverse(
                 )
                 unchosen = diagnostics.NotAOneToOneReference(
                     view=view,
-                    source=source,
+                    from_model=from_model,
                     entity=node.entity,
                     field=via,
                     valid=tuple(reference.field for reference in one_to_one),
@@ -1106,7 +1114,7 @@ def _resolved(
     ID, and need not fit the Entity.
     """
     default = ir.NoDefault()
-    root = ir.FromSource(source=found.lookups()[-1].target)
+    root = ir.FromModel(from_model=found.lookups()[-1].target)
     nested = then(root)
     if nested == root:
         return _CheckedField(
@@ -1119,7 +1127,7 @@ def _resolved(
             pass
     # One per `where`: each looked-up Entity is one field, with no rows to filter.
     misplaced = tuple(
-        diagnostics.WhereInNestedPipeline(view=view, source=relation.source)
+        diagnostics.WhereInNestedPipeline(view=view, from_model=relation.from_model)
         for _ in relation.filters
     )
     return _CheckedField(
@@ -1147,7 +1155,7 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
                 chain = found.lookups()
                 return _HeldEntity(
                     chain=chain,
-                    relation=ir.Relation.of(ir.FromSource(source=chain[-1].target)),
+                    relation=ir.Relation.of(ir.FromModel(from_model=chain[-1].target)),
                 )
             case ir.NestedField(value=found, relation=relation):
                 return _HeldEntity(chain=found.lookups(), relation=relation)
@@ -1173,7 +1181,7 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
         match value:
             case ir.Added():
                 return field
-            case ir.SourceField() | ir.RequiredField():
+            case ir.SubjectField() | ir.RequiredField():
                 lifted_value = ir.Lifted(through=self.chain, field=value)
             case ir.Lifted(through=through, field=read):
                 lifted_value = ir.Lifted(through=(*self.chain, *through), field=read)
@@ -1216,12 +1224,12 @@ def _check_flatten(
             flattened = set[FieldName]()
             reported.append(
                 diagnostics.NotAResolvedField(
-                    view=view, source=relation.source, field=name
+                    view=view, from_model=relation.from_model, field=name
                 )
                 if name in relation.field_names()
                 else diagnostics.UnknownField(
                     owner=view,
-                    source=relation.source,
+                    from_model=relation.from_model,
                     field=name,
                     valid=relation.field_names(),
                 )
@@ -1290,7 +1298,7 @@ def _check_union(
     unions: Mapping[Union, _CheckedUnion],
 ) -> _CheckedUnion:
     """Checks the Union's name, that its Variants are all Views or Unions of them
-    over one Source, or all WriteModels or Unions of them, and their Tags.
+    over one from_model, or all WriteModels or Unions of them, and their Tags.
 
     A Variant that did not compile is left out of the checks, so the Variants
     that did are still checked.
@@ -1307,13 +1315,15 @@ def _check_union(
         *_tag_diagnostics(union, tagged),
         *_unreachable_diagnostics(union, variants.compiled_views),
     ]
-    sources = tuple(variant.source for variant in variants.compiled_views)
-    if len(set(sources)) > 1:
+    from_models = tuple(variant.from_model for variant in variants.compiled_views)
+    if len(set(from_models)) > 1:
         reported.append(
-            diagnostics.VariantSourcesDiffer(
+            diagnostics.VariantFromModelsDiffer(
                 view=union.name,
                 variants=tuple(variant.name for variant in variants.compiled_views),
-                sources=tuple(ir.SourceName(source.__name__) for source in sources),
+                from_models=tuple(
+                    ir.FromModelName(from_model.__name__) for from_model in from_models
+                ),
             )
         )
     match UnionModelNames.check(union.name):
@@ -1337,7 +1347,7 @@ def _check_union(
         )
     return CompiledUnion(
         name=union.name,
-        source=sources[0],
+        from_model=from_models[0],
         discriminator=union.discriminator,
         variants=variants.compiled_views,
         names=names,

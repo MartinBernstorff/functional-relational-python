@@ -74,7 +74,7 @@ class InvalidFieldName(pydantic.BaseModel, Diagnostic, frozen=True):
     """A rename or resolve gives a field a name no generated model field can have."""
 
     view: DefinitionName
-    source: ir.SourceName
+    from_model: ir.FromModelName
     field: FieldName
 
     def describe(self) -> DiagnosticMessage:
@@ -106,7 +106,7 @@ class ModelName(pydantic.RootModel[str], frozen=True):
 
 
 class FunctionName(pydantic.RootModel[str], frozen=True):
-    """A valid name for the function mapping a View's Source to its model."""
+    """A valid name for the function mapping a View's from_model to its model."""
 
     @pydantic.field_validator("root")
     @classmethod
@@ -254,7 +254,7 @@ class ViewModelNames(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def check_field(
-        view: DefinitionName, source: ir.SourceName, name: FieldName
+        view: DefinitionName, from_model: ir.FromModelName, name: FieldName
     ) -> tuple[InvalidFieldName, ...]:
         """Reports `name` unless a generated model can have a field of that name."""
         if (
@@ -263,7 +263,7 @@ class ViewModelNames(pydantic.BaseModel, frozen=True):
             and not hasattr(pydantic.BaseModel, name.root)
         ):
             return ()
-        return (InvalidFieldName(view=view, source=source, field=name),)
+        return (InvalidFieldName(view=view, from_model=from_model, field=name),)
 
 
 class UnionModelNames(pydantic.BaseModel, frozen=True):

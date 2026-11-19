@@ -94,7 +94,7 @@ def default(fields: FieldName | ir.Select, value: ir.UncheckedDefault) -> Step:
 
     `value` is a literal: `None`, `MISSING`, a number, a string, a boolean, an
     empty list or dict, or an enum member. A mapping still fills every field from
-    the Source; the default only appears in the model.
+    the from_model; the default only appears in the model.
     """
 
     def step(node: ir.Node) -> ir.Node:
@@ -119,7 +119,7 @@ def add(
     default: ir.UncheckedDefault = ir.NoDefault,
 ) -> Step:
     """Declares a new field `name`, typed `annotation`, with no value from the
-    Source, e.g. the literal tag of a tagged union.
+    from_model, e.g. the literal tag of a tagged union.
 
     `default` is a literal, as for `default`. A View's added field needs one: its
     mapping leaves the field out, so the model fills it with its default. In a
@@ -141,7 +141,7 @@ def add(
 
 
 def project(fields: Iterable[ir.FieldName]) -> Step:
-    """Keeps only `fields`, in the Source's field order."""
+    """Keeps only `fields`, in the from_model's field order."""
     kept = tuple(fields)
 
     def step(node: ir.Node) -> ir.Node:
@@ -151,7 +151,7 @@ def project(fields: Iterable[ir.FieldName]) -> Step:
 
 
 def where(condition: ir.Condition) -> Step:
-    """Keeps only the Source rows for which `condition` is true; see `conditions`.
+    """Keeps only the from_model rows for which `condition` is true; see `conditions`.
 
     Each kept row still gives one View result. Only a View's own pipeline may
     filter, not a nested `resolve` pipeline or a WriteModel.
@@ -269,10 +269,8 @@ def is_primary_key(field: ir.RelationField) -> bool:
     subject's `id` field. A Reference renamed to `id` is not the primary key.
     """
     match field:
-        case ir.Field(
-            value=ir.SourceField(field=source) | ir.RequiredField(field=source)
-        ):
-            return source == EntityNode.primary_key
+        case ir.Field(value=ir.SubjectField(field=read) | ir.RequiredField(field=read)):
+            return read == EntityNode.primary_key
         case ir.Field() | ir.NestedField():
             return False
 
@@ -294,11 +292,11 @@ def pipeline(*steps: Step) -> Step:
 class Query(pydantic.BaseModel, frozen=True):
     """A model and the steps applied to it: what a View or WriteModel reads.
 
-    Only a Query has a starting model. A nested pipeline, e.g. in `resolve`, starts
+    Only a Query has a from_model. A nested pipeline, e.g. in `resolve`, starts
     from the Entity it is given, so it takes Steps.
     """
 
-    from_: type[pydantic.BaseModel]
+    from_model: type[pydantic.BaseModel]
     step: Step
 
     def then(self, *steps: Step) -> Query:
@@ -307,11 +305,11 @@ class Query(pydantic.BaseModel, frozen=True):
         >>> active = from_(Company, where(...))
         >>> active.then(omit(FieldName("secret")))
         """
-        return Query(from_=self.from_, step=pipeline(self.step, *steps))
+        return Query(from_model=self.from_model, step=pipeline(self.step, *steps))
 
     def node(self) -> ir.Node:
-        """The node tree the steps build over every field of `from_`."""
-        return self.step(ir.FromSource(source=self.from_))
+        """The node tree the steps build over every field of `from_model`."""
+        return self.step(ir.FromModel(from_model=self.from_model))
 
 
 def from_(model: type[pydantic.BaseModel], *steps: Step) -> Query:
@@ -320,4 +318,4 @@ def from_(model: type[pydantic.BaseModel], *steps: Step) -> Query:
     `model` is any Pydantic model, often an Entity. A View over a model that is not
     an Entity cannot be run by the InMemoryViewEngine.
     """
-    return Query(from_=model, step=pipeline(*steps))
+    return Query(from_model=model, step=pipeline(*steps))

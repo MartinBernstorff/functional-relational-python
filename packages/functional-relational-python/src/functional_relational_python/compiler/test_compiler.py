@@ -49,7 +49,7 @@ class Company(pydantic.BaseModel):
 
 
 def empty_graph() -> EntityGraph:
-    # The Sources here are not Entities; compile does not require them to be.
+    # The from_models here are not Entities; compile does not require them to be.
     return EntityGraph.build([], IdBase.fake(), OneToOneMarker.fake()).unwrap()
 
 
@@ -85,13 +85,13 @@ def diagnostics_of(views: list[View]) -> tuple[diagnostics.CompileDiagnostic, ..
             return error.diagnostics
 
 
-def test_omit_removes_the_field_from_the_source() -> None:
+def test_omit_removes_the_field_from_the_from_model() -> None:
     view = compile_one(steps.omit(FieldName("secret")))
 
     assert field_names(view) == names(Text("name"), Text("revenue"))
 
 
-def test_project_keeps_only_the_listed_fields_in_source_order() -> None:
+def test_project_keeps_only_the_listed_fields_in_from_model_order() -> None:
     view = compile_one(steps.project([FieldName("revenue"), FieldName("name")]))
 
     assert field_names(view) == names(Text("name"), Text("revenue"))
@@ -107,7 +107,7 @@ def test_each_unknown_projected_field_is_a_diagnostic() -> None:
     assert diagnostics_of([view]) == tuple(
         diagnostics.UnknownField(
             owner=view.name,
-            source=ir.SourceName("Company"),
+            from_model=ir.FromModelName("Company"),
             field=field,
             valid=tuple(map(FieldName, Company.model_fields)),
         )
@@ -129,13 +129,13 @@ def test_steps_after_a_defective_project_are_checked_against_its_known_fields() 
     assert diagnostics_of([view]) == (
         diagnostics.UnknownField(
             owner=view.name,
-            source=ir.SourceName("Company"),
+            from_model=ir.FromModelName("Company"),
             field=unknown,
             valid=tuple(map(FieldName, Company.model_fields)),
         ),
         diagnostics.UnknownField(
             owner=view.name,
-            source=ir.SourceName("Company"),
+            from_model=ir.FromModelName("Company"),
             field=FieldName("secret"),
             valid=(FieldName("name"),),
         ),
@@ -182,7 +182,7 @@ def test_a_user_defined_step_composes_like_a_built_in_one() -> None:
     assert field_names(view) == names(Text("name"))
 
 
-def test_an_unknown_field_names_the_source_the_field_and_the_valid_names() -> None:
+def test_an_unknown_field_names_the_from_model_the_field_and_the_valid_names() -> None:
     unknown = FieldName("revnue")
     view = View(
         name=ViewName.fake(),
@@ -194,7 +194,7 @@ def test_an_unknown_field_names_the_source_the_field_and_the_valid_names() -> No
     assert diagnostics_of([view]) == (
         diagnostics.UnknownField(
             owner=view.name,
-            source=ir.SourceName("Company"),
+            from_model=ir.FromModelName("Company"),
             field=unknown,
             valid=(FieldName("name"), FieldName("revenue")),
         ),
@@ -204,7 +204,7 @@ def test_an_unknown_field_names_the_source_the_field_and_the_valid_names() -> No
 def test_the_unknown_field_message_contains_the_offending_values() -> None:
     message = diagnostics.UnknownField(
         owner=ViewName("CompanySummary"),
-        source=ir.SourceName("Company"),
+        from_model=ir.FromModelName("Company"),
         field=FieldName("revnue"),
         valid=(FieldName("name"), FieldName("revenue")),
     ).describe()
@@ -236,7 +236,7 @@ def test_compiled_views_keep_their_explicit_names_in_order() -> None:
 
 def test_building_a_pipeline_checks_nothing() -> None:
     unknown = FieldName("does_not_exist")
-    root = ir.FromSource(source=Company)
+    root = ir.FromModel(from_model=Company)
 
     node = steps.pipeline(steps.omit(unknown), steps.rename(unknown, unknown))(root)
 
@@ -252,7 +252,7 @@ def test_rename_keeps_the_field_in_place_with_its_type() -> None:
         ir.Field(
             name=FieldName("code") if name == "secret" else FieldName(name),
             info=info,
-            value=ir.SourceField(field=FieldName(name)),
+            value=ir.SubjectField(field=FieldName(name)),
             default=ir.NoDefault(),
         )
         for name, info in Company.model_fields.items()
@@ -313,7 +313,7 @@ def test_renaming_an_unknown_field_is_one_diagnostic_even_if_later_steps_use_it(
     assert diagnostics_of([view]) == (
         diagnostics.UnknownField(
             owner=view.name,
-            source=ir.SourceName("Company"),
+            from_model=ir.FromModelName("Company"),
             field=unknown,
             valid=tuple(map(FieldName, Company.model_fields)),
         ),
@@ -330,7 +330,7 @@ def test_renaming_an_unknown_field_onto_an_existing_one_reports_both() -> None:
     assert diagnostics_of([view]) == (
         diagnostics.UnknownField(
             owner=view.name,
-            source=ir.SourceName("Company"),
+            from_model=ir.FromModelName("Company"),
             field=unknown,
             valid=tuple(map(FieldName, Company.model_fields)),
         ),
@@ -379,9 +379,9 @@ def test_rename_with_a_select_renames_each_selected_field_in_place() -> None:
     )
 
     assert values(view) == {
-        FieldName("public_name"): ir.SourceField(field=FieldName("name")),
-        FieldName("secret"): ir.SourceField(field=FieldName("secret")),
-        FieldName("public_revenue"): ir.SourceField(field=FieldName("revenue")),
+        FieldName("public_name"): ir.SubjectField(field=FieldName("name")),
+        FieldName("secret"): ir.SubjectField(field=FieldName("secret")),
+        FieldName("public_revenue"): ir.SubjectField(field=FieldName("revenue")),
     }
     assert field_names(view) == names(
         Text("public_name"), Text("secret"), Text("public_revenue")
@@ -398,9 +398,9 @@ def test_rename_with_a_select_renames_all_fields_at_once_so_they_can_swap() -> N
     )
 
     assert values(view) == {
-        second: ir.SourceField(field=first),
-        first: ir.SourceField(field=second),
-        FieldName("revenue"): ir.SourceField(field=FieldName("revenue")),
+        second: ir.SubjectField(field=first),
+        first: ir.SubjectField(field=second),
+        FieldName("revenue"): ir.SubjectField(field=FieldName("revenue")),
     }
 
 
@@ -466,14 +466,14 @@ def test_rename_with_a_select_reports_each_invalid_new_name() -> None:
 
     assert diagnostics_of([view]) == tuple(
         model_names.InvalidFieldName(
-            view=view.name, source=ir.SourceName("Company"), field=private(field)
+            view=view.name, from_model=ir.FromModelName("Company"), field=private(field)
         )
         for field in selected
     )
 
 
 def test_building_steps_with_a_select_checks_nothing() -> None:
-    root = ir.FromSource(source=Company)
+    root = ir.FromModel(from_model=Company)
     selection = named(FieldName("does_not_exist"))
     renaming = prefixed(Text("public"))
 
@@ -605,7 +605,7 @@ def test_a_default_for_an_unknown_field_that_is_not_a_literal_reports_both() -> 
     assert diagnostics_of([view]) == (
         diagnostics.UnknownField(
             owner=view.name,
-            source=ir.SourceName("Company"),
+            from_model=ir.FromModelName("Company"),
             field=unknown,
             valid=tuple(map(FieldName, Company.model_fields)),
         ),
@@ -625,7 +625,7 @@ def test_the_non_literal_default_message_contains_the_value() -> None:
 
 
 def test_building_a_default_checks_nothing() -> None:
-    root = ir.FromSource(source=Company)
+    root = ir.FromModel(from_model=Company)
     unknown, value = FieldName("does_not_exist"), object()
 
     node = steps.default(unknown, value)(root)
@@ -657,7 +657,7 @@ class AddedField(pydantic.BaseModel, frozen=True):
                 pytest.fail(f"expected an added field, got {field}")
 
 
-def test_add_appends_a_field_with_no_value_from_the_source() -> None:
+def test_add_appends_a_field_with_no_value_from_the_from_model() -> None:
     kind = FieldName("kind")
 
     view = compile_one(steps.add(kind, Literal["company"], default="company"))
@@ -751,7 +751,7 @@ def test_the_add_diagnostic_messages_contain_the_field() -> None:
 
 
 def test_building_an_add_checks_nothing() -> None:
-    root = ir.FromSource(source=Company)
+    root = ir.FromModel(from_model=Company)
     existing, value = FieldName("name"), object()
 
     node = steps.add(existing, str, default=value)(root)
@@ -791,14 +791,16 @@ def views_with_defects(draw: st.DrawFn) -> ViewsWithDefects:
     """Views with known unknown-field omits.
 
     Every unknown name is independent of the others: it is never a field of the
-    Source, and valid omits use each field at most once.
+    from_model, and valid omits use each field at most once.
     """
     views: list[View] = []
     unknown_fields: list[FieldName] = []
     defective_views: set[ViewName] = set()
     for index in range(draw(st.integers(min_value=0, max_value=4))):
-        source = draw(st.sampled_from([Company, Wide]))
-        valid = draw(st.lists(st.sampled_from(list(source.model_fields)), unique=True))
+        from_model = draw(st.sampled_from([Company, Wide]))
+        valid = draw(
+            st.lists(st.sampled_from(list(from_model.model_fields)), unique=True)
+        )
         unknown = draw(st.lists(unknown_field_name, max_size=3))
         omits = draw(st.permutations([*valid, *unknown]))
         name = ViewName(f"View{index}")
@@ -809,7 +811,8 @@ def views_with_defects(draw: st.DrawFn) -> ViewsWithDefects:
             View(
                 name=name,
                 query=steps.from_(
-                    source, steps.pipeline(*(steps.omit(FieldName(f)) for f in omits))
+                    from_model,
+                    steps.pipeline(*(steps.omit(FieldName(f)) for f in omits)),
                 ),
             )
         )
@@ -845,7 +848,7 @@ def owner_of(
     match diagnostic:
         case (
             diagnostics.UnknownField()
-            | diagnostics.NotASourceColumn()
+            | diagnostics.NotAFromModelColumn()
             | diagnostics.ComparedTypesDiffer()
             | diagnostics.NonLiteralConditionValue()
             | diagnostics.LiteralTypeMismatch()
@@ -871,15 +874,15 @@ def test_only_defective_views_are_poisoned_and_each_names_its_diagnostics(
 
 
 class Projection(pydantic.BaseModel, frozen=True):
-    source: type[pydantic.BaseModel]
+    from_model: type[pydantic.BaseModel]
     kept: tuple[FieldName, ...]
 
 
 @st.composite
 def projections(draw: st.DrawFn) -> Projection:
-    source = draw(st.sampled_from([Company, Wide]))
-    kept = draw(st.lists(st.sampled_from(list(source.model_fields)), unique=True))
-    return Projection(source=source, kept=tuple(map(FieldName, kept)))
+    from_model = draw(st.sampled_from([Company, Wide]))
+    kept = draw(st.lists(st.sampled_from(list(from_model.model_fields)), unique=True))
+    return Projection(from_model=from_model, kept=tuple(map(FieldName, kept)))
 
 
 @given(projections())
@@ -887,7 +890,7 @@ def test_project_equals_omitting_every_other_field(case: Projection) -> None:
     def compile_relation(step: steps.Step) -> ir.Relation:
         view = View(
             name=ViewName.fake(),
-            query=steps.from_(case.source, step),
+            query=steps.from_(case.from_model, step),
         )
         match compiler.compile_views(empty_graph(), [view]):
             case Ok(compiled):
@@ -897,7 +900,7 @@ def test_project_equals_omitting_every_other_field(case: Projection) -> None:
 
     others = [
         FieldName(name)
-        for name in case.source.model_fields
+        for name in case.from_model.model_fields
         if FieldName(name) not in case.kept
     ]
 
@@ -941,7 +944,7 @@ class ProjectId(Id[int]):
 
 
 class Memo(pydantic.BaseModel):
-    """A Source that is not an Entity, with a Reference that resolves to nothing."""
+    """A from_model that is not an Entity, with a Reference that resolves to nothing."""
 
     project_id: ProjectId
     department_id: DepartmentId
@@ -972,14 +975,14 @@ def is_lifted_reference(
 
 
 def compile_resolving(
-    source: type[pydantic.BaseModel], step: steps.Step
+    from_model: type[pydantic.BaseModel], step: steps.Step
 ) -> compiler.CompiledView:
     match compiler.compile_views(
         hr_graph(),
         [
             View(
                 name=ViewName.fake(),
-                query=steps.from_(source, step),
+                query=steps.from_(from_model, step),
             )
         ],
     ):
@@ -990,14 +993,14 @@ def compile_resolving(
 
 
 def resolve_diagnostics(
-    source: type[pydantic.BaseModel], step: steps.Step
+    from_model: type[pydantic.BaseModel], step: steps.Step
 ) -> tuple[diagnostics.CompileDiagnostic, ...]:
     match compiler.compile_views(
         hr_graph(),
         [
             View(
                 name=ViewName.fake(),
-                query=steps.from_(source, step),
+                query=steps.from_(from_model, step),
             )
         ],
     ):
@@ -1085,7 +1088,7 @@ def test_a_reference_without_the_id_suffix_keeps_its_name() -> None:
     )
 
     assert values(view)[FieldName("team")] == ir.Lookup(
-        reference=ir.SourceField(field=FieldName("department_id")),
+        reference=ir.SubjectField(field=FieldName("department_id")),
         id_type=DepartmentId,
         target=Department,
         optionality=Optionality.REQUIRED,
@@ -1118,7 +1121,7 @@ def test_a_resolved_reference_loses_its_default(then: tuple[steps.Step, ...]) ->
 def department_lookup() -> ir.Lookup:
     """How an Employee's `department_id` is resolved."""
     return ir.Lookup(
-        reference=ir.SourceField(field=FieldName("department_id")),
+        reference=ir.SubjectField(field=FieldName("department_id")),
         id_type=DepartmentId,
         target=Department,
         optionality=Optionality.REQUIRED,
@@ -1136,7 +1139,7 @@ def test_hydrate_leaves_a_renamed_primary_key_alone() -> None:
     )
 
     assert values(view) == {
-        FieldName("key"): ir.SourceField(field=FieldName("id")),
+        FieldName("key"): ir.SubjectField(field=FieldName("id")),
         FieldName("department"): department_lookup(),
     }
 
@@ -1187,11 +1190,13 @@ def test_an_empty_nested_pipeline_resolves_to_the_entity_itself() -> None:
     ]
 
 
-def test_resolving_onto_an_existing_field_names_the_source_and_both_fields() -> None:
+def test_resolving_onto_an_existing_field_names_the_from_model_and_both_fields() -> (
+    None
+):
     assert resolve_diagnostics(Clash, steps.hydrate()) == (
         diagnostics.ResolvedNameCollision(
             view=ViewName.fake(),
-            source=ir.SourceName("Clash"),
+            from_model=ir.FromModelName("Clash"),
             field=FieldName("department_id"),
             existing=FieldName("department"),
         ),
@@ -1202,7 +1207,7 @@ def test_resolving_a_field_that_is_not_a_reference_is_a_diagnostic() -> None:
     assert resolve_diagnostics(Employee, steps.resolve(named(FieldName("name")))) == (
         diagnostics.NotAReference(
             view=ViewName.fake(),
-            source=ir.SourceName("Employee"),
+            from_model=ir.FromModelName("Employee"),
             field=FieldName("name"),
         ),
     )
@@ -1212,7 +1217,7 @@ def test_resolving_the_primary_key_is_a_diagnostic() -> None:
     assert resolve_diagnostics(Employee, steps.resolve(named(FieldName("id")))) == (
         diagnostics.NotAReference(
             view=ViewName.fake(),
-            source=ir.SourceName("Employee"),
+            from_model=ir.FromModelName("Employee"),
             field=FieldName("id"),
         ),
     )
@@ -1234,7 +1239,7 @@ def test_a_reference_to_no_entity_is_a_diagnostic_and_others_still_resolve() -> 
             assert reported == (
                 diagnostics.UnresolvableReference(
                     view=ViewName.fake(),
-                    source=ir.SourceName("Memo"),
+                    from_model=ir.FromModelName("Memo"),
                     field=FieldName("project_id"),
                     id_type=ProjectId,
                 ),
@@ -1251,7 +1256,7 @@ def test_a_defect_in_a_nested_pipeline_names_the_referenced_entity() -> None:
     ) == (
         diagnostics.UnknownField(
             owner=ViewName.fake(),
-            source=ir.SourceName("Department"),
+            from_model=ir.FromModelName("Department"),
             field=unknown,
             valid=(FieldName("id"), FieldName("name")),
         ),
@@ -1259,7 +1264,7 @@ def test_a_defect_in_a_nested_pipeline_names_the_referenced_entity() -> None:
 
 
 def test_building_a_resolve_checks_nothing() -> None:
-    root = ir.FromSource(source=Memo)
+    root = ir.FromModel(from_model=Memo)
     selection = named(FieldName("does_not_exist"))
 
     node = steps.resolve(selection)(root)
@@ -1277,7 +1282,7 @@ def test_building_a_resolve_checks_nothing() -> None:
         (
             diagnostics.NotAReference(
                 view=ViewName("EmployeeView"),
-                source=ir.SourceName("Employee"),
+                from_model=ir.FromModelName("Employee"),
                 field=FieldName("name"),
             ),
             (
@@ -1288,7 +1293,7 @@ def test_building_a_resolve_checks_nothing() -> None:
         (
             diagnostics.UnresolvableReference(
                 view=ViewName("MemoView"),
-                source=ir.SourceName("Memo"),
+                from_model=ir.FromModelName("Memo"),
                 field=FieldName("project_id"),
                 id_type=ProjectId,
             ),
@@ -1300,7 +1305,7 @@ def test_building_a_resolve_checks_nothing() -> None:
         (
             diagnostics.ResolvedNameCollision(
                 view=ViewName("ClashView"),
-                source=ir.SourceName("Clash"),
+                from_model=ir.FromModelName("Clash"),
                 field=FieldName("department_id"),
                 existing=FieldName("department"),
             ),
@@ -1386,14 +1391,14 @@ def campaign_graph() -> EntityGraph:
 
 
 def compile_reversing(
-    source: type[pydantic.BaseModel], step: steps.Step
+    from_model: type[pydantic.BaseModel], step: steps.Step
 ) -> compiler.CompiledView:
     match compiler.compile_views(
         campaign_graph(),
         [
             View(
                 name=ViewName.fake(),
-                query=steps.from_(source, step),
+                query=steps.from_(from_model, step),
             )
         ],
     ):
@@ -1404,14 +1409,14 @@ def compile_reversing(
 
 
 def reverse_diagnostics(
-    source: type[pydantic.BaseModel], step: steps.Step
+    from_model: type[pydantic.BaseModel], step: steps.Step
 ) -> tuple[diagnostics.CompileDiagnostic, ...]:
     match compiler.compile_views(
         campaign_graph(),
         [
             View(
                 name=ViewName.fake(),
-                query=steps.from_(source, step),
+                query=steps.from_(from_model, step),
             )
         ],
     ):
@@ -1439,8 +1444,8 @@ def test_reverse_appends_the_referencing_entity_as_an_optional_field() -> None:
         for field in view.relation.fields
         if isinstance(field, ir.Field)
     ] == [
-        (FieldName("id"), ChannelCampaignId, ir.SourceField(field=FieldName("id"))),
-        (FieldName("name"), Text, ir.SourceField(field=FieldName("name"))),
+        (FieldName("id"), ChannelCampaignId, ir.SubjectField(field=FieldName("id"))),
+        (FieldName("name"), Text, ir.SubjectField(field=FieldName("name"))),
         (FieldName("meta_campaign"), MetaCampaign | None, meta_campaign_lookup()),
     ]
 
@@ -1459,14 +1464,14 @@ def test_flattening_a_reversed_entity_lifts_its_fields_as_optional() -> None:
         for field in view.relation.fields
         if isinstance(field, ir.Field)
     ] == [
-        (FieldName("id"), ChannelCampaignId, ir.SourceField(field=FieldName("id"))),
-        (FieldName("name"), Text, ir.SourceField(field=FieldName("name"))),
+        (FieldName("id"), ChannelCampaignId, ir.SubjectField(field=FieldName("id"))),
+        (FieldName("name"), Text, ir.SubjectField(field=FieldName("name"))),
         (
             FieldName("ad_account"),
             Text | None,
             ir.Lifted(
                 through=(meta_campaign_lookup(),),
-                field=ir.SourceField(field=FieldName("ad_account")),
+                field=ir.SubjectField(field=FieldName("ad_account")),
             ),
         ),
     ]
@@ -1524,27 +1529,27 @@ def test_reverse_in_a_nested_pipeline_starts_from_the_resolved_entity() -> None:
             pytest.fail(f"expected a nested field, got {field}")
 
 
-def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
+def test_reverse_starts_from_the_from_model_however_its_fields_changed() -> None:
     view = compile_reversing(
         ChannelCampaign,
         steps.pipeline(steps.omit(FieldName("id")), steps.reverse(MetaCampaign)),
     )
 
     assert values(view) == {
-        FieldName("name"): ir.SourceField(field=FieldName("name")),
+        FieldName("name"): ir.SubjectField(field=FieldName("name")),
         FieldName("meta_campaign"): meta_campaign_lookup(),
     }
 
 
 @pytest.mark.parametrize(
-    ("source", "step", "expected"),
+    ("from_model", "step", "expected"),
     [
         (
             Company,
             steps.reverse(MetaCampaign),
             diagnostics.ReverseFromNonEntity(
                 view=ViewName.fake(),
-                source=ir.SourceName("Company"),
+                from_model=ir.FromModelName("Company"),
                 entity=MetaCampaign,
             ),
         ),
@@ -1553,7 +1558,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
             steps.reverse(Company),
             diagnostics.ReverseOfNonEntity(
                 view=ViewName.fake(),
-                source=ir.SourceName("ChannelCampaign"),
+                from_model=ir.FromModelName("ChannelCampaign"),
                 entity=Company,
             ),
         ),
@@ -1562,7 +1567,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
             steps.reverse(CampaignNote),
             diagnostics.NoOneToOneReference(
                 view=ViewName.fake(),
-                source=ir.SourceName("ChannelCampaign"),
+                from_model=ir.FromModelName("ChannelCampaign"),
                 entity=CampaignNote,
                 many_to_one=(FieldName("campaign_id"),),
                 one_to_one_marker=OneToOneMarker.fake(),
@@ -1573,7 +1578,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
             steps.reverse(ChannelCampaign),
             diagnostics.NoOneToOneReference(
                 view=ViewName.fake(),
-                source=ir.SourceName("MetaCampaign"),
+                from_model=ir.FromModelName("MetaCampaign"),
                 entity=ChannelCampaign,
                 many_to_one=(),
                 one_to_one_marker=OneToOneMarker.fake(),
@@ -1584,7 +1589,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
             steps.reverse(Relaunch),
             diagnostics.AmbiguousReverse(
                 view=ViewName.fake(),
-                source=ir.SourceName("ChannelCampaign"),
+                from_model=ir.FromModelName("ChannelCampaign"),
                 entity=Relaunch,
                 references=(FieldName("old_campaign_id"), FieldName("new_campaign_id")),
             ),
@@ -1594,7 +1599,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
             steps.reverse_via(CampaignNote, FieldName("campaign_id")),
             diagnostics.NotAOneToOneReference(
                 view=ViewName.fake(),
-                source=ir.SourceName("ChannelCampaign"),
+                from_model=ir.FromModelName("ChannelCampaign"),
                 entity=CampaignNote,
                 field=FieldName("campaign_id"),
                 valid=(),
@@ -1605,7 +1610,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
             steps.reverse_via(Relaunch, FieldName("id")),
             diagnostics.NotAOneToOneReference(
                 view=ViewName.fake(),
-                source=ir.SourceName("ChannelCampaign"),
+                from_model=ir.FromModelName("ChannelCampaign"),
                 entity=Relaunch,
                 field=FieldName("id"),
                 valid=(FieldName("old_campaign_id"), FieldName("new_campaign_id")),
@@ -1619,7 +1624,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
             ),
             diagnostics.ReverseOntoExistingField(
                 view=ViewName.fake(),
-                source=ir.SourceName("ChannelCampaign"),
+                from_model=ir.FromModelName("ChannelCampaign"),
                 entity=MetaCampaign,
                 field=FieldName("meta_campaign"),
             ),
@@ -1629,7 +1634,7 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
             steps.reverse(Copy),
             model_names.InvalidFieldName(
                 view=ViewName.fake(),
-                source=ir.SourceName("ChannelCampaign"),
+                from_model=ir.FromModelName("ChannelCampaign"),
                 field=FieldName("copy"),
             ),
         ),
@@ -1647,11 +1652,11 @@ def test_reverse_starts_from_the_source_however_its_fields_changed() -> None:
     ],
 )
 def test_a_reverse_defect_is_one_diagnostic(
-    source: type[pydantic.BaseModel],
+    from_model: type[pydantic.BaseModel],
     step: steps.Step,
     expected: diagnostics.CompileDiagnostic,
 ) -> None:
-    assert reverse_diagnostics(source, step) == (expected,)
+    assert reverse_diagnostics(from_model, step) == (expected,)
 
 
 def test_steps_after_a_defective_reverse_find_the_reversed_field() -> None:
@@ -1663,7 +1668,7 @@ def test_steps_after_a_defective_reverse_find_the_reversed_field() -> None:
     ) == (
         diagnostics.NoOneToOneReference(
             view=ViewName.fake(),
-            source=ir.SourceName("ChannelCampaign"),
+            from_model=ir.FromModelName("ChannelCampaign"),
             entity=CampaignNote,
             many_to_one=(FieldName("campaign_id"),),
             one_to_one_marker=OneToOneMarker.fake(),
@@ -1679,7 +1684,7 @@ def test_a_defect_in_a_reversed_nested_pipeline_names_the_reversed_entity() -> N
     ) == (
         diagnostics.UnknownField(
             owner=ViewName.fake(),
-            source=ir.SourceName("MetaCampaign"),
+            from_model=ir.FromModelName("MetaCampaign"),
             field=unknown,
             valid=tuple(map(FieldName, MetaCampaign.model_fields)),
         ),
@@ -1700,7 +1705,7 @@ def test_a_defect_in_a_reversed_nested_pipeline_names_the_reversed_entity() -> N
 def test_building_a_reverse_checks_nothing(
     step: steps.Step, via: FieldName | ir.SoleReference
 ) -> None:
-    root = ir.FromSource(source=Memo)
+    root = ir.FromModel(from_model=Memo)
 
     node = step(root)
 
@@ -1717,7 +1722,7 @@ def test_building_a_reverse_checks_nothing(
         (
             diagnostics.ReverseFromNonEntity(
                 view=ViewName("CompanyView"),
-                source=ir.SourceName("Company"),
+                from_model=ir.FromModelName("Company"),
                 entity=MetaCampaign,
             ),
             (
@@ -1728,7 +1733,7 @@ def test_building_a_reverse_checks_nothing(
         (
             diagnostics.ReverseOfNonEntity(
                 view=ViewName("CampaignView"),
-                source=ir.SourceName("ChannelCampaign"),
+                from_model=ir.FromModelName("ChannelCampaign"),
                 entity=Company,
             ),
             (
@@ -1739,7 +1744,7 @@ def test_building_a_reverse_checks_nothing(
         (
             diagnostics.NoOneToOneReference(
                 view=ViewName("CampaignView"),
-                source=ir.SourceName("ChannelCampaign"),
+                from_model=ir.FromModelName("ChannelCampaign"),
                 entity=CampaignNote,
                 many_to_one=(FieldName("campaign_id"),),
                 one_to_one_marker=OneToOneMarker.fake(),
@@ -1753,7 +1758,7 @@ def test_building_a_reverse_checks_nothing(
         (
             diagnostics.NoOneToOneReference(
                 view=ViewName("MetaView"),
-                source=ir.SourceName("MetaCampaign"),
+                from_model=ir.FromModelName("MetaCampaign"),
                 entity=ChannelCampaign,
                 many_to_one=(),
                 one_to_one_marker=OneToOneMarker.fake(),
@@ -1766,7 +1771,7 @@ def test_building_a_reverse_checks_nothing(
         (
             diagnostics.AmbiguousReverse(
                 view=ViewName("CampaignView"),
-                source=ir.SourceName("ChannelCampaign"),
+                from_model=ir.FromModelName("ChannelCampaign"),
                 entity=Relaunch,
                 references=(FieldName("old_campaign_id"), FieldName("new_campaign_id")),
             ),
@@ -1779,7 +1784,7 @@ def test_building_a_reverse_checks_nothing(
         (
             diagnostics.NotAOneToOneReference(
                 view=ViewName("CampaignView"),
-                source=ir.SourceName("ChannelCampaign"),
+                from_model=ir.FromModelName("ChannelCampaign"),
                 entity=Relaunch,
                 field=FieldName("id"),
                 valid=(FieldName("old_campaign_id"), FieldName("new_campaign_id")),
@@ -1793,7 +1798,7 @@ def test_building_a_reverse_checks_nothing(
         (
             diagnostics.ReverseOntoExistingField(
                 view=ViewName("CampaignView"),
-                source=ir.SourceName("ChannelCampaign"),
+                from_model=ir.FromModelName("ChannelCampaign"),
                 entity=MetaCampaign,
                 field=FieldName("meta_campaign"),
             ),
@@ -1826,15 +1831,15 @@ def test_a_reverse_diagnostic_message_names_the_offending_values(
 def mentor_lookup() -> ir.Lookup:
     """How an Employee's `mentor_id` is resolved."""
     return ir.Lookup(
-        reference=ir.SourceField(field=FieldName("mentor_id")),
+        reference=ir.SubjectField(field=FieldName("mentor_id")),
         id_type=EmployeeId,
         target=Employee,
         optionality=Optionality.OPTIONAL,
     )
 
 
-def own(name: Text) -> ir.SourceField:
-    return ir.SourceField(field=FieldName(name.root))
+def own(name: Text) -> ir.SubjectField:
+    return ir.SubjectField(field=FieldName(name.root))
 
 
 def resolve_mentor(*then: steps.Step) -> steps.Step:
@@ -2114,7 +2119,7 @@ def test_two_flattened_fields_lifting_one_name_report_the_second() -> None:
             FieldName("name"),
             diagnostics.NotAResolvedField(
                 view=ViewName.fake(),
-                source=ir.SourceName("Employee"),
+                from_model=ir.FromModelName("Employee"),
                 field=FieldName("name"),
             ),
         ),
@@ -2122,7 +2127,7 @@ def test_two_flattened_fields_lifting_one_name_report_the_second() -> None:
             FieldName("budget"),
             diagnostics.UnknownField(
                 owner=ViewName.fake(),
-                source=ir.SourceName("Employee"),
+                from_model=ir.FromModelName("Employee"),
                 field=FieldName("budget"),
                 valid=(
                     FieldName("id"),
@@ -2142,7 +2147,7 @@ def test_flattening_a_named_field_it_cannot_lift_is_one_diagnostic(
 
 
 def test_building_a_flatten_checks_nothing() -> None:
-    root = ir.FromSource(source=Memo)
+    root = ir.FromModel(from_model=Memo)
     unknown = FieldName("does_not_exist")
 
     node = steps.flatten(unknown)(root)
@@ -2160,7 +2165,7 @@ def test_building_a_flatten_checks_nothing() -> None:
         (
             diagnostics.NotAResolvedField(
                 view=ViewName("EmployeeView"),
-                source=ir.SourceName("Employee"),
+                from_model=ir.FromModelName("Employee"),
                 field=FieldName("name"),
             ),
             (
@@ -2199,7 +2204,7 @@ class Depth(pydantic.RootModel[int], frozen=True):
     """How many more levels of nested pipelines a pipeline may contain."""
 
 
-def new_id_type(entity: ir.SourceName) -> IdType:
+def new_id_type(entity: ir.FromModelName) -> IdType:
     id_type = types.new_class(f"{entity.root}Id", (Id[int],))
     assert issubclass(id_type, Id)
     return id_type
@@ -2207,7 +2212,7 @@ def new_id_type(entity: ir.SourceName) -> IdType:
 
 @st.composite
 def entity_model(
-    draw: st.DrawFn, name: ir.SourceName, id_type: IdType, targets: Sequence[IdType]
+    draw: st.DrawFn, name: ir.FromModelName, id_type: IdType, targets: Sequence[IdType]
 ) -> type[pydantic.BaseModel]:
     """An Entity keyed by `id_type`, with Text fields and References to `targets`.
 
@@ -2226,7 +2231,7 @@ def entity_model(
 
 
 class Models(pydantic.BaseModel, frozen=True):
-    """Generated Entities, valid by construction, and Sources that are not Entities.
+    """Generated Entities, valid by construction, and from_models that are not Entities.
 
     Every Reference of an Entity points to one of `entities`, so the EntityGraph
     always builds. `memo` has a Reference to an ID type that keys no Entity. `clash`
@@ -2242,15 +2247,15 @@ class Models(pydantic.BaseModel, frozen=True):
             self.entities, IdBase.fake(), OneToOneMarker.fake()
         ).unwrap()
 
-    def sources(self) -> tuple[type[pydantic.BaseModel], ...]:
+    def from_models(self) -> tuple[type[pydantic.BaseModel], ...]:
         return (*self.entities, self.memo, self.clash)
 
     def field_names(self) -> tuple[FieldName, ...]:
-        """Every field name of every Source, before and after resolving."""
+        """Every field name of every from_model, before and after resolving."""
         return tuple(
             dict.fromkeys(
                 FieldName(name)
-                for model in self.sources()
+                for model in self.from_models()
                 for field in model.model_fields
                 for name in (field, field.removesuffix("_id"))
             )
@@ -2260,7 +2265,7 @@ class Models(pydantic.BaseModel, frozen=True):
 @st.composite
 def models(draw: st.DrawFn) -> Models:
     names = [
-        ir.SourceName(f"Entity{index}")
+        ir.FromModelName(f"Entity{index}")
         for index in range(draw(st.integers(min_value=1, max_value=4)))
     ]
     id_types = [new_id_type(name) for name in names]
@@ -2269,15 +2274,15 @@ def models(draw: st.DrawFn) -> Models:
         for name, id_type in zip(names, id_types, strict=True)
     )
     memo = test_ir.new_model(
-        ir.SourceName("Memo"),
+        ir.FromModelName("Memo"),
         {
             FieldName("r0_id"): draw(st.sampled_from(id_types)),
-            FieldName("r1_id"): new_id_type(ir.SourceName("Unkeyed")),
+            FieldName("r1_id"): new_id_type(ir.FromModelName("Unkeyed")),
             FieldName("f0"): Text,
         },
     )
     clash = test_ir.new_model(
-        ir.SourceName("Clash"),
+        ir.FromModelName("Clash"),
         {
             FieldName("r0_id"): draw(st.sampled_from(id_types)),
             FieldName("r0"): Text,
@@ -2380,11 +2385,11 @@ def flattening(
 def pipelines(
     draw: st.DrawFn,
     graph: EntityGraph,
-    source: type[pydantic.BaseModel],
+    from_model: type[pydantic.BaseModel],
     depth: Depth,
 ) -> steps.Step:
     """A valid pipeline of omits, renames, projects, adds, resolves, reverses
-    and flattens over `source`.
+    and flattens over `from_model`.
 
     Omits and renames name one field or select several. It may start by adding a
     field.
@@ -2392,15 +2397,15 @@ def pipelines(
     Each step names only fields the earlier steps kept, and each rename gets a name
     no field has, so it never collides. A resolve selects Reference fields only,
     and its nested pipeline is drawn the same way over the referenced Entity. A
-    reverse follows a one-to-one Reference to `source` backwards, onto a name no
+    reverse follows a one-to-one Reference to `from_model` backwards, onto a name no
     field has, and its nested pipeline is drawn over the referencing Entity. A
     flatten lifts the fields of one such resolve, each renamed to a name no other
     field has. Later steps leave the lifted fields alone.
     """
-    fields = list(map(FieldName, source.model_fields))
+    fields = list(map(FieldName, from_model.model_fields))
     references = {
         reference.field: reference.target
-        for reference in graph.entities[source].references
+        for reference in graph.entities[from_model].references
     }
     # The name each reverse gives its field, the referencing Entity and its
     # Reference. Sorted, because the order of the graph's Entities changes between
@@ -2414,7 +2419,7 @@ def pipelines(
             )
             for model, node in graph.entities.items()
             for reference in node.references
-            if reference.target is source
+            if reference.target is from_model
             and reference.cardinality == Cardinality.ONE_TO_ONE
         ),
         key=lambda reversal: (reversal[0].root, reversal[2].root),
@@ -2606,10 +2611,10 @@ def view_cases(draw: st.DrawFn) -> ViewCase:
     valid: set[ViewName] = set()
     for index in range(draw(st.integers(min_value=1, max_value=4))):
         name = ViewName(f"View{index}")
-        source = draw(st.sampled_from(drawn_models.sources()))
-        if source in graph.entities and draw(st.booleans()):
+        from_model = draw(st.sampled_from(drawn_models.from_models()))
+        if from_model in graph.entities and draw(st.booleans()):
             valid.add(name)
-            step = draw(pipelines(graph, source, Depth(2)))
+            step = draw(pipelines(graph, from_model, Depth(2)))
         else:
             # A single step often has a single defect, which a longer pipeline
             # would rarely leave as the only one.
@@ -2617,7 +2622,7 @@ def view_cases(draw: st.DrawFn) -> ViewCase:
         views.append(
             View(
                 name=name,
-                query=steps.from_(source, step),
+                query=steps.from_(from_model, step),
             )
         )
     return ViewCase(models=drawn_models, views=tuple(views), valid=frozenset(valid))
@@ -2640,13 +2645,13 @@ class NestedShape(pydantic.BaseModel, frozen=True):
 class RelationShape(pydantic.BaseModel, frozen=True):
     """An `ir.Relation` that compares by what its fields hold."""
 
-    source: ir.SourceName
+    from_model: ir.FromModelName
     fields: tuple[PlainShape | NestedShape, ...]
 
     @staticmethod
     def of(relation: ir.Relation) -> RelationShape:
         return RelationShape(
-            source=relation.source,
+            from_model=relation.from_model,
             fields=tuple(
                 PlainShape(
                     name=field.name, annotation=field.info.annotation, value=field.value
@@ -2664,7 +2669,7 @@ class RelationShape(pydantic.BaseModel, frozen=True):
 
 class CompiledShape(pydantic.BaseModel, frozen=True):
     name: ViewName
-    source: type[pydantic.BaseModel]
+    from_model: type[pydantic.BaseModel]
     relation: RelationShape
 
 
@@ -2673,7 +2678,9 @@ def shapes(
 ) -> tuple[CompiledShape | compiler.PoisonedView, ...]:
     return tuple(
         CompiledShape(
-            name=view.name, source=view.source, relation=RelationShape.of(view.relation)
+            name=view.name,
+            from_model=view.from_model,
+            relation=RelationShape.of(view.relation),
         )
         if isinstance(view, compiler.CompiledView)
         else view
@@ -2700,7 +2707,7 @@ def invariance_cases(draw: st.DrawFn) -> InvarianceCase:
     targets = [nodes[model].id_type for model in views.models.entities]
     unreferenced: list[type[pydantic.BaseModel]] = []
     for index in range(draw(st.integers(min_value=0, max_value=2))):
-        name = ir.SourceName(f"Unreferenced{index}")
+        name = ir.FromModelName(f"Unreferenced{index}")
         unreferenced.append(draw(entity_model(name, new_id_type(name), targets)))
     varied = draw(st.permutations([*views.models.entities, *unreferenced]))
     return InvarianceCase(
@@ -2732,16 +2739,16 @@ class PipelineCase(pydantic.BaseModel, frozen=True):
     """A valid pipeline over one of the generated Entities."""
 
     models: Models
-    source: type[pydantic.BaseModel]
+    from_model: type[pydantic.BaseModel]
     step: steps.Step
 
 
 @st.composite
 def pipeline_cases(draw: st.DrawFn) -> PipelineCase:
     drawn_models = draw(models())
-    source = draw(st.sampled_from(drawn_models.entities))
-    step = draw(pipelines(drawn_models.graph(), source, Depth(1)))
-    return PipelineCase(models=drawn_models, source=source, step=step)
+    from_model = draw(st.sampled_from(drawn_models.entities))
+    step = draw(pipelines(drawn_models.graph(), from_model, Depth(1)))
+    return PipelineCase(models=drawn_models, from_model=from_model, step=step)
 
 
 @given(pipeline_cases())
@@ -2754,7 +2761,7 @@ def test_resolve_accepts_exactly_the_fields_references_selects(
             [
                 View(
                     name=ViewName.fake(),
-                    query=steps.from_(case.source, step),
+                    query=steps.from_(case.from_model, step),
                 )
             ],
         ):
@@ -2782,11 +2789,11 @@ def compiled_views(draw: st.DrawFn) -> compiler.CompiledView:
     """A valid View over a generated Entity, compiled."""
     drawn = draw(models())
     graph = drawn.graph()
-    source = draw(st.sampled_from(drawn.entities))
-    step = draw(pipelines(graph, source, Depth(2)))
+    from_model = draw(st.sampled_from(drawn.entities))
+    step = draw(pipelines(graph, from_model, Depth(2)))
     view = View(
         name=ViewName.fake(),
-        query=steps.from_(source, step),
+        query=steps.from_(from_model, step),
     )
     return compiler.compile_views(graph, [view]).unwrap().views[0]
 
@@ -3029,7 +3036,7 @@ def test_retyping_an_unknown_field_is_a_diagnostic() -> None:
     assert employee_write_model_diagnostics(steps.retype_to(unknown, int)) == (
         diagnostics.UnknownField(
             owner=WriteModelName.fake(),
-            source=ir.SourceName("Employee"),
+            from_model=ir.FromModelName("Employee"),
             field=unknown,
             valid=tuple(map(FieldName, Employee.model_fields)),
         ),
@@ -3045,7 +3052,7 @@ def test_retyping_a_field_resolved_through_a_nested_pipeline_is_a_diagnostic() -
     assert employee_write_model_diagnostics(step) == (
         diagnostics.RetypeNestedField(
             view=WriteModelName.fake(),
-            source=ir.SourceName("Employee"),
+            from_model=ir.FromModelName("Employee"),
             field=FieldName("department"),
         ),
     )
@@ -3081,7 +3088,7 @@ def test_retype_in_a_view_is_a_diagnostic(step: steps.Step) -> None:
         (
             diagnostics.RetypeNestedField(
                 view=WriteModelName("CompanyUpdate"),
-                source=ir.SourceName("Company"),
+                from_model=ir.FromModelName("Company"),
                 field=FieldName("parent"),
             ),
             (
@@ -3264,21 +3271,21 @@ def deal_diagnostics(step: steps.Step) -> tuple[diagnostics.CompileDiagnostic, .
     )
 
 
-def column(name: FieldName) -> ir.SourceField:
-    return ir.SourceField(field=name)
+def column(name: FieldName) -> ir.SubjectField:
+    return ir.SubjectField(field=name)
 
 
 def text_literal(value: Text) -> ir.RootModelLiteral:
     return ir.RootModelLiteral(instance=value, root=ir.ScalarLiteral(value.root))
 
 
-def test_where_keeps_every_field_and_filters_by_the_sources_own_field() -> None:
+def test_where_keeps_every_field_and_filters_by_the_from_models_own_field() -> None:
     acme = Text("Acme")
     view = compile_deal(
         steps.where(conditions.eq(conditions.field(FieldName("name")), acme))
     )
 
-    assert view.relation.fields == ir.Relation.of(ir.FromSource(source=Deal)).fields
+    assert view.relation.fields == ir.Relation.of(ir.FromModel(from_model=Deal)).fields
     assert view.relation.filters == (
         ir.FilterComparison(
             operator=ir.ComparisonOperator.EQ,
@@ -3420,7 +3427,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
             steps.where(conditions.is_null(conditions.field(FieldName("nicknme")))),
             diagnostics.UnknownField(
                 owner=ViewName.fake(),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("nicknme"),
                 valid=tuple(map(FieldName, Deal.model_fields)),
             ),
@@ -3430,9 +3437,9 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
                 steps.add(FieldName("kind"), Literal["deal"], default="deal"),
                 steps.where(conditions.eq(conditions.field(FieldName("kind")), "deal")),
             ),
-            diagnostics.NotASourceColumn(
+            diagnostics.NotAFromModelColumn(
                 owner=ViewName.fake(),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("kind"),
             ),
         ),
@@ -3449,7 +3456,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
             steps.where(conditions.eq(conditions.field(FieldName("name")), "Acme")),
             diagnostics.LiteralTypeMismatch(
                 owner=ViewName.fake(),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("name"),
                 annotation=Text,
                 value=diagnostics.LiteralText.of("Acme"),
@@ -3459,7 +3466,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
             steps.where(conditions.eq(conditions.field(FieldName("name")), None)),
             diagnostics.LiteralTypeMismatch(
                 owner=ViewName.fake(),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("name"),
                 annotation=Text,
                 value=diagnostics.LiteralText.of(None),
@@ -3474,7 +3481,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
             ),
             diagnostics.ComparedTypesDiffer(
                 owner=ViewName.fake(),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("name"),
                 annotation=Text,
                 other=FieldName("score"),
@@ -3485,7 +3492,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
             steps.where(conditions.gt(conditions.field(FieldName("bonus")), Score(1))),
             diagnostics.OrderingOnOptionalField(
                 owner=ViewName.fake(),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("bonus"),
                 operator=ir.ComparisonOperator.GT,
             ),
@@ -3499,7 +3506,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
             ),
             diagnostics.OrderingOnOptionalField(
                 owner=ViewName.fake(),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("bonus"),
                 operator=ir.ComparisonOperator.LE,
             ),
@@ -3508,7 +3515,7 @@ def test_an_optional_field_equals_a_literal_of_its_type() -> None:
             steps.where(conditions.lt(conditions.field(FieldName("name")), Text("M"))),
             diagnostics.UnorderedFieldType(
                 owner=ViewName.fake(),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("name"),
                 annotation=Text,
                 operator=ir.ComparisonOperator.LT,
@@ -3543,9 +3550,9 @@ def test_a_condition_on_a_resolved_field_is_a_diagnostic() -> None:
     )
 
     assert reported == (
-        diagnostics.NotASourceColumn(
+        diagnostics.NotAFromModelColumn(
             owner=ViewName.fake(),
-            source=ir.SourceName("Employee"),
+            from_model=ir.FromModelName("Employee"),
             field=FieldName("mentor"),
         ),
     )
@@ -3614,7 +3621,7 @@ def test_each_where_in_a_nested_pipeline_is_a_diagnostic() -> None:
         reported
         == (
             diagnostics.WhereInNestedPipeline(
-                view=ViewName.fake(), source=ir.SourceName("Employee")
+                view=ViewName.fake(), from_model=ir.FromModelName("Employee")
             ),
         )
         * 2
@@ -3625,7 +3632,7 @@ type MaybeScore = Score | None
 
 
 class Rival(pydantic.BaseModel):
-    """A Source whose optional field is typed by a `type` alias."""
+    """A from_model whose optional field is typed by a `type` alias."""
 
     score: MaybeScore
 
@@ -3635,13 +3642,13 @@ class Rival(pydantic.BaseModel):
     [
         (
             conditions.eq(conditions.field(FieldName("score")), None),
-            ir.FilterIsNull(field=ir.SourceField(field=FieldName("score"))),
+            ir.FilterIsNull(field=ir.SubjectField(field=FieldName("score"))),
         ),
         (
             conditions.gt(conditions.field(FieldName("score")), Score(1)),
             diagnostics.OrderingOnOptionalField(
                 owner=ViewName.fake(),
-                source=ir.SourceName("Rival"),
+                from_model=ir.FromModelName("Rival"),
                 field=FieldName("score"),
                 operator=ir.ComparisonOperator.GT,
             ),
@@ -3711,7 +3718,7 @@ def test_a_bool_or_float_for_a_narrower_number_field_is_a_diagnostic(
     assert diagnostics_of([view]) == (
         diagnostics.LiteralTypeMismatch(
             owner=view.name,
-            source=ir.SourceName("Measure"),
+            from_model=ir.FromModelName("Measure"),
             field=field,
             annotation=Measure.model_fields[field.root].annotation,
             value=diagnostics.LiteralText.of(value),
@@ -3728,7 +3735,7 @@ def compile_view_of(view: View) -> compiler.CompiledView:
 
 
 def test_building_a_where_checks_nothing() -> None:
-    root = ir.FromSource(source=Deal)
+    root = ir.FromModel(from_model=Deal)
     condition = conditions.eq(conditions.field(FieldName("missing")), object())
 
     assert steps.where(condition)(root) == ir.Where(input=root, condition=condition)
@@ -3746,7 +3753,7 @@ def test_building_a_where_checks_nothing() -> None:
         ),
         (
             diagnostics.WhereInNestedPipeline(
-                view=ViewName("EmployeeView"), source=ir.SourceName("Employee")
+                view=ViewName("EmployeeView"), from_model=ir.FromModelName("Employee")
             ),
             (
                 "EmployeeView: cannot filter the resolved Employee with `where`, "
@@ -3754,9 +3761,9 @@ def test_building_a_where_checks_nothing() -> None:
             ),
         ),
         (
-            diagnostics.NotASourceColumn(
+            diagnostics.NotAFromModelColumn(
                 owner=ViewName("DealView"),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("kind"),
             ),
             (
@@ -3777,7 +3784,7 @@ def test_building_a_where_checks_nothing() -> None:
         (
             diagnostics.LiteralTypeMismatch(
                 owner=ViewName("DealView"),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("name"),
                 annotation=int,
                 value=diagnostics.LiteralText.of("Acme"),
@@ -3790,7 +3797,7 @@ def test_building_a_where_checks_nothing() -> None:
         (
             diagnostics.ComparedTypesDiffer(
                 owner=ViewName("DealView"),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("name"),
                 annotation=int,
                 other=FieldName("score"),
@@ -3804,7 +3811,7 @@ def test_building_a_where_checks_nothing() -> None:
         (
             diagnostics.OrderingOnOptionalField(
                 owner=ViewName("DealView"),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("bonus"),
                 operator=ir.ComparisonOperator.GT,
             ),
@@ -3813,7 +3820,7 @@ def test_building_a_where_checks_nothing() -> None:
         (
             diagnostics.UnorderedFieldType(
                 owner=ViewName("DealView"),
-                source=ir.SourceName("Deal"),
+                from_model=ir.FromModelName("Deal"),
                 field=FieldName("name"),
                 annotation=int,
                 operator=ir.ComparisonOperator.LT,
@@ -3899,14 +3906,14 @@ class Invoice(pydantic.BaseModel):
 def kept_where(
     name: ViewName,
     *tests: tuple[FieldName, enum.Enum],
-    source: type[pydantic.BaseModel],
+    from_model: type[pydantic.BaseModel],
 ) -> View:
-    """A View of `source` keeping the rows whose fields equal the given members, so
+    """A View of `from_model` keeping the rows whose fields equal the given members, so
     each of those fields is narrowed to its member's Tag."""
     return View(
         name=name,
         query=steps.from_(
-            source,
+            from_model,
             steps.pipeline(
                 *(
                     steps.where(conditions.eq(conditions.field(field), value))
@@ -3918,7 +3925,7 @@ def kept_where(
 
 
 def subscriptions(name: ViewName, *tests: tuple[FieldName, enum.Enum]) -> View:
-    return kept_where(name, *tests, source=Subscription)
+    return kept_where(name, *tests, from_model=Subscription)
 
 
 def union_of(
@@ -3961,7 +3968,7 @@ def test_a_union_compiles_with_its_variants_as_views() -> None:
 
     (compiled_union,) = compiled.unions
     assert compiled_union.name == union.name
-    assert compiled_union.source is Subscription
+    assert compiled_union.from_model is Subscription
     assert compiled_union.discriminator == union.discriminator
     assert [leaf.name for leaf in compiled_union.leaves()] == [
         view.name for view in union.views()
@@ -4014,7 +4021,7 @@ def test_a_nested_union_compiles_before_the_union_it_is_nested_in() -> None:
     ]
 
 
-def test_an_added_field_tags_variants_of_a_source_with_no_tag_column() -> None:
+def test_an_added_field_tags_variants_of_a_from_model_with_no_tag_column() -> None:
     def added(name: ViewName, tag: Text) -> View:
         return View(
             name=name,
@@ -4078,7 +4085,7 @@ def test_a_variant_typing_the_discriminator_by_no_one_tag_is_a_diagnostic(
     union = union_of(
         UnionName("Taggeds"),
         field,
-        kept_where(ViewName("Free"), (FieldName("plan"), Plan.FREE), source=Tagged),
+        kept_where(ViewName("Free"), (FieldName("plan"), Plan.FREE), from_model=Tagged),
         untagged,
     )
 
@@ -4204,18 +4211,18 @@ def test_an_untagged_view_of_a_nested_union_is_a_diagnostic() -> None:
     )
 
 
-def test_variants_of_different_sources_are_a_diagnostic() -> None:
+def test_variants_of_different_from_models_are_a_diagnostic() -> None:
     free = subscriptions(ViewName("Free"), (FieldName("plan"), Plan.FREE))
     paid = kept_where(
-        ViewName("PaidInvoice"), (FieldName("plan"), Plan.PAID), source=Invoice
+        ViewName("PaidInvoice"), (FieldName("plan"), Plan.PAID), from_model=Invoice
     )
     union = union_of(UnionName("Mixed"), FieldName("plan"), free, paid)
 
     assert union_diagnostics(union) == (
-        diagnostics.VariantSourcesDiffer(
+        diagnostics.VariantFromModelsDiffer(
             view=union.name,
             variants=(free.name, paid.name),
-            sources=(ir.SourceName("Subscription"), ir.SourceName("Invoice")),
+            from_models=(ir.FromModelName("Subscription"), ir.FromModelName("Invoice")),
         ),
     )
 
@@ -4243,7 +4250,7 @@ def write_model(name: WriteModelName, *then: steps.Step) -> WriteModel:
 
 
 def paid_or_free(*more: WriteModel) -> Union:
-    """A Union of WriteModels of different Sources, one tagged by `retype_to`, the
+    """A Union of WriteModels of different from_models, one tagged by `retype_to`, the
     other by `add`, then `more`."""
     return union_of(
         UnionName("Writes"),
@@ -4492,7 +4499,7 @@ def test_a_union_of_a_defective_view_reports_only_the_views_diagnostics() -> Non
 
 def test_each_variant_after_one_keeping_every_row_is_a_diagnostic() -> None:
     free = subscriptions(ViewName("Free"), (FieldName("plan"), Plan.FREE))
-    unfiltered = kept_where(ViewName("Paid"), source=Subscription)
+    unfiltered = kept_where(ViewName("Paid"), from_model=Subscription)
     unreachable = (
         subscriptions(ViewName("PaidAgain"), (FieldName("plan"), Plan.PAID)),
         union_of(
@@ -4662,14 +4669,17 @@ def test_a_union_needs_two_variants() -> None:
             ),
         ),
         (
-            diagnostics.VariantSourcesDiffer(
+            diagnostics.VariantFromModelsDiffer(
                 view=UnionName("Mixed"),
                 variants=(ViewName("Free"), ViewName("PaidInvoice")),
-                sources=(ir.SourceName("Subscription"), ir.SourceName("Invoice")),
+                from_models=(
+                    ir.FromModelName("Subscription"),
+                    ir.FromModelName("Invoice"),
+                ),
             ),
             (
-                "Mixed: its Variants read different Sources: Free reads Subscription, "
-                "PaidInvoice reads Invoice. Every Variant of a Union reads one Source."
+                "Mixed: its Variants read different from_models: Free reads Subscription, "
+                "PaidInvoice reads Invoice. Every Variant of a Union reads one from_model."
             ),
         ),
         (
@@ -4746,7 +4756,7 @@ def test_a_union_needs_two_variants() -> None:
         "untagged",
         "shared-tag",
         "nested-tags-differ",
-        "sources-differ",
+        "from_models-differ",
         "views-and-write-models",
         "untagged-write-model",
         "invalid-name",

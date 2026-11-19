@@ -304,7 +304,7 @@ def test_require_with_a_select_requires_each_selected_field() -> None:
 
 def owner_lookup() -> ir.Lookup:
     return ir.Lookup(
-        reference=ir.SourceField(field=FieldName("owner_id")),
+        reference=ir.SubjectField(field=FieldName("owner_id")),
         id_type=OwnerId,
         target=Owner,
         optionality=Optionality.OPTIONAL,
@@ -426,7 +426,7 @@ def test_requiring_a_field_that_is_not_optional_is_a_diagnostic(
     assert campaign_diagnostics(step) == (
         diagnostics.RequireOnRequiredField(
             view=ViewName.fake(),
-            source=ir.SourceName("Campaign"),
+            from_model=ir.FromModelName("Campaign"),
             field=field,
             annotation=annotation,
         ),
@@ -490,7 +490,7 @@ def test_require_in_a_write_model_is_a_diagnostic(step: steps.Step) -> None:
 
 
 def test_building_a_require_checks_nothing() -> None:
-    root = ir.FromSource(source=Campaign)
+    root = ir.FromModel(from_model=Campaign)
 
     assert steps.require(FieldName("missing"))(root) == ir.Require(
         input=root, fields=FieldName("missing")
@@ -510,7 +510,7 @@ def test_building_a_require_checks_nothing() -> None:
         (
             diagnostics.RequireOnRequiredField(
                 view=ViewName("Submitted"),
-                source=ir.SourceName("Campaign"),
+                from_model=ir.FromModelName("Campaign"),
                 field=FieldName("kind"),
                 annotation=int,
             ),
@@ -587,7 +587,7 @@ def test_requiring_a_field_lifted_through_an_optional_entity_requires_the_entity
         DetailId,
         ir.Lifted(
             through=(detail_lookup().required(),),
-            field=ir.SourceField(field=FieldName("id")),
+            field=ir.SubjectField(field=FieldName("id")),
         ),
     )
 
@@ -601,7 +601,7 @@ def test_requiring_a_field_a_where_keeps_only_none_in_is_a_diagnostic() -> None:
     ) == (
         diagnostics.RequireOnAlwaysNoneField(
             view=ViewName.fake(),
-            source=ir.SourceName("Campaign"),
+            from_model=ir.FromModelName("Campaign"),
             field=FieldName("submitted_at"),
         ),
     )
@@ -610,7 +610,7 @@ def test_requiring_a_field_a_where_keeps_only_none_in_is_a_diagnostic() -> None:
 def test_the_always_none_requirement_message_names_the_field() -> None:
     diagnostic = diagnostics.RequireOnAlwaysNoneField(
         view=ViewName("Template"),
-        source=ir.SourceName("Campaign"),
+        from_model=ir.FromModelName("Campaign"),
         field=FieldName("submitted_at"),
     )
 
@@ -629,7 +629,7 @@ def test_the_always_none_requirement_message_names_the_field() -> None:
     ],
     ids=["other-member", "none-after-not-none", "same-field"],
 )
-def test_a_condition_is_checked_against_the_type_the_source_declares(
+def test_a_condition_is_checked_against_the_type_the_from_model_declares(
     later: ir.Condition,
 ) -> None:
     view = compile_campaign(
@@ -656,7 +656,7 @@ def test_a_condition_on_a_required_field_may_test_for_none() -> None:
     )
 
     assert view.relation.filters == (
-        ir.FilterIsNull(field=ir.SourceField(field=FieldName("name"))),
+        ir.FilterIsNull(field=ir.SubjectField(field=FieldName("name"))),
     )
 
 

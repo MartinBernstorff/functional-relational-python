@@ -200,12 +200,12 @@ class ConditionWriter(pydantic.BaseModel, frozen=True):
         """`field <operator> operand`. `!=` is written as `==` the other way."""
         left = compared.field
         match compared.operand:
-            case ir.SourceField() as right:
+            case ir.SubjectField() as right:
                 value = Expression(
                     f"{self.models.root}.F("
                     f"{PythonString(self._column(subject, right).root).literal().root})"
                 )
-                fields: tuple[ir.SourceField, ...] = (left, right)
+                fields: tuple[ir.SubjectField, ...] = (left, right)
             case literal:
                 value = self._literal(literal)
                 fields = (left,)
@@ -230,7 +230,7 @@ class ConditionWriter(pydantic.BaseModel, frozen=True):
         self,
         subject: type[pydantic.BaseModel],
         compares: QLookup,
-        fields: Sequence[ir.SourceField],
+        fields: Sequence[ir.SubjectField],
         sense: _Sense,
     ) -> Q:
         """`compares`, an ordering of `fields`. The compiler lets through only
@@ -267,7 +267,7 @@ class ConditionWriter(pydantic.BaseModel, frozen=True):
         self,
         subject: type[pydantic.BaseModel],
         equal: QLookup,
-        fields: Sequence[ir.SourceField],
+        fields: Sequence[ir.SubjectField],
         sense: _Sense,
     ) -> Q:
         """`equal`, which compares `fields` with each other or with a literal,
@@ -308,8 +308,8 @@ class ConditionWriter(pydantic.BaseModel, frozen=True):
     def _nulls(
         self,
         subject: type[pydantic.BaseModel],
-        fields: Sequence[ir.SourceField],
-        null: Sequence[ir.SourceField],
+        fields: Sequence[ir.SubjectField],
+        null: Sequence[ir.SubjectField],
     ) -> QLookup:
         """True where each of `fields` is NULL if it is in `null`, else not."""
         return QLookup(
@@ -324,7 +324,7 @@ class ConditionWriter(pydantic.BaseModel, frozen=True):
         )
 
     def _is_null(
-        self, subject: type[pydantic.BaseModel], field: ir.SourceField, null: NullTest
+        self, subject: type[pydantic.BaseModel], field: ir.SubjectField, null: NullTest
     ) -> QEntry:
         return QEntry(
             lookup=Expression(f"{self._column(subject, field).root}__isnull"),
@@ -332,13 +332,13 @@ class ConditionWriter(pydantic.BaseModel, frozen=True):
         )
 
     def _column(
-        self, subject: type[pydantic.BaseModel], field: ir.SourceField
+        self, subject: type[pydantic.BaseModel], field: ir.SubjectField
     ) -> FieldName:
         """The attribute of `subject`'s Django model holding `field`."""
         return self.columns.of(subject, field.field).attribute
 
     def _optionality(
-        self, subject: type[pydantic.BaseModel], field: ir.SourceField
+        self, subject: type[pydantic.BaseModel], field: ir.SubjectField
     ) -> Optionality:
         """Whether the column of `field` may be NULL."""
         return self.columns.of(subject, field.field).optionality
@@ -360,10 +360,10 @@ class ConditionWriter(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def _enums_in_operand(
-        operand: ir.SourceField | ir.FilterLiteral,
+        operand: ir.SubjectField | ir.FilterLiteral,
     ) -> Iterator[type[enum.Enum]]:
         match operand:
-            case ir.SourceField() | ir.ScalarLiteral():
+            case ir.SubjectField() | ir.ScalarLiteral():
                 pass
             case ir.EnumLiteral(member=member):
                 yield type(member)

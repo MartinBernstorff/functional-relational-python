@@ -47,7 +47,7 @@ class Company(pydantic.BaseModel, frozen=True):
 
 
 class Memo(pydantic.BaseModel, frozen=True):
-    """A Source that is not an Entity: it has no ID."""
+    """A from_model that is not an Entity: it has no ID."""
 
     body: Text
 
@@ -236,17 +236,17 @@ def test_put_rejects_a_model_that_is_not_an_entity() -> None:
             assert error.model is Memo
 
 
-def test_reading_a_view_over_a_source_that_is_not_an_entity_is_an_error() -> None:
+def test_reading_a_view_over_a_from_model_that_is_not_an_entity_is_an_error() -> None:
     view = View(
         name=ViewName.fake(),
         query=steps.from_(Memo),
     )
 
     match make_engine(view).read(view.name):
-        case Err(engine.NonEntitySourceError() as error):
-            assert (error.view, error.source) == (view.name, Memo)
+        case Err(engine.NonEntityFromModelError() as error):
+            assert (error.view, error.from_model) == (view.name, Memo)
         case result:
-            pytest.fail(f"expected NonEntitySourceError, got {result}")
+            pytest.fail(f"expected NonEntityFromModelError, got {result}")
 
 
 def test_reading_an_unknown_view_names_it_and_the_known_views() -> None:
@@ -795,13 +795,13 @@ def test_every_view_either_gives_results_or_reports_diagnostics(
     for view in checked:
         event(f"valid by construction: {view.name in case.views.valid}")
         match view:
-            case compiler.CompiledView() if view.source not in graph.entities:
+            case compiler.CompiledView() if view.from_model not in graph.entities:
                 assert has_unique_field_names(view.relation)
                 match view_engine.read(view.name):
-                    case Err(engine.NonEntitySourceError()):
+                    case Err(engine.NonEntityFromModelError()):
                         pass
                     case result:
-                        pytest.fail(f"expected NonEntitySourceError, got {result}")
+                        pytest.fail(f"expected NonEntityFromModelError, got {result}")
             case compiler.CompiledView():
                 assert has_unique_field_names(view.relation)
                 rows = view_engine.read(view.name).unwrap()
@@ -810,7 +810,7 @@ def test_every_view_either_gives_results_or_reports_diagnostics(
                     tuple(row.root) == view.relation.field_names() for row in rows
                 )
                 assert len(rows) == sum(
-                    type(entity) is view.source for entity in case.stored
+                    type(entity) is view.from_model for entity in case.stored
                 )
             case compiler.PoisonedView(diagnostics=reported):
                 for diagnostic in reported:
@@ -833,7 +833,7 @@ def test_every_view_either_gives_results_or_reports_diagnostics(
 
 class RoundTripCase(pydantic.BaseModel, frozen=True):
     models: test_compiler.Models
-    source: type[pydantic.BaseModel]
+    from_model: type[pydantic.BaseModel]
     resolved: tuple[FieldName, ...]
     stored: tuple[pydantic.BaseModel, ...]
 
@@ -842,12 +842,14 @@ class RoundTripCase(pydantic.BaseModel, frozen=True):
 def round_trip_cases(draw: st.DrawFn) -> RoundTripCase:
     drawn_models = draw(test_compiler.models())
     graph = drawn_models.graph()
-    # Only a graph without References gives a source that resolves nothing.
+    # Only a graph without References gives a from_model that resolves nothing.
     referencing = [
         model for model in drawn_models.entities if graph.entities[model].references
     ]
-    source = draw(st.sampled_from(referencing or drawn_models.entities))
-    references = [reference.field for reference in graph.entities[source].references]
+    from_model = draw(st.sampled_from(referencing or drawn_models.entities))
+    references = [
+        reference.field for reference in graph.entities[from_model].references
+    ]
     resolved = (
         draw(st.lists(st.sampled_from(references), unique=True, min_size=1))
         if references
@@ -855,33 +857,33 @@ def round_trip_cases(draw: st.DrawFn) -> RoundTripCase:
     )
     return RoundTripCase(
         models=drawn_models,
-        source=source,
+        from_model=from_model,
         resolved=tuple(resolved),
         stored=draw(test_compiler.stored_entities(drawn_models)),
     )
 
 
 def with_ids_again(
-    source: type[pydantic.BaseModel], relation: ir.Relation, row: engine.ViewRow
+    from_model: type[pydantic.BaseModel], relation: ir.Relation, row: engine.ViewRow
 ) -> pydantic.BaseModel:
-    """The `source` instance `row` was built from: each resolved Entity is replaced
+    """The `from_model` instance `row` was built from: each resolved Entity is replaced
     by its ID, under the Reference's own name."""
     values: dict[str, object] = {}
     for field in relation.fields:
         value = row.root[field.name]
         match field.value:
-            case ir.SourceField(field=name) | ir.RequiredField(field=name):
+            case ir.SubjectField(field=name) | ir.RequiredField(field=name):
                 values[name.root] = value
             case ir.Lookup(reference=reference):
                 values[reference.field.root] = (
                     vars(value)["id"] if isinstance(value, pydantic.BaseModel) else None
                 )
             case ir.Added() | ir.ReverseLookup():
-                # Neither holds a value of the Source.
+                # Neither holds a value of the from_model.
                 pass
             case ir.ChainedLookup() | ir.Lifted():
                 pytest.fail(f"a View that only resolves lifted {field.name.root}")
-    return source(**values)
+    return from_model(**values)
 
 
 @given(round_trip_cases())
@@ -891,7 +893,7 @@ def test_resolving_then_replacing_entities_by_their_ids_gives_the_original(
     graph = case.models.graph()
     view = View(
         name=ViewName.fake(),
-        query=steps.from_(case.source, steps.resolve(named(*case.resolved))),
+        query=steps.from_(case.from_model, steps.resolve(named(*case.resolved))),
     )
     compiled = compiler.compile_views(graph, [view]).unwrap()
     view_engine = engine.InMemoryViewEngine(graph, compiled)
@@ -910,8 +912,8 @@ def test_resolving_then_replacing_entities_by_their_ids_gives_the_original(
     event(f"references resolved: {len(case.resolved)}")
     event(f"an optional reference is absent: {bool(absent)}")
     assert [
-        with_ids_again(case.source, compiled_view.relation, row) for row in rows
-    ] == [entity for entity in case.stored if type(entity) is case.source]
+        with_ids_again(case.from_model, compiled_view.relation, row) for row in rows
+    ] == [entity for entity in case.stored if type(entity) is case.from_model]
 
 
 # where.
@@ -1378,7 +1380,7 @@ def test_reading_an_unknown_union_names_it_and_the_known_unions() -> None:
             pytest.fail(f"expected UnknownUnionError, got {result}")
 
 
-def test_reading_a_union_over_a_source_that_is_not_an_entity_is_an_error() -> None:
+def test_reading_a_union_over_a_from_model_that_is_not_an_entity_is_an_error() -> None:
     def memo(name: ViewName, tag: Text) -> View:
         return View(
             name=name,
@@ -1399,7 +1401,7 @@ def test_reading_a_union_over_a_source_that_is_not_an_entity_is_an_error() -> No
     )
 
     match union_engine(union).read_union(union.name):
-        case Err(engine.NonEntitySourceError() as error):
-            assert (error.view, error.source) == (union.name, Memo)
+        case Err(engine.NonEntityFromModelError() as error):
+            assert (error.view, error.from_model) == (union.name, Memo)
         case result:
-            pytest.fail(f"expected NonEntitySourceError, got {result}")
+            pytest.fail(f"expected NonEntityFromModelError, got {result}")

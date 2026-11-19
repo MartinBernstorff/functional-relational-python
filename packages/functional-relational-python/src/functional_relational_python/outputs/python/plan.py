@@ -56,7 +56,7 @@ if typing.TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
 type MetadataValue = object
-"""An object a model's source writes as an expression: an object after the type in
+"""An object a model's from_model writes as an expression: an object after the type in
 `Annotated[X, ...]`, a value in one, e.g. the `0` in `Gt(0)`, or a `Literal`
 argument."""
 
@@ -318,12 +318,12 @@ class UnsupportedMetadata(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class Unimportable(pydantic.BaseModel, Diagnostic, frozen=True):
-    """Generated source would import something it cannot import by its module and
-    name, e.g. a class defined in a function: a field's type, the base, the Source,
+    """Generated from_model would import something it cannot import by its module and
+    name, e.g. a class defined in a function: a field's type, the base, the from_model,
     or an Entity the View looks up or its ID type.
 
     `field` is the field typed by it, or `None` when no model field is: the base,
-    the Source, or what only a mapping function's parameters refer to.
+    the from_model, or what only a mapping function's parameters refer to.
     """
 
     view: DefinitionName
@@ -436,7 +436,7 @@ class ModelPlan(pydantic.BaseModel, frozen=True):
             case ir.RequiredField() | ir.Lifted(field=ir.RequiredField()):
                 return True
             case (
-                ir.SourceField()
+                ir.SubjectField()
                 | ir.Added()
                 | ir.Lifted()
                 | ir.Lookup()
@@ -529,19 +529,19 @@ class LookupParameter(pydantic.BaseModel, frozen=True):
 
 
 class MappingFunctionPlan(pydantic.BaseModel, frozen=True):
-    """What every mapping function to generate has: its Symbol, the Source it
+    """What every mapping function to generate has: its Symbol, the from_model it
     maps, and its keyword parameters, an ID mapping per Entity and field it looks
     up."""
 
     symbol: Symbol
-    source: Symbol
+    from_model: Symbol
     lookups: tuple[LookupParameter, ...]
 
     def parameter_imports(self) -> frozenset[ModulePath]:
         """The modules the function's parameters refer to, each imported whole."""
         return frozenset(
             {
-                self.source.module,
+                self.from_model.module,
                 *(parameter.target.module for parameter in self.lookups),
                 *(parameter.id_type.module for parameter in self.lookups),
                 *((FunctionPlan.mapping,) if self.lookups else ()),
@@ -553,7 +553,7 @@ class MappingFunctionPlan(pydantic.BaseModel, frozen=True):
 
 
 class FunctionPlan(MappingFunctionPlan, frozen=True):
-    """One mapping function to generate: from one instance of the View's Source,
+    """One mapping function to generate: from one instance of the View's from_model,
     and an ID mapping per Entity and field it looks up, to the View's model, or to
     `None` for a row the View's Filters exclude.
 
@@ -589,7 +589,7 @@ class FunctionPlan(MappingFunctionPlan, frozen=True):
             )
         )
         for named in (
-            view.source,
+            view.from_model,
             *(t for lookup in lookups for t in (lookup.target, lookup.id_type)),
             *literal_types,
         ):
@@ -613,7 +613,7 @@ class FunctionPlan(MappingFunctionPlan, frozen=True):
                 symbol=Symbol(
                     module=module, qualname=(Identifier(view.names.function.root),)
                 ),
-                source=symbols[view.source],
+                from_model=symbols[view.from_model],
                 model=model,
                 lookups=tuple(
                     LookupParameter(
@@ -651,9 +651,9 @@ class FunctionPlan(MappingFunctionPlan, frozen=True):
                 return FunctionPlan._literal_types(term)
 
     @staticmethod
-    def _classes_of(operand: ir.SourceField | ir.FilterLiteral) -> tuple[type, ...]:
+    def _classes_of(operand: ir.SubjectField | ir.FilterLiteral) -> tuple[type, ...]:
         match operand:
-            case ir.SourceField() | ir.ScalarLiteral():
+            case ir.SubjectField() | ir.ScalarLiteral():
                 return ()
             case ir.EnumLiteral(member=member):
                 return (type(member),)
@@ -690,14 +690,14 @@ class FunctionPlan(MappingFunctionPlan, frozen=True):
 
 class VariantCall(pydantic.BaseModel, frozen=True):
     """A call of a Variant's mapping function from a Union's: `function`, passed
-    the Source and each of `lookups`, its keyword parameters, by name."""
+    the from_model and each of `lookups`, its keyword parameters, by name."""
 
     function: Symbol
     lookups: tuple[Identifier, ...]
 
 
 class UnionFunctionPlan(MappingFunctionPlan, frozen=True):
-    """One Union's mapping function to generate: from one instance of the Source
+    """One Union's mapping function to generate: from one instance of the from_model
     its Variants read, and the lookup parameters of every Variant's mapping
     function, to the model of the first Variant whose function maps it, or to
     `None` when none does.
@@ -726,7 +726,7 @@ class UnionFunctionPlan(MappingFunctionPlan, frozen=True):
             symbol=Symbol(
                 module=module, qualname=(Identifier(union.names.function.root),)
             ),
-            source=variants[0].source,
+            from_model=variants[0].from_model,
             model=model,
             lookups=tuple(
                 dict.fromkeys(
@@ -1028,7 +1028,7 @@ class _ModelPlanner:
         one_to_one_marker: OneToOneMarker,
     ) -> _PlannedModel:
         planner = _ModelPlanner(compiled.name, module, one_to_one_marker)
-        planner.used.use(compiled.source)
+        planner.used.use(compiled.from_model)
         match compiled:
             case compiler.CompiledView(names=names):
                 plan = planner.plan(names.model, compiled.relation, compiled.base)
@@ -1396,7 +1396,7 @@ class Namespace:
         namespace.define(
             FunctionPlan.source_parameter,
             AnnotationText(
-                f"the parameter for the Source {function.source.describe().root}"
+                f"the parameter for the from_model {function.from_model.describe().root}"
             ),
         )
         for parameter in function.lookups:
@@ -1415,7 +1415,7 @@ class Namespace:
         namespace.define(
             FunctionPlan.source_parameter,
             AnnotationText(
-                f"the parameter for the Source {function.source.describe().root}"
+                f"the parameter for the from_model {function.from_model.describe().root}"
             ),
         )
         for parameter in function.lookups:

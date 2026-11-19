@@ -53,7 +53,7 @@ class Catalog(pydantic.BaseModel, frozen=True):
     `mappings` is the one module every View's and Union of Views' mapping
     function goes to, see `MappingsRenderer`.
     It cannot be a module `layout` returns, a Django module, a module defining a
-    Source or an Entity a View looks up, or a module named like a package other
+    from_model or an Entity a View looks up, or a module named like a package other
     files are generated into (`app` when generating `app.views`). `django`
     generates a Django model per Entity, and Django queries for each View over
     an Entity, see `DjangoModels`. An Entity listed in `DjangoModels.existing`

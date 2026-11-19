@@ -79,7 +79,7 @@ def _narrowed(
     """`field` narrowed by every term in `terms` that tests its value."""
     match field:
         case ir.Field(
-            value=ir.SourceField(field=column) | ir.RequiredField(field=column)
+            value=ir.SubjectField(field=column) | ir.RequiredField(field=column)
         ):
             pass
         case ir.Field() | ir.NestedField():
@@ -105,25 +105,25 @@ def _narrowed_by(term: ir.Filter, column: FieldName, field: ir.Field) -> ir.Fiel
     match term:
         case ir.FilterComparison(
             operator=ir.ComparisonOperator.EQ,
-            field=ir.SourceField(field=tested),
+            field=ir.SubjectField(field=tested),
             operand=ir.EnumLiteral(member=member),
         ) if tested == column and nameable(member):
             return field.retyped(_literal(member))
-        case ir.FilterIsNull(field=ir.SourceField(field=tested)) if (
+        case ir.FilterIsNull(field=ir.SubjectField(field=tested)) if (
             tested == column
             and split(field.annotation()).optionality is Optionality.OPTIONAL
         ):
             return field.retyped(typing.Literal[None])
-        case ir.FilterNot(term=ir.FilterIsNull(field=ir.SourceField(field=tested))) if (
-            tested == column
-        ):
+        case ir.FilterNot(
+            term=ir.FilterIsNull(field=ir.SubjectField(field=tested))
+        ) if tested == column:
             return field.without_none()
         case _:
             return field
 
 
 def required(
-    view: DefinitionName, source: ir.SourceName, field: ir.RelationField
+    view: DefinitionName, from_model: ir.FromModelName, field: ir.RelationField
 ) -> ir.RelationField | diagnostics.CompileDiagnostic:
     """`field` narrowed from `X | None` to `X`, with a value the View requires; or
     why it cannot be."""
@@ -135,12 +135,15 @@ def required(
     narrowed = split(annotation)
     if narrowed.required == typing.Literal[None]:
         return diagnostics.RequireOnAlwaysNoneField(
-            view=view, source=source, field=field.name
+            view=view, from_model=from_model, field=field.name
         )
     match narrowed.optionality:
         case Optionality.REQUIRED:
             return diagnostics.RequireOnRequiredField(
-                view=view, source=source, field=field.name, annotation=annotation
+                view=view,
+                from_model=from_model,
+                field=field.name,
+                annotation=annotation,
             )
         case Optionality.OPTIONAL:
             pass
@@ -151,7 +154,7 @@ def required(
             pass
     value_required: ir.Value
     match value:
-        case ir.SourceField(field=column) | ir.RequiredField(field=column):
+        case ir.SubjectField(field=column) | ir.RequiredField(field=column):
             value_required = ir.RequiredField(field=column)
             narrowed = field.without_none()
         case ir.Lifted():
