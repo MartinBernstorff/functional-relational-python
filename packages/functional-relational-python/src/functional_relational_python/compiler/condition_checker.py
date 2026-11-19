@@ -49,7 +49,7 @@ class _Column(pydantic.BaseModel, frozen=True):
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
 
     field: ir.Field
-    source: ir.SourceField
+    subject_field: ir.SubjectField
     annotation: RuntimeAnnotation
 
     def split_annotation(self) -> SplitAnnotation:
@@ -61,7 +61,7 @@ class _Column(pydantic.BaseModel, frozen=True):
 type Checked = (
     ir.Filter
     | ir.FilterLiteral
-    | ir.SourceField
+    | ir.SubjectField
     | ir.ConditionLiteral
     | _Column
     | Defects
@@ -73,7 +73,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
     """Checks a Condition against `relation`, the relation at its `where`.
 
     Every defective term is reported, not only the first. `owner` is what the
-    Condition belongs to: a View's or Payload's `where`, or a constraint, whose
+    Condition belongs to: a View's or WriteModel's `where`, or a constraint, whose
     relation is its Entity's.
     """
 
@@ -88,8 +88,8 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
                 checked = self._check_comparison(condition)
             case ir.IsNull(field=reference):
                 match self._column(reference):
-                    case _Column(source=source):
-                        checked = ir.FilterIsNull(field=source)
+                    case _Column(subject_field=subject_field):
+                        checked = ir.FilterIsNull(field=subject_field)
                     case Defects() as defects:
                         checked = defects
             case ir.And(terms=terms):
@@ -128,14 +128,14 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
         match named:
             case [
                 ir.Field(
-                    value=ir.SourceField(field=column) | ir.RequiredField(field=column)
+                    value=ir.SubjectField(field=column) | ir.RequiredField(field=column)
                 ) as field,
                 *_,
             ]:
                 declared = self.subject.model_fields.get(column.root)
                 return _Column(
                     field=field,
-                    source=ir.SourceField(field=column),
+                    subject_field=ir.SubjectField(field=column),
                     # A field recovered from a defective step may name no field
                     # of the subject; it keeps the type it was given.
                     annotation=field.annotation()
@@ -143,13 +143,15 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
                     else declared.annotation,
                 )
             case [_, *_]:
-                diagnostic = diagnostics.NotASourceColumn(
-                    owner=self.owner, source=self.relation.source, field=reference.name
+                diagnostic = diagnostics.NotAFromModelColumn(
+                    owner=self.owner,
+                    from_model=self.relation.from_model,
+                    field=reference.name,
                 )
             case _:
                 diagnostic = diagnostics.UnknownField(
                     owner=self.owner,
-                    source=self.relation.source,
+                    from_model=self.relation.from_model,
                     field=reference.name,
                     valid=self.relation.field_names(),
                 )
@@ -183,7 +185,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
         if reported or isinstance(operand, Defects):
             return Defects(diagnostics=reported)
         return ir.FilterComparison(
-            operator=operator, field=left.source, operand=operand
+            operator=operator, field=left.subject_field, operand=operand
         )
 
     def _check_null_test(
@@ -199,7 +201,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
                 )
             case Optionality.OPTIONAL:
                 pass
-        is_null = ir.FilterIsNull(field=column.source)
+        is_null = ir.FilterIsNull(field=column.subject_field)
         match operator:
             case ir.ComparisonOperator.EQ:
                 return is_null
@@ -216,7 +218,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
 
     def _check_operand(
         self, left: _Column, right: _Column | ir.ConditionLiteral
-    ) -> ir.SourceField | ir.FilterLiteral | Defects:
+    ) -> ir.SubjectField | ir.FilterLiteral | Defects:
         """What `left` is compared with: a field of its type, or a literal
         generated code can write out, which is an instance of its type."""
         match right:
@@ -225,12 +227,12 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
                     left.split_annotation().required
                     == right.split_annotation().required
                 ):
-                    return right.source
+                    return right.subject_field
                 return Defects(
                     diagnostics=(
                         diagnostics.ComparedTypesDiffer(
                             owner=self.owner,
-                            source=self.relation.source,
+                            from_model=self.relation.from_model,
                             field=left.field.name,
                             annotation=left.annotation,
                             other=right.field.name,
@@ -260,7 +262,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
     ) -> diagnostics.LiteralTypeMismatch:
         return diagnostics.LiteralTypeMismatch(
             owner=self.owner,
-            source=self.relation.source,
+            from_model=self.relation.from_model,
             field=column.field.name,
             annotation=column.annotation,
             value=diagnostics.LiteralText.of(value),
@@ -291,7 +293,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
                 reported.append(
                     diagnostics.OrderingOnOptionalField(
                         owner=self.owner,
-                        source=self.relation.source,
+                        from_model=self.relation.from_model,
                         field=column.field.name,
                         operator=operator,
                     )
@@ -304,7 +306,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
             reported.append(
                 diagnostics.UnorderedFieldType(
                     owner=self.owner,
-                    source=self.relation.source,
+                    from_model=self.relation.from_model,
                     field=column.field.name,
                     annotation=required,
                     operator=operator,

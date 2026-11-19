@@ -1,8 +1,8 @@
-"""Compiles Views and Payloads to checked frp-ir.
+"""Compiles Views and WriteModels to checked frp-ir.
 
 Checking uses the poisoned pattern: a failed check reports a diagnostic and
 recovers with the best relation it can build, so later steps and other Views and
-Payloads are still checked and independent defects are all reported, once each.
+WriteModels are still checked and independent defects are all reported, once each.
 """
 
 import typing
@@ -36,13 +36,13 @@ from functional_relational_python.entity_graph.entity_graph import (
 )
 from functional_relational_python.entity_graph.id import OneToOneMarker
 from functional_relational_python.pipeline import ir
-from functional_relational_python.pipeline.payloads import (
-    DefinitionName,
-    Payload,
-    PayloadName,
-)
 from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
+from functional_relational_python.pipeline.write_models import (
+    DefinitionName,
+    WriteModel,
+    WriteModelName,
+)
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
 type Diagnostics = Annotated[
@@ -62,13 +62,13 @@ class Poisoned(pydantic.BaseModel, frozen=True):
 
 
 class CompiledView(pydantic.BaseModel, frozen=True):
-    """A checked View: its Source, the Relation backends compute from it, the
+    """A checked View: its from_model, the Relation backends compute from it, the
     base its model subclasses, and the names its generated code uses.
 
     Every kept field `base` declares has the type it declares."""
 
     name: ViewName
-    source: type[pydantic.BaseModel]
+    from_model: type[pydantic.BaseModel]
     base: type[pydantic.BaseModel]
     relation: ir.Relation
     names: ViewModelNames
@@ -84,7 +84,7 @@ class PoisonedView(pydantic.BaseModel, frozen=True):
 
 
 class CompiledUnion(pydantic.BaseModel, frozen=True):
-    """A checked Union of Views: the Source its Variants read, its Discriminator,
+    """A checked Union of Views: the from_model its Variants read, its Discriminator,
     its checked Variants, and the names its generated code uses.
 
     Every View among its leaves has the Discriminator, typed by a Tag no other
@@ -92,13 +92,13 @@ class CompiledUnion(pydantic.BaseModel, frozen=True):
     """
 
     name: UnionName
-    source: type[pydantic.BaseModel]
+    from_model: type[pydantic.BaseModel]
     discriminator: FieldName
     variants: tuple[CompiledView | CompiledUnion, ...]
     names: UnionModelNames
 
     def leaves(self) -> tuple[CompiledView, ...]:
-        """The Views a Source row may be a result of, in the order they are tried:
+        """The Views a from_model row may be a result of, in the order they are tried:
         the first whose Filters keep the row gives the result."""
         return tuple(leaf for variant in self.variants for leaf in variant.leaves())
 
@@ -120,58 +120,58 @@ class CompiledViews(pydantic.BaseModel, frozen=True):
     unions: tuple[CompiledUnion, ...]
 
 
-class CompiledPayload(pydantic.BaseModel, frozen=True):
-    """A checked Payload: its Source, the Relation its model is generated from,
-    the base its model subclasses, and the names of its models. A Payload has no
+class CompiledWriteModel(pydantic.BaseModel, frozen=True):
+    """A checked WriteModel: its from_model, the Relation its model is generated from,
+    the base its model subclasses, and the names of its models. A WriteModel has no
     mapping function.
 
     Every kept field `base` declares has the type it declares."""
 
-    name: PayloadName
-    source: type[pydantic.BaseModel]
+    name: WriteModelName
+    from_model: type[pydantic.BaseModel]
     base: type[pydantic.BaseModel]
     relation: ir.Relation
     names: ModelNames
 
-    def leaves(self) -> tuple[CompiledPayload]:
-        """This Payload, as the one leaf of itself, like a Union's leaves."""
+    def leaves(self) -> tuple[CompiledWriteModel]:
+        """This WriteModel, as the one leaf of itself, like a Union's leaves."""
         return (self,)
 
 
-class CompiledPayloadUnion(pydantic.BaseModel, frozen=True):
-    """A checked Union of Payloads: its Discriminator, its checked Variants, and
-    the name of its model. Its Variants may read different Sources. Like a
-    Payload, it has no mapping function.
+class CompiledWriteModelUnion(pydantic.BaseModel, frozen=True):
+    """A checked Union of WriteModels: its Discriminator, its checked Variants, and
+    the name of its model. Its Variants may read different from_models. Like a
+    WriteModel, it has no mapping function.
 
-    Every Payload among its leaves has the Discriminator, typed by a Tag no other
+    Every WriteModel among its leaves has the Discriminator, typed by a Tag no other
     Variant has; a nested Union's leaves share theirs.
     """
 
     name: UnionName
     discriminator: FieldName
-    variants: tuple[CompiledPayload | CompiledPayloadUnion, ...]
+    variants: tuple[CompiledWriteModel | CompiledWriteModelUnion, ...]
     model: ModelName
 
-    def leaves(self) -> tuple[CompiledPayload, ...]:
-        """The Payloads among its Variants and those of the Unions nested in it,
+    def leaves(self) -> tuple[CompiledWriteModel, ...]:
+        """The WriteModels among its Variants and those of the Unions nested in it,
         in Variant order."""
         return tuple(leaf for variant in self.variants for leaf in variant.leaves())
 
 
 class CompiledCatalog(pydantic.BaseModel, frozen=True):
-    """Every View, Payload and Union of a Catalog, checked, and the Entity graph's
+    """Every View, WriteModel and Union of a Catalog, checked, and the Entity graph's
     `OneToOneMarker`, which generated models leave out.
 
-    `views` has every View a Union has as a Variant, and `payloads` every
-    Payload. `unions` has the Unions of Views and `payload_unions` the Unions of
-    Payloads, each including every Union nested in another, after the Unions
+    `views` has every View a Union has as a Variant, and `write_models` every
+    WriteModel. `unions` has the Unions of Views and `write_model_unions` the Unions of
+    WriteModels, each including every Union nested in another, after the Unions
     nested in it.
     """
 
     views: tuple[CompiledView, ...]
-    payloads: tuple[CompiledPayload, ...]
+    write_models: tuple[CompiledWriteModel, ...]
     unions: tuple[CompiledUnion, ...]
-    payload_unions: tuple[CompiledPayloadUnion, ...]
+    write_model_unions: tuple[CompiledWriteModelUnion, ...]
     one_to_one_marker: OneToOneMarker
 
 
@@ -184,13 +184,13 @@ def compile_views(
     """Compiles every View and Union, or returns every diagnostic from all of
     them.
 
-    `entity_graph` is what References are resolved against. A Union of Payloads
+    `entity_graph` is what References are resolved against. A Union of WriteModels
     is a diagnostic, as it is a write model, and is not compiled;
     `compile_catalog` compiles it.
     """
     unions = tuple(unions)
     misplaced: tuple[diagnostics.CompileDiagnostic, ...] = tuple(
-        diagnostics.PayloadUnionInViews(view=union.name)
+        diagnostics.WriteModelUnionInViews(view=union.name)
         for union in unions
         if not union.views()
     )
@@ -208,15 +208,15 @@ def compile_views(
 def compile_catalog(
     entity_graph: EntityGraph,
     views: Iterable[View],
-    payloads: Iterable[Payload],
+    write_models: Iterable[WriteModel],
     unions: Iterable[Union],
     /,
 ) -> Result[CompiledCatalog, DiagnosticsError[diagnostics.CompileDiagnostic]]:
-    """Compiles every View, Payload and Union, or returns every diagnostic from
-    all of them, including one per name a View and a Payload share.
+    """Compiles every View, WriteModel and Union, or returns every diagnostic from
+    all of them, including one per name a View and a WriteModel share.
 
-    A Union's Variants are compiled as if `views` or `payloads` listed them, and
-    the Unions nested in it as if `unions` did. A View, Payload or Union listed or
+    A Union's Variants are compiled as if `views` or `write_models` listed them, and
+    the Unions nested in it as if `unions` did. A View, WriteModel or Union listed or
     nested more than once is compiled once.
     """
     unions = tuple(unions)
@@ -226,26 +226,34 @@ def compile_catalog(
     all_views = tuple(
         dict.fromkeys((*views, *(view for union in unions for view in union.views())))
     )
-    all_payloads = tuple(
+    all_write_models = tuple(
         dict.fromkeys(
-            (*payloads, *(payload for union in unions for payload in union.payloads()))
+            (
+                *write_models,
+                *(
+                    write_model
+                    for union in unions
+                    for write_model in union.write_models()
+                ),
+            )
         )
     )
     checked_views = check(entity_graph, all_views)
-    checked_payloads = tuple(
-        _check_payload(entity_graph, payload) for payload in all_payloads
+    checked_write_models = tuple(
+        _check_write_model(entity_graph, write_model)
+        for write_model in all_write_models
     )
     checked_unions = _check_unions(
         all_unions,
         dict(zip(all_views, checked_views, strict=True)),
-        dict(zip(all_payloads, checked_payloads, strict=True)),
+        dict(zip(all_write_models, checked_write_models, strict=True)),
     )
-    payload_names = {payload.name.root for payload in checked_payloads}
-    # One diagnostic per shared name, however many Views and Payloads have it.
+    write_model_names = {write_model.name.root for write_model in checked_write_models}
+    # One diagnostic per shared name, however many Views and WriteModels have it.
     shared_names = dict.fromkeys(
-        view.name for view in checked_views if view.name.root in payload_names
+        view.name for view in checked_views if view.name.root in write_model_names
     )
-    other_names = {view.name.root for view in all_views} | payload_names
+    other_names = {view.name.root for view in all_views} | write_model_names
     union_names = [union.name.root for union in all_unions]
     shared_union_names = dict.fromkeys(
         union.name
@@ -256,8 +264,10 @@ def compile_catalog(
         (
             *(
                 diagnostic
-                for checked in (*checked_views, *checked_payloads, *checked_unions)
-                if isinstance(checked, PoisonedView | PoisonedPayload | PoisonedUnion)
+                for checked in (*checked_views, *checked_write_models, *checked_unions)
+                if isinstance(
+                    checked, PoisonedView | PoisonedWriteModel | PoisonedUnion
+                )
                 for diagnostic in checked.diagnostics
             ),
             *(diagnostics.SharedModelName(view=name) for name in shared_names),
@@ -265,12 +275,12 @@ def compile_catalog(
         ),
         lambda: CompiledCatalog(
             views=tuple(v for v in checked_views if isinstance(v, CompiledView)),
-            payloads=tuple(
-                p for p in checked_payloads if isinstance(p, CompiledPayload)
+            write_models=tuple(
+                p for p in checked_write_models if isinstance(p, CompiledWriteModel)
             ),
             unions=tuple(u for u in checked_unions if isinstance(u, CompiledUnion)),
-            payload_unions=tuple(
-                u for u in checked_unions if isinstance(u, CompiledPayloadUnion)
+            write_model_unions=tuple(
+                u for u in checked_unions if isinstance(u, CompiledWriteModelUnion)
             ),
             one_to_one_marker=entity_graph.one_to_one_marker,
         ),
@@ -284,21 +294,21 @@ def check(
     return tuple(_check_view(entity_graph, view) for view in views)
 
 
-class PoisonedPayload(pydantic.BaseModel, frozen=True):
-    name: PayloadName
+class PoisonedWriteModel(pydantic.BaseModel, frozen=True):
+    name: WriteModelName
     diagnostics: Diagnostics
 
 
 def _check_relation(
-    entity_graph: EntityGraph, definition: View | Payload
+    entity_graph: EntityGraph, definition: View | WriteModel
 ) -> ir.Relation | Poisoned:
-    """The Relation a View's or Payload's pipeline builds over its Source, checked
+    """The Relation a View's or WriteModel's pipeline builds over its from_model, checked
     against its base, before its model names are checked."""
     name = definition.name
     match _check_node(
         entity_graph,
         name,
-        definition.step(ir.FromSource(source=definition.source)),
+        definition.query.node(),
     ):
         case ir.Relation() as relation:
             reported = _check_base(name, definition.base, relation)
@@ -362,7 +372,7 @@ def _check_view(entity_graph: EntityGraph, view: View) -> CompiledView | Poisone
         case Ok(names):
             return CompiledView(
                 name=view.name,
-                source=view.source,
+                from_model=view.query.from_model,
                 base=view.base,
                 relation=relation,
                 names=names,
@@ -371,38 +381,42 @@ def _check_view(entity_graph: EntityGraph, view: View) -> CompiledView | Poisone
             return PoisonedView(name=view.name, diagnostics=error.diagnostics)
 
 
-def _check_payload(
-    entity_graph: EntityGraph, payload: Payload
-) -> CompiledPayload | PoisonedPayload:
-    match _check_relation(entity_graph, payload):
+def _check_write_model(
+    entity_graph: EntityGraph, write_model: WriteModel
+) -> CompiledWriteModel | PoisonedWriteModel:
+    match _check_relation(entity_graph, write_model):
         case ir.Relation() as relation:
             reported = ()
         case Poisoned(recovered=relation, diagnostics=reported):
             pass
-    # One per `where`: a Payload is a write model, with no rows to filter.
+    # One per `where`: a WriteModel has no rows to filter.
     misplaced = tuple(
-        diagnostics.WhereInPayload(view=payload.name) for _ in relation.filters
+        diagnostics.WhereInWriteModel(view=write_model.name) for _ in relation.filters
     )
     if reported or misplaced:
-        return PoisonedPayload(name=payload.name, diagnostics=(*reported, *misplaced))
-    match ModelNames.check(payload.name, relation):
+        return PoisonedWriteModel(
+            name=write_model.name, diagnostics=(*reported, *misplaced)
+        )
+    match ModelNames.check(write_model.name, relation):
         case Ok(names):
-            return CompiledPayload(
-                name=payload.name,
-                source=payload.source,
-                base=payload.base,
+            return CompiledWriteModel(
+                name=write_model.name,
+                from_model=write_model.query.from_model,
+                base=write_model.base,
                 relation=relation,
                 names=names,
             )
         case Err(error):
-            return PoisonedPayload(name=payload.name, diagnostics=error.diagnostics)
+            return PoisonedWriteModel(
+                name=write_model.name, diagnostics=error.diagnostics
+            )
 
 
 def _check_node(
     entity_graph: EntityGraph, view: DefinitionName, node: ir.Node
 ) -> ir.Relation | Poisoned:
     match node:
-        case ir.FromSource():
+        case ir.FromModel():
             return ir.Relation.of(node)
         case (
             ir.Omit()
@@ -491,7 +505,7 @@ def _check_omit(
                 diagnostics=(
                     diagnostics.UnknownField(
                         owner=view,
-                        source=relation.source,
+                        from_model=relation.from_model,
                         field=field,
                         valid=relation.field_names(),
                     ),
@@ -507,7 +521,10 @@ def _check_rename(
     if node.field not in names:
         reported.append(
             diagnostics.UnknownField(
-                owner=view, source=relation.source, field=node.field, valid=names
+                owner=view,
+                from_model=relation.from_model,
+                field=node.field,
+                valid=names,
             )
         )
     # Renaming a field to its own name changes nothing, so it is no defect.
@@ -517,7 +534,7 @@ def _check_rename(
                 view=view, renamed=node.field, field=node.new
             )
         )
-    reported.extend(ViewModelNames.check_field(view, relation.source, node.new))
+    reported.extend(ViewModelNames.check_field(view, relation.from_model, node.new))
     if not reported:
         return relation.renamed({node.field: node.new})
     return Poisoned(
@@ -542,7 +559,7 @@ def _recovered_rename(node: ir.Rename, relation: ir.Relation) -> ir.Relation:
             ir.Field(
                 name=node.new,
                 info=FieldInfo(),
-                value=ir.SourceField(field=node.field),
+                value=ir.SubjectField(field=node.field),
                 default=ir.NoDefault(),
             ),
         )
@@ -570,7 +587,7 @@ def _check_rename_selected(
     for old, new in new_names.items():
         if old in kept:
             continue
-        reported.extend(ViewModelNames.check_field(view, relation.source, new))
+        reported.extend(ViewModelNames.check_field(view, relation.from_model, new))
         if new in taken:
             reported.append(
                 diagnostics.RenameOntoExistingField(view=view, renamed=old, field=new)
@@ -597,7 +614,7 @@ def _check_retype(
     match view:
         case ViewName():
             reported.append(diagnostics.RetypeInView(view=view))
-        case PayloadName():
+        case WriteModelName():
             pass
     match node.fields:
         case ir.Select() as selected:
@@ -608,7 +625,7 @@ def _check_retype(
                 reported.append(
                     diagnostics.UnknownField(
                         owner=view,
-                        source=relation.source,
+                        from_model=relation.from_model,
                         field=field,
                         valid=relation.field_names(),
                     )
@@ -625,7 +642,7 @@ def _check_retype(
                 # Left as it is, so later steps still find it.
                 reported.append(
                     diagnostics.RetypeNestedField(
-                        view=view, source=relation.source, field=field.name
+                        view=view, from_model=relation.from_model, field=field.name
                     )
                 )
                 fields.append(field)
@@ -642,7 +659,7 @@ def _check_project(
     unknown = tuple(
         diagnostics.UnknownField(
             owner=view,
-            source=relation.source,
+            from_model=relation.from_model,
             field=field,
             valid=relation.field_names(),
         )
@@ -675,7 +692,7 @@ def _check_default(
             reported.append(
                 diagnostics.UnknownField(
                     owner=view,
-                    source=relation.source,
+                    from_model=relation.from_model,
                     field=field,
                     valid=relation.field_names(),
                 )
@@ -705,7 +722,7 @@ def _check_add(
     collides = node.name in relation.field_names()
     if collides:
         reported.append(diagnostics.AddOntoExistingField(view=view, field=node.name))
-    reported.extend(ViewModelNames.check_field(view, relation.source, node.name))
+    reported.extend(ViewModelNames.check_field(view, relation.from_model, node.name))
     default: ir.DefaultValue | ir.NoDefault
     match node.default:
         case ir.NoDefault():
@@ -737,11 +754,11 @@ def _check_where(
     fields it tests, as `narrowing.by_filter` does.
 
     A defective Condition leaves the relation unchanged. Where a Filter is not
-    allowed, in a nested pipeline or a Payload, is reported once the pipeline is
+    allowed, in a nested pipeline or a WriteModel, is reported once the pipeline is
     checked.
     """
     match condition_checker.ConditionChecker(
-        owner=view, relation=relation, subject=_subject(node).source
+        owner=view, relation=relation, subject=_subject(node).from_model
     ).check(node.condition):
         case condition_checker.Defects(diagnostics=reported):
             return Poisoned(recovered=relation, diagnostics=reported)
@@ -751,10 +768,10 @@ def _check_where(
             )
 
 
-def _subject(node: ir.Node) -> ir.FromSource:
+def _subject(node: ir.Node) -> ir.FromModel:
     """What the pipeline that `node` ends started from, however the relation has
-    changed since: the View's Source, or the Entity a nested pipeline runs on."""
-    while not isinstance(node, ir.FromSource):
+    changed since: the View's from_model, or the Entity a nested pipeline runs on."""
+    while not isinstance(node, ir.FromModel):
         node = node.input
     return node
 
@@ -765,14 +782,14 @@ def _check_require(
     """Narrows the named or selected fields from `X | None` to `X`.
 
     Each field that cannot be required is a diagnostic, and is left as it is, so
-    later steps still find it. Requiring in a Payload is a diagnostic; its fields
+    later steps still find it. Requiring in a WriteModel is a diagnostic; its fields
     are still narrowed, so later steps are checked against the types the pipeline
     asks for, as for `retype` in a View.
     """
     reported: list[diagnostics.CompileDiagnostic] = []
     match view:
-        case PayloadName():
-            reported.append(diagnostics.RequireInPayload(view=view))
+        case WriteModelName():
+            reported.append(diagnostics.RequireInWriteModel(view=view))
         case ViewName():
             pass
     match node.fields:
@@ -784,7 +801,7 @@ def _check_require(
                 reported.append(
                     diagnostics.UnknownField(
                         owner=view,
-                        source=relation.source,
+                        from_model=relation.from_model,
                         field=field,
                         valid=relation.field_names(),
                     )
@@ -794,7 +811,7 @@ def _check_require(
         if field.name not in names:
             fields.append(field)
             continue
-        match narrowing.required(view, relation.source, field):
+        match narrowing.required(view, relation.from_model, field):
             case ir.Field() | ir.NestedField() as narrowed:
                 fields.append(narrowed)
             case diagnostic:
@@ -891,12 +908,15 @@ def _resolve_field(
             field=field,
             diagnostics=(
                 diagnostics.ResolvedNameCollision(
-                    view=view, source=relation.source, field=field.name, existing=name
+                    view=view,
+                    from_model=relation.from_model,
+                    field=field.name,
+                    existing=name,
                 ),
             ),
         )
     if name != field.name and (
-        invalid := ViewModelNames.check_field(view, relation.source, name)
+        invalid := ViewModelNames.check_field(view, relation.from_model, name)
     ):
         return _CheckedField(field=field, diagnostics=invalid)
     return _resolved(entity_graph, view, node.then, name, found)
@@ -914,7 +934,7 @@ def _lookup(
         field=field,
         diagnostics=(
             diagnostics.NotAReference(
-                view=view, source=relation.source, field=field.name
+                view=view, from_model=relation.from_model, field=field.name
             ),
         ),
     )
@@ -923,15 +943,15 @@ def _lookup(
             pass
         case ir.NestedField():
             return not_a_reference
-    match field.reference_source():
-        case (source, info):
+    match field.read_from():
+        case (read, info):
             pass
         case ir.Field():
             return not_a_reference
-    match entity_graph.reference_of(source, info):
+    match entity_graph.reference_of(read, info):
         case Ok(reference):
             lookup = ir.Lookup(
-                reference=ir.SourceField(field=reference.field),
+                reference=ir.SubjectField(field=reference.field),
                 id_type=reference.id_type,
                 target=reference.target,
                 optionality=reference.optionality,
@@ -962,7 +982,7 @@ def _lookup(
                 diagnostics=(
                     diagnostics.UnresolvableReference(
                         view=view,
-                        source=relation.source,
+                        from_model=relation.from_model,
                         field=field.name,
                         id_type=id_type,
                     ),
@@ -983,28 +1003,30 @@ def _check_reverse(
     existing field keeps it, as for `add`. A Reference that cannot be followed
     backwards recovers with a field of unknown type, so later steps still find it.
     """
-    source = relation.source
+    from_model = relation.from_model
     name = FieldName(PascalCase(node.entity.__name__).snake_case().root)
     reported: list[diagnostics.CompileDiagnostic] = []
     collides = name in relation.field_names()
     if collides:
         reported.append(
             diagnostics.ReverseOntoExistingField(
-                view=view, source=source, entity=node.entity, field=name
+                view=view, from_model=from_model, entity=node.entity, field=name
             )
         )
-    reported.extend(ViewModelNames.check_field(view, source, name))
+    reported.extend(ViewModelNames.check_field(view, from_model, name))
     subject = _subject(node)
     non_entities: list[diagnostics.CompileDiagnostic] = []
-    if subject.source not in entity_graph.entities:
+    if subject.from_model not in entity_graph.entities:
         non_entities.append(
             diagnostics.ReverseFromNonEntity(
-                view=view, source=source, entity=node.entity
+                view=view, from_model=from_model, entity=node.entity
             )
         )
     if node.entity not in entity_graph.entities:
         non_entities.append(
-            diagnostics.ReverseOfNonEntity(view=view, source=source, entity=node.entity)
+            diagnostics.ReverseOfNonEntity(
+                view=view, from_model=from_model, entity=node.entity
+            )
         )
     reported.extend(non_entities)
     field: ir.RelationField = ir.Field(
@@ -1014,7 +1036,7 @@ def _check_reverse(
         to_subject = tuple(
             reference
             for reference in entity_graph.entities[node.entity].references
-            if reference.target is subject.source
+            if reference.target is subject.from_model
         )
         one_to_one = tuple(
             reference
@@ -1029,14 +1051,14 @@ def _check_reverse(
                 unchosen = (
                     diagnostics.AmbiguousReverse(
                         view=view,
-                        source=source,
+                        from_model=from_model,
                         entity=node.entity,
                         references=tuple(reference.field for reference in chosen),
                     )
                     if chosen
                     else diagnostics.NoOneToOneReference(
                         view=view,
-                        source=source,
+                        from_model=from_model,
                         entity=node.entity,
                         many_to_one=tuple(
                             reference.field
@@ -1052,7 +1074,7 @@ def _check_reverse(
                 )
                 unchosen = diagnostics.NotAOneToOneReference(
                     view=view,
-                    source=source,
+                    from_model=from_model,
                     entity=node.entity,
                     field=via,
                     valid=tuple(reference.field for reference in one_to_one),
@@ -1092,7 +1114,7 @@ def _resolved(
     ID, and need not fit the Entity.
     """
     default = ir.NoDefault()
-    root = ir.FromSource(source=found.lookups()[-1].target)
+    root = ir.FromModel(from_model=found.lookups()[-1].target)
     nested = then(root)
     if nested == root:
         return _CheckedField(
@@ -1105,7 +1127,7 @@ def _resolved(
             pass
     # One per `where`: each looked-up Entity is one field, with no rows to filter.
     misplaced = tuple(
-        diagnostics.WhereInNestedPipeline(view=view, source=relation.source)
+        diagnostics.WhereInNestedPipeline(view=view, from_model=relation.from_model)
         for _ in relation.filters
     )
     return _CheckedField(
@@ -1133,7 +1155,7 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
                 chain = found.lookups()
                 return _HeldEntity(
                     chain=chain,
-                    relation=ir.Relation.of(ir.FromSource(source=chain[-1].target)),
+                    relation=ir.Relation.of(ir.FromModel(from_model=chain[-1].target)),
                 )
             case ir.NestedField(value=found, relation=relation):
                 return _HeldEntity(chain=found.lookups(), relation=relation)
@@ -1159,7 +1181,7 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
         match value:
             case ir.Added():
                 return field
-            case ir.SourceField() | ir.RequiredField():
+            case ir.SubjectField() | ir.RequiredField():
                 lifted_value = ir.Lifted(through=self.chain, field=value)
             case ir.Lifted(through=through, field=read):
                 lifted_value = ir.Lifted(through=(*self.chain, *through), field=read)
@@ -1202,12 +1224,12 @@ def _check_flatten(
             flattened = set[FieldName]()
             reported.append(
                 diagnostics.NotAResolvedField(
-                    view=view, source=relation.source, field=name
+                    view=view, from_model=relation.from_model, field=name
                 )
                 if name in relation.field_names()
                 else diagnostics.UnknownField(
                     owner=view,
-                    source=relation.source,
+                    from_model=relation.from_model,
                     field=name,
                     valid=relation.field_names(),
                 )
@@ -1250,51 +1272,58 @@ def _poison(
             )
 
 
-type _CheckedUnion = CompiledUnion | CompiledPayloadUnion | PoisonedUnion | BlockedUnion
+type _CheckedUnion = (
+    CompiledUnion | CompiledWriteModelUnion | PoisonedUnion | BlockedUnion
+)
 
 
 def _check_unions(
     unions: Iterable[Union],
     views: Mapping[View, CompiledView | PoisonedView],
-    payloads: Mapping[Payload, CompiledPayload | PoisonedPayload],
+    write_models: Mapping[WriteModel, CompiledWriteModel | PoisonedWriteModel],
 ) -> tuple[_CheckedUnion, ...]:
     """Checks every Union against its checked Variants. `unions` has each Union
-    nested in another before it, and `views` and `payloads` every View and
-    Payload among their Variants."""
+    nested in another before it, and `views` and `write_models` every View and
+    WriteModel among their Variants."""
     checked: dict[Union, _CheckedUnion] = {}
     for union in unions:
-        checked[union] = _check_union(union, views, payloads, checked)
+        checked[union] = _check_union(union, views, write_models, checked)
     return tuple(checked.values())
 
 
 def _check_union(
     union: Union,
     views: Mapping[View, CompiledView | PoisonedView],
-    payloads: Mapping[Payload, CompiledPayload | PoisonedPayload],
+    write_models: Mapping[WriteModel, CompiledWriteModel | PoisonedWriteModel],
     unions: Mapping[Union, _CheckedUnion],
 ) -> _CheckedUnion:
     """Checks the Union's name, that its Variants are all Views or Unions of them
-    over one Source, or all Payloads or Unions of them, and their Tags.
+    over one from_model, or all WriteModels or Unions of them, and their Tags.
 
     A Variant that did not compile is left out of the checks, so the Variants
     that did are still checked.
     """
-    variants = _SortedVariants.of(union, views, payloads, unions)
+    variants = _SortedVariants.of(union, views, write_models, unions)
     mixed = variants.kind_diagnostics(union)
     # Variants mixing kinds are reported once, and only the Views checked further.
-    tagged = (*variants.compiled_views, *(() if mixed else variants.compiled_payloads))
+    tagged = (
+        *variants.compiled_views,
+        *(() if mixed else variants.compiled_write_models),
+    )
     reported: list[diagnostics.CompileDiagnostic] = [
         *mixed,
         *_tag_diagnostics(union, tagged),
         *_unreachable_diagnostics(union, variants.compiled_views),
     ]
-    sources = tuple(variant.source for variant in variants.compiled_views)
-    if len(set(sources)) > 1:
+    from_models = tuple(variant.from_model for variant in variants.compiled_views)
+    if len(set(from_models)) > 1:
         reported.append(
-            diagnostics.VariantSourcesDiffer(
+            diagnostics.VariantFromModelsDiffer(
                 view=union.name,
                 variants=tuple(variant.name for variant in variants.compiled_views),
-                sources=tuple(ir.SourceName(source.__name__) for source in sources),
+                from_models=tuple(
+                    ir.FromModelName(from_model.__name__) for from_model in from_models
+                ),
             )
         )
     match UnionModelNames.check(union.name):
@@ -1309,16 +1338,16 @@ def _check_union(
     if variants.failed:
         return BlockedUnion(name=union.name)
     # Without a kind diagnostic, the Variants are all of one kind.
-    if variants.compiled_payloads:
-        return CompiledPayloadUnion(
+    if variants.compiled_write_models:
+        return CompiledWriteModelUnion(
             name=union.name,
             discriminator=union.discriminator,
-            variants=variants.compiled_payloads,
+            variants=variants.compiled_write_models,
             model=names.model,
         )
     return CompiledUnion(
         name=union.name,
-        source=sources[0],
+        from_model=from_models[0],
         discriminator=union.discriminator,
         variants=variants.compiled_views,
         names=names,
@@ -1327,58 +1356,60 @@ def _check_union(
 
 class _SortedVariants(pydantic.BaseModel, frozen=True):
     """A Union's Variants by kind: the names of the read models (Views and
-    Unions of them) and of the write models (Payloads and Unions of them); the
+    Unions of them) and of the write models (WriteModels and Unions of them); the
     checked Variants of each kind that compiled, and the names of those that did
     not. A nested Union that did not compile is of neither kind, as its kind is
     not known.
     """
 
     read_models: tuple[ViewName | UnionName, ...]
-    write_models: tuple[PayloadName | UnionName, ...]
+    write_models: tuple[WriteModelName | UnionName, ...]
     compiled_views: tuple[CompiledView | CompiledUnion, ...]
-    compiled_payloads: tuple[CompiledPayload | CompiledPayloadUnion, ...]
-    failed: tuple[ViewName | PayloadName | UnionName, ...]
+    compiled_write_models: tuple[CompiledWriteModel | CompiledWriteModelUnion, ...]
+    failed: tuple[ViewName | WriteModelName | UnionName, ...]
 
     @staticmethod
     def of(
         union: Union,
         checked_views: Mapping[View, CompiledView | PoisonedView],
-        checked_payloads: Mapping[Payload, CompiledPayload | PoisonedPayload],
+        checked_write_models: Mapping[
+            WriteModel, CompiledWriteModel | PoisonedWriteModel
+        ],
         unions: Mapping[Union, _CheckedUnion],
     ) -> _SortedVariants:
         read_models: list[ViewName | UnionName] = []
-        write_models: list[PayloadName | UnionName] = []
+        write_models: list[WriteModelName | UnionName] = []
         compiled_views: list[CompiledView | CompiledUnion] = []
-        compiled_payloads: list[CompiledPayload | CompiledPayloadUnion] = []
-        failed: list[ViewName | PayloadName | UnionName] = []
+        compiled_write_models: list[CompiledWriteModel | CompiledWriteModelUnion] = []
+        failed: list[ViewName | WriteModelName | UnionName] = []
         for variant in union.variants:
             checked: (
-                CompiledView | PoisonedView | CompiledPayload | PoisonedPayload
+                CompiledView | PoisonedView | CompiledWriteModel | PoisonedWriteModel
             ) | _CheckedUnion
             match variant:
                 case View():
                     read_models.append(variant.name)
                     checked = checked_views[variant]
-                case Payload():
+                case WriteModel():
                     write_models.append(variant.name)
-                    checked = checked_payloads[variant]
+                    checked = checked_write_models[variant]
                 case Union():
                     checked = unions[variant]
                     match checked:
                         case CompiledUnion():
                             read_models.append(variant.name)
-                        case CompiledPayloadUnion():
+                        case CompiledWriteModelUnion():
                             write_models.append(variant.name)
                         case PoisonedUnion() | BlockedUnion():
                             pass
             match checked:
                 case CompiledView() | CompiledUnion():
                     compiled_views.append(checked)
-                case CompiledPayload() | CompiledPayloadUnion():
-                    compiled_payloads.append(checked)
+                case CompiledWriteModel() | CompiledWriteModelUnion():
+                    compiled_write_models.append(checked)
                 case (
                     PoisonedView()
-                    | PoisonedPayload()
+                    | PoisonedWriteModel()
                     | PoisonedUnion()
                     | BlockedUnion()
                 ):
@@ -1387,18 +1418,20 @@ class _SortedVariants(pydantic.BaseModel, frozen=True):
             read_models=tuple(read_models),
             write_models=tuple(write_models),
             compiled_views=tuple(compiled_views),
-            compiled_payloads=tuple(compiled_payloads),
+            compiled_write_models=tuple(compiled_write_models),
             failed=tuple(failed),
         )
 
     def kind_diagnostics(
         self, union: Union
-    ) -> tuple[diagnostics.ViewsMixedWithPayloads, ...]:
+    ) -> tuple[diagnostics.ViewsMixedWithWriteModels, ...]:
         """Why the Variants are not all of one kind, if they are not."""
         if self.read_models and self.write_models:
             return (
-                diagnostics.ViewsMixedWithPayloads(
-                    view=union.name, views=self.read_models, payloads=self.write_models
+                diagnostics.ViewsMixedWithWriteModels(
+                    view=union.name,
+                    views=self.read_models,
+                    write_models=self.write_models,
                 ),
             )
         return ()
@@ -1426,19 +1459,19 @@ member, a string or an integer."""
 
 
 type _CompiledVariant = (
-    CompiledView | CompiledUnion | CompiledPayload | CompiledPayloadUnion
+    CompiledView | CompiledUnion | CompiledWriteModel | CompiledWriteModelUnion
 )
 
 
 def _tag_diagnostics(
     union: Union, variants: Iterable[_CompiledVariant]
 ) -> tuple[diagnostics.CompileDiagnostic, ...]:
-    """A diagnostic per View or Payload with no Tag for the Union's
+    """A diagnostic per View or WriteModel with no Tag for the Union's
     Discriminator, per nested Union whose leaves have several, and per Tag
     several Variants share."""
     reported: list[diagnostics.CompileDiagnostic] = []
     # By the value, as pydantic tells Tags apart: a `StrEnum` member is its string.
-    tagged: dict[object, list[ViewName | PayloadName | UnionName]] = {}
+    tagged: dict[object, list[ViewName | WriteModelName | UnionName]] = {}
     for variant in variants:
         leaves = variant.leaves()
         found: list[Tag] = []
@@ -1454,7 +1487,7 @@ def _tag_diagnostics(
                     found.append(tag)
         distinct = tuple({tag.value(): tag for tag in found}.values())
         if len(distinct) > 1 and isinstance(
-            variant, CompiledUnion | CompiledPayloadUnion
+            variant, CompiledUnion | CompiledWriteModelUnion
         ):
             reported.append(
                 diagnostics.NestedUnionTagsDiffer(
@@ -1480,14 +1513,14 @@ def _tag_diagnostics(
 
 
 def _tag(
-    union: Union, leaf: CompiledView | CompiledPayload
+    union: Union, leaf: CompiledView | CompiledWriteModel
 ) -> (
     Tag
     | diagnostics.VariantWithoutDiscriminator
     | diagnostics.UntaggedVariant
     | diagnostics.DiscriminatorDefaultNotTag
 ):
-    """The Tag `leaf`, a View or a Payload, has for the Union's Discriminator: the
+    """The Tag `leaf`, a View or a WriteModel, has for the Union's Discriminator: the
     one value the field's type is a `Literal` of.
 
     The field may default to its Tag only: another default, such as `MISSING`,

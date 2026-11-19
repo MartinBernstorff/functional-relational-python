@@ -23,7 +23,7 @@ import pydantic
 
 from functional_relational_python.entity_graph.entity_graph import FieldName
 from functional_relational_python.pipeline import ir
-from functional_relational_python.pipeline.payloads import DefinitionName
+from functional_relational_python.pipeline.write_models import DefinitionName
 
 
 class ConstraintName(pydantic.RootModel[str], frozen=True):
@@ -81,5 +81,5 @@ type Constraint = Check | Unique
 
 
 type ConditionOwner = DefinitionName | ConstraintName
-"""What a Condition belongs to: the View or Payload whose `where` it is, or the
+"""What a Condition belongs to: the View or WriteModel whose `where` it is, or the
 constraint it states."""

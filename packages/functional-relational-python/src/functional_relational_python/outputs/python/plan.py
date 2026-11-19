@@ -1,8 +1,8 @@
-"""Plans the Python output of compiled Views, Payloads and Unions: what each
+"""Plans the Python output of compiled Views, WriteModels and Unions: what each
 generated name refers to.
 
-For each View and Payload the plan decides its model's Symbol and the Symbols of
-the models nested in it, and for each Union, of Views or of Payloads, the Symbol
+For each View and WriteModel the plan decides its model's Symbol and the Symbols of
+the models nested in it, and for each Union, of Views or of WriteModels, the Symbol
 of its model, a `type` alias. For each View and Union of Views, when the layout
 asks for them, it also decides its mapping function's Symbol and lookup
 parameters. Every problem that depends on where things are generated (a name
@@ -39,12 +39,12 @@ from functional_relational_python.outputs.python.symbols import (
     ValueExpression,
 )
 from functional_relational_python.pipeline import ir
-from functional_relational_python.pipeline.payloads import (
-    DefinitionName,
-    PayloadName,
-)
 from functional_relational_python.pipeline.unions import UnionName
 from functional_relational_python.pipeline.views import ViewName
+from functional_relational_python.pipeline.write_models import (
+    DefinitionName,
+    WriteModelName,
+)
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,
@@ -56,29 +56,29 @@ if typing.TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
 type MetadataValue = object
-"""An object a model's source writes as an expression: an object after the type in
+"""An object a model's from_model writes as an expression: an object after the type in
 `Annotated[X, ...]`, a value in one, e.g. the `0` in `Gt(0)`, or a `Literal`
 argument."""
 
 type ModuleLayout = Callable[
     [
         compiler.CompiledView
-        | compiler.CompiledPayload
+        | compiler.CompiledWriteModel
         | compiler.CompiledUnion
-        | compiler.CompiledPayloadUnion
+        | compiler.CompiledWriteModelUnion
     ],
     ModulePath,
 ]
-"""Maps each compiled View, Payload or Union to the module something of it is
+"""Maps each compiled View, WriteModel or Union to the module something of it is
 generated into. Only Views and Unions of Views have mapping functions, so a
 layout for mappings receives only those."""
 
 
 type _Placed = (
     compiler.CompiledView
-    | compiler.CompiledPayload
+    | compiler.CompiledWriteModel
     | compiler.CompiledUnion
-    | compiler.CompiledPayloadUnion
+    | compiler.CompiledWriteModelUnion
 )
 """Anything a layout places."""
 
@@ -103,8 +103,8 @@ class ReturnedText(pydantic.RootModel[str], frozen=True):
 
 
 class NoModuleFromLayout(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A layout returned something other than a `ModulePath` for a View, Payload
-    or Union, e.g. `None` from a layout that does not handle Unions of Payloads."""
+    """A layout returned something other than a `ModulePath` for a View, WriteModel
+    or Union, e.g. `None` from a layout that does not handle Unions of WriteModels."""
 
     definition: DefinitionName | UnionName
     role: LayoutRole
@@ -126,12 +126,12 @@ class NoModuleFromLayout(pydantic.BaseModel, Diagnostic, frozen=True):
         return DiagnosticMessage(
             f"{self.definition.root}: the {self.role.value} layout returned "
             f"{self.returned.root} for it, not a ModulePath. A layout returns a "
-            "ModulePath for every View, Payload and Union it receives."
+            "ModulePath for every View, WriteModel and Union it receives."
         )
 
 
 class PlacedModels(pydantic.BaseModel, frozen=True):
-    """The module a models layout gives each View's, Payload's and Union's model,
+    """The module a models layout gives each View's, WriteModel's and Union's model,
     checked once, so that every output places the models alike and a layout's
     defects are reported once."""
 
@@ -161,9 +161,9 @@ class PlacedModels(pydantic.BaseModel, frozen=True):
             layout,
             (
                 *catalog.views,
-                *catalog.payloads,
+                *catalog.write_models,
                 *catalog.unions,
-                *catalog.payload_unions,
+                *catalog.write_model_unions,
             ),
         )
 
@@ -174,7 +174,7 @@ class PlacedModels(pydantic.BaseModel, frozen=True):
 
 
 class PythonLayout(pydantic.BaseModel, frozen=True):
-    """Where each View's and Payload's model, and each View's mapping function,
+    """Where each View's and WriteModel's model, and each View's mapping function,
     are generated."""
 
     models: ModuleLayout
@@ -191,25 +191,25 @@ class PythonLayout(pydantic.BaseModel, frozen=True):
 
         def into(
             _: compiler.CompiledView
-            | compiler.CompiledPayload
+            | compiler.CompiledWriteModel
             | compiler.CompiledUnion
-            | compiler.CompiledPayloadUnion,
+            | compiler.CompiledWriteModelUnion,
         ) -> ModulePath:
             return mappings
 
         return PythonLayout(models=models, mappings=into)
 
     def model_of(self, compiled: _Placed) -> Symbol | NoModuleFromLayout:
-        """The Symbol of a View's, Payload's or Union's own model, or why the
+        """The Symbol of a View's, WriteModel's or Union's own model, or why the
         layout gives it no module."""
         match compiled:
             case compiler.CompiledView(names=names):
                 name = names.model.name
-            case compiler.CompiledPayload(names=names):
+            case compiler.CompiledWriteModel(names=names):
                 name = names.name
             case compiler.CompiledUnion(names=names):
                 name = names.model
-            case compiler.CompiledPayloadUnion(model=name):
+            case compiler.CompiledWriteModelUnion(model=name):
                 pass
         match NoModuleFromLayout.check(self.models, LayoutRole.MODELS, compiled):
             case NoModuleFromLayout() as unplaced:
@@ -224,7 +224,7 @@ class Scope(pydantic.RootModel[str], frozen=True):
 
 
 class GeneratedIntoDefiningModule(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View's or Payload's model, or a View's mapping function, would be
+    """A View's or WriteModel's model, or a View's mapping function, would be
     generated into a module that defines classes it uses, overwriting their
     definitions."""
 
@@ -241,7 +241,7 @@ class GeneratedIntoDefiningModule(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class _DefinitionsUsed:
-    """The classes a View's or Payload's model, or a View's mapping function, uses
+    """The classes a View's or WriteModel's model, or a View's mapping function, uses
     that the module it is generated into defines. Generating would overwrite their
     definitions."""
 
@@ -318,12 +318,12 @@ class UnsupportedMetadata(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class Unimportable(pydantic.BaseModel, Diagnostic, frozen=True):
-    """Generated source would import something it cannot import by its module and
-    name, e.g. a class defined in a function: a field's type, the base, the Source,
+    """Generated from_model would import something it cannot import by its module and
+    name, e.g. a class defined in a function: a field's type, the base, the from_model,
     or an Entity the View looks up or its ID type.
 
     `field` is the field typed by it, or `None` when no model field is: the base,
-    the Source, or what only a mapping function's parameters refer to.
+    the from_model, or what only a mapping function's parameters refer to.
     """
 
     view: DefinitionName
@@ -359,7 +359,7 @@ class NameClash(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class ModelsAndMappingsInOneModule(pydantic.BaseModel, Diagnostic, frozen=True):
-    """The layout generates View or Payload models and mapping functions into one
+    """The layout generates View or WriteModel models and mapping functions into one
     module, so one file would overwrite the other."""
 
     module: ModulePath
@@ -436,7 +436,7 @@ class ModelPlan(pydantic.BaseModel, frozen=True):
             case ir.RequiredField() | ir.Lifted(field=ir.RequiredField()):
                 return True
             case (
-                ir.SourceField()
+                ir.SubjectField()
                 | ir.Added()
                 | ir.Lifted()
                 | ir.Lookup()
@@ -485,10 +485,10 @@ class UnionPlan(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def of(
-        union: compiler.CompiledUnion | compiler.CompiledPayloadUnion,
+        union: compiler.CompiledUnion | compiler.CompiledWriteModelUnion,
         layout: PythonLayout,
     ) -> Result[UnionPlan, DiagnosticsError[NoModuleFromLayout]]:
-        """The model of a Union of Views or of Payloads, where `layout` puts it,
+        """The model of a Union of Views or of WriteModels, where `layout` puts it,
         or why the layout gives it or a Variant's model no module."""
         placed = (layout.model_of(union), *map(layout.model_of, union.variants))
         symbols = [symbol for symbol in placed if isinstance(symbol, Symbol)]
@@ -529,19 +529,19 @@ class LookupParameter(pydantic.BaseModel, frozen=True):
 
 
 class MappingFunctionPlan(pydantic.BaseModel, frozen=True):
-    """What every mapping function to generate has: its Symbol, the Source it
+    """What every mapping function to generate has: its Symbol, the from_model it
     maps, and its keyword parameters, an ID mapping per Entity and field it looks
     up."""
 
     symbol: Symbol
-    source: Symbol
+    from_model: Symbol
     lookups: tuple[LookupParameter, ...]
 
     def parameter_imports(self) -> frozenset[ModulePath]:
         """The modules the function's parameters refer to, each imported whole."""
         return frozenset(
             {
-                self.source.module,
+                self.from_model.module,
                 *(parameter.target.module for parameter in self.lookups),
                 *(parameter.id_type.module for parameter in self.lookups),
                 *((FunctionPlan.mapping,) if self.lookups else ()),
@@ -553,7 +553,7 @@ class MappingFunctionPlan(pydantic.BaseModel, frozen=True):
 
 
 class FunctionPlan(MappingFunctionPlan, frozen=True):
-    """One mapping function to generate: from one instance of the View's Source,
+    """One mapping function to generate: from one instance of the View's from_model,
     and an ID mapping per Entity and field it looks up, to the View's model, or to
     `None` for a row the View's Filters exclude.
 
@@ -589,7 +589,7 @@ class FunctionPlan(MappingFunctionPlan, frozen=True):
             )
         )
         for named in (
-            view.source,
+            view.from_model,
             *(t for lookup in lookups for t in (lookup.target, lookup.id_type)),
             *literal_types,
         ):
@@ -613,7 +613,7 @@ class FunctionPlan(MappingFunctionPlan, frozen=True):
                 symbol=Symbol(
                     module=module, qualname=(Identifier(view.names.function.root),)
                 ),
-                source=symbols[view.source],
+                from_model=symbols[view.from_model],
                 model=model,
                 lookups=tuple(
                     LookupParameter(
@@ -651,9 +651,9 @@ class FunctionPlan(MappingFunctionPlan, frozen=True):
                 return FunctionPlan._literal_types(term)
 
     @staticmethod
-    def _classes_of(operand: ir.SourceField | ir.FilterLiteral) -> tuple[type, ...]:
+    def _classes_of(operand: ir.SubjectField | ir.FilterLiteral) -> tuple[type, ...]:
         match operand:
-            case ir.SourceField() | ir.ScalarLiteral():
+            case ir.SubjectField() | ir.ScalarLiteral():
                 return ()
             case ir.EnumLiteral(member=member):
                 return (type(member),)
@@ -690,14 +690,14 @@ class FunctionPlan(MappingFunctionPlan, frozen=True):
 
 class VariantCall(pydantic.BaseModel, frozen=True):
     """A call of a Variant's mapping function from a Union's: `function`, passed
-    the Source and each of `lookups`, its keyword parameters, by name."""
+    the from_model and each of `lookups`, its keyword parameters, by name."""
 
     function: Symbol
     lookups: tuple[Identifier, ...]
 
 
 class UnionFunctionPlan(MappingFunctionPlan, frozen=True):
-    """One Union's mapping function to generate: from one instance of the Source
+    """One Union's mapping function to generate: from one instance of the from_model
     its Variants read, and the lookup parameters of every Variant's mapping
     function, to the model of the first Variant whose function maps it, or to
     `None` when none does.
@@ -726,7 +726,7 @@ class UnionFunctionPlan(MappingFunctionPlan, frozen=True):
             symbol=Symbol(
                 module=module, qualname=(Identifier(union.names.function.root),)
             ),
-            source=variants[0].source,
+            from_model=variants[0].from_model,
             model=model,
             lookups=tuple(
                 dict.fromkeys(
@@ -1000,14 +1000,14 @@ class _AnnotationRenderer:
 
 
 class _PlannedModel(pydantic.BaseModel, frozen=True):
-    """A View's or Payload's model, planned even when that found problems."""
+    """A View's or WriteModel's model, planned even when that found problems."""
 
     plan: ModelPlan
     diagnostics: tuple[PlanDiagnostic, ...]
 
 
 class _ModelPlanner:
-    """Plans the model of one View or Payload, and one per nested resolved field."""
+    """Plans the model of one View or WriteModel, and one per nested resolved field."""
 
     def __init__(
         self,
@@ -1023,16 +1023,16 @@ class _ModelPlanner:
 
     @staticmethod
     def definition_model(
-        compiled: compiler.CompiledView | compiler.CompiledPayload,
+        compiled: compiler.CompiledView | compiler.CompiledWriteModel,
         module: ModulePath,
         one_to_one_marker: OneToOneMarker,
     ) -> _PlannedModel:
         planner = _ModelPlanner(compiled.name, module, one_to_one_marker)
-        planner.used.use(compiled.source)
+        planner.used.use(compiled.from_model)
         match compiled:
             case compiler.CompiledView(names=names):
                 plan = planner.plan(names.model, compiled.relation, compiled.base)
-            case compiler.CompiledPayload(names=names):
+            case compiler.CompiledWriteModel(names=names):
                 plan = planner.plan(names, compiled.relation, compiled.base)
         return _PlannedModel(
             plan=plan,
@@ -1117,15 +1117,15 @@ class _PlannedUnions(pydantic.BaseModel, frozen=True):
     @staticmethod
     def of(
         unions: Iterable[compiler.CompiledUnion],
-        payload_unions: Iterable[compiler.CompiledPayloadUnion],
+        write_model_unions: Iterable[compiler.CompiledWriteModelUnion],
         layout: PythonLayout,
         mapped: Mapping[ViewName | UnionName, FunctionPlan | UnionFunctionPlan],
     ) -> _PlannedUnions:
-        """`unions` and `payload_unions` have each Union after those nested in
+        """`unions` and `write_model_unions` have each Union after those nested in
         it, and `mapped` the planned mapping function of each View.
 
         A Union gets no mapping function when a Variant's could not be planned,
-        which is reported already. A Union of Payloads gets none at all. A Union
+        which is reported already. A Union of WriteModels gets none at all. A Union
         the layout gives no module is reported, and gets neither.
         """
         functions_of = dict(mapped)
@@ -1160,8 +1160,8 @@ class _PlannedUnions(pydantic.BaseModel, frozen=True):
                     function = UnionFunctionPlan.of(union, symbol, module, variants)
                     functions.setdefault(function.symbol.module, []).append(function)
                     functions_of[union.name] = function
-        for payload_union in payload_unions:
-            match UnionPlan.of(payload_union, layout):
+        for write_model_union in write_model_unions:
+            match UnionPlan.of(write_model_union, layout):
                 case Ok(planned):
                     models.setdefault(planned.symbol.module, []).append(planned)
                 case Err(error):
@@ -1175,10 +1175,10 @@ class _PlannedUnions(pydantic.BaseModel, frozen=True):
 
 class PythonPlan(pydantic.BaseModel, frozen=True):
     """Every model and mapping function to generate, by module: View models in
-    View order, then Payload models in Payload order, then the models of Unions of
-    Views, then of Unions of Payloads, each Union after the Unions nested in it.
+    View order, then WriteModel models in WriteModel order, then the models of Unions of
+    Views, then of Unions of WriteModels, each Union after the Unions nested in it.
 
-    `models` holds each View's and Payload's own model; its nested models are in
+    `models` holds each View's and WriteModel's own model; its nested models are in
     it. `unions` holds each Union's model, and `union_functions` each Union of
     Views' mapping function. `requiring` are the modules of mapping functions that read
     a value a View requires, so they define `FunctionPlan.required_helper`.
@@ -1207,7 +1207,7 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
         cannot import is reported for that field only, not again for the mapping
         function that looks it up. Models leave the catalog's one-to-one markers out.
 
-        A View, Payload or Union the layout gives no `ModulePath` is reported, and
+        A View, WriteModel or Union the layout gives no `ModulePath` is reported, and
         not planned."""
         diagnostics: dict[PlanDiagnostic, None] = {}
         models: dict[ModulePath, list[ModelPlan]] = {}
@@ -1254,20 +1254,22 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
                             or diagnostic.annotation not in unimportable_fields
                         )
                     )
-        for payload in compiled.payloads:
-            match NoModuleFromLayout.check(layout.models, LayoutRole.MODELS, payload):
+        for write_model in compiled.write_models:
+            match NoModuleFromLayout.check(
+                layout.models, LayoutRole.MODELS, write_model
+            ):
                 case NoModuleFromLayout() as unplaced:
                     diagnostics[unplaced] = None
                     continue
                 case module:
                     pass
             model = _ModelPlanner.definition_model(
-                payload, module, compiled.one_to_one_marker
+                write_model, module, compiled.one_to_one_marker
             )
             diagnostics.update(dict.fromkeys(model.diagnostics))
             models.setdefault(model.plan.symbol.module, []).append(model.plan)
         unions = _PlannedUnions.of(
-            compiled.unions, compiled.payload_unions, layout, mapped
+            compiled.unions, compiled.write_model_unions, layout, mapped
         )
         diagnostics.update(dict.fromkeys(unions.diagnostics))
         plan = PythonPlan(
@@ -1315,8 +1317,8 @@ class PythonPlan(pydantic.BaseModel, frozen=True):
             match model.view:
                 case ViewName():
                     definition = f"View {model.view.root}"
-                case PayloadName():
-                    definition = f"Payload {model.view.root}"
+                case WriteModelName():
+                    definition = f"WriteModel {model.view.root}"
             defined.append(
                 (model.symbol, AnnotationText(f"the model of {definition}"), model.uses)
             )
@@ -1394,7 +1396,7 @@ class Namespace:
         namespace.define(
             FunctionPlan.source_parameter,
             AnnotationText(
-                f"the parameter for the Source {function.source.describe().root}"
+                f"the parameter for the from_model {function.from_model.describe().root}"
             ),
         )
         for parameter in function.lookups:
@@ -1413,7 +1415,7 @@ class Namespace:
         namespace.define(
             FunctionPlan.source_parameter,
             AnnotationText(
-                f"the parameter for the Source {function.source.describe().root}"
+                f"the parameter for the from_model {function.from_model.describe().root}"
             ),
         )
         for parameter in function.lookups:

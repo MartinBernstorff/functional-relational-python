@@ -3,8 +3,8 @@ from typing import Annotated
 import pydantic
 
 from functional_relational_python.entity_graph.entity_graph import FieldName
-from functional_relational_python.pipeline.payloads import Payload
 from functional_relational_python.pipeline.views import View
+from functional_relational_python.pipeline.write_models import WriteModel
 
 
 class UnionName(pydantic.RootModel[str], frozen=True):
@@ -14,7 +14,7 @@ class UnionName(pydantic.RootModel[str], frozen=True):
 
 
 class Union(pydantic.BaseModel, frozen=True):
-    """A tagged union of Views, or of Payloads: a name, a Discriminator and the
+    """A tagged union of Views, or of WriteModels: a name, a Discriminator and the
     Variants.
 
     Its model is `Annotated[A | B, Discriminator("<discriminator>")]`, named
@@ -24,22 +24,22 @@ class Union(pydantic.BaseModel, frozen=True):
 
     A Union of Views has Views and nested Unions of Views as Variants. Each View
     generates its own model and mapping function as if the Catalog listed it, and
-    so does each nested Union. Every Variant reads one Source. A Source row gives
+    so does each nested Union. Every Variant reads one from_model. A from_model row gives
     the result of the first Variant, in order, whose Filters keep it; a row no
-    Variant keeps gives no result. A Variant's Tag is a Source column its `where`
+    Variant keeps gives no result. A Variant's Tag is a from_model column its `where`
     narrows with `==`, or a field `add` declares.
 
-    A Union of Payloads has Payloads and nested Unions of Payloads as Variants,
-    which may read different Sources. Each Payload generates its own model as if
-    the Catalog listed it. A Union of Payloads is a write model, so it generates
-    only its model, no mapping function. A Payload has no Filters, so its Tag is
+    A Union of WriteModels has WriteModels and nested Unions of WriteModels as Variants,
+    which may read different from_models. Each WriteModel generates its own model as if
+    the Catalog listed it. A Union of WriteModels is itself a WriteModel, so it generates
+    only its model, no mapping function. A WriteModel has no Filters, so its Tag is
     a field `retype_to` types, or `add` declares, as a `Literal` of one value.
     """
 
     name: UnionName
     discriminator: FieldName
     variants: Annotated[
-        tuple[View | Payload | Union, ...], pydantic.Field(min_length=2)
+        tuple[View | WriteModel | Union, ...], pydantic.Field(min_length=2)
     ]
 
     def unions(self) -> tuple[Union, ...]:
@@ -60,15 +60,17 @@ class Union(pydantic.BaseModel, frozen=True):
             dict.fromkeys(leaf for leaf in self.leaves() if isinstance(leaf, View))
         )
 
-    def payloads(self) -> tuple[Payload, ...]:
-        """The Payloads among this Union's Variants and those of the Unions nested
+    def write_models(self) -> tuple[WriteModel, ...]:
+        """The WriteModels among this Union's Variants and those of the Unions nested
         in it, in Variant order, once each."""
         return tuple(
-            dict.fromkeys(leaf for leaf in self.leaves() if isinstance(leaf, Payload))
+            dict.fromkeys(
+                leaf for leaf in self.leaves() if isinstance(leaf, WriteModel)
+            )
         )
 
-    def leaves(self) -> tuple[View | Payload, ...]:
-        """The Views and Payloads among this Union's Variants and those of the
+    def leaves(self) -> tuple[View | WriteModel, ...]:
+        """The Views and WriteModels among this Union's Variants and those of the
         Unions nested in it, in Variant order."""
         return tuple(
             leaf

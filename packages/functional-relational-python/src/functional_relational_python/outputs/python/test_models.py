@@ -34,13 +34,13 @@ from functional_relational_python.outputs.python.plan import (
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import FirstParty, ModulePath
 from functional_relational_python.pipeline import conditions, ir, steps
-from functional_relational_python.pipeline.payloads import (
-    DefinitionName,
-    Payload,
-    PayloadName,
-)
 from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
+from functional_relational_python.pipeline.write_models import (
+    DefinitionName,
+    WriteModel,
+    WriteModelName,
+)
 from functional_relational_python.support.filesystem import (
     Directory,
     FileText,
@@ -75,20 +75,21 @@ class Outer(pydantic.BaseModel):
 
 def compile_catalog(
     views: Sequence[View],
-    payloads: Sequence[Payload],
+    write_models: Sequence[WriteModel],
     unions: Sequence[Union] = (),
 ) -> compiler.CompiledCatalog:
     return compiler.compile_catalog(
         EntityGraph.build([Company], IdBase.fake(), OneToOneMarker.fake()).unwrap(),
         views,
-        payloads,
+        write_models,
         unions,
     ).unwrap()
 
 
-def view(source: type[pydantic.BaseModel]) -> View:
+def view(from_model: type[pydantic.BaseModel]) -> View:
     return View(
-        name=ViewName(f"{source.__name__}View"), source=source, step=steps.pipeline()
+        name=ViewName(f"{from_model.__name__}View"),
+        query=steps.from_(from_model),
     )
 
 
@@ -98,12 +99,12 @@ def single_module(module: ModulePath) -> ModuleLayout:
 
 def generate(
     views: Sequence[View],
-    payloads: Sequence[Payload],
+    write_models: Sequence[WriteModel],
     layout: ModuleLayout,
     unions: Sequence[Union] = (),
 ) -> GeneratedFiles:
     match PythonPlan.of(
-        compile_catalog(views, payloads, unions),
+        compile_catalog(views, write_models, unions),
         PythonLayout.models_only(layout),
     ):
         case Ok(plan):
@@ -117,8 +118,13 @@ def generate(
 
 def test_a_model_module_imports_as_ruff_sorts_them() -> None:
     files = generate(
-        [View(name=ViewName("CompanyFull"), source=Company, step=steps.pipeline())],
-        [update_payload()],
+        [
+            View(
+                name=ViewName("CompanyFull"),
+                query=steps.from_(Company),
+            )
+        ],
+        [update_write_model()],
         single_module(ModulePath.fake()),
     )
 
@@ -133,8 +139,7 @@ def test_golden_view_model() -> None:
         [
             View(
                 name=ViewName("CompanySummary"),
-                source=Company,
-                step=steps.omit(FieldName("secret")),
+                query=steps.from_(Company, steps.omit(FieldName("secret"))),
             )
         ],
         [],
@@ -164,20 +169,20 @@ class CompanySummary(BaseModel, frozen=True):
     )
 
 
-def test_golden_payload_model_next_to_a_view_model() -> None:
+def test_golden_write_model_model_next_to_a_view_model() -> None:
     files = generate(
         [
             View(
                 name=ViewName("CompanySummary"),
-                source=Company,
-                step=steps.project([FieldName("name")]),
+                query=steps.from_(Company, steps.project([FieldName("name")])),
             )
         ],
         [
-            Payload(
-                name=PayloadName("CompanyCreate"),
-                source=Company,
-                step=steps.project([FieldName("name"), FieldName("tags")]),
+            WriteModel(
+                name=WriteModelName("CompanyCreate"),
+                query=steps.from_(
+                    Company, steps.project([FieldName("name"), FieldName("tags")])
+                ),
             )
         ],
         single_module(ModulePath("app.models")),
@@ -205,12 +210,12 @@ class CompanyCreate(BaseModel, frozen=True):
     )
 
 
-def update_payload() -> Payload:
+def update_write_model() -> WriteModel:
     """Every field widened with `MISSING`, so an update may leave it out."""
-    return Payload(
-        name=PayloadName("CompanyPatch"),
-        source=Company,
-        step=steps.pipeline(
+    return WriteModel(
+        name=WriteModelName("CompanyPatch"),
+        query=steps.from_(
+            Company,
             steps.project([FieldName("name"), FieldName("parent"), FieldName("tags")]),
             steps.retype(
                 steps.select(lambda _: True), lambda annotation: annotation | MISSING
@@ -219,8 +224,8 @@ def update_payload() -> Payload:
     )
 
 
-def test_golden_payload_model_with_fields_widened_by_missing() -> None:
-    files = generate([], [update_payload()], single_module(ModulePath.fake()))
+def test_golden_write_model_model_with_fields_widened_by_missing() -> None:
+    files = generate([], [update_write_model()], single_module(ModulePath.fake()))
 
     assert files.files[0].text == FileText(
         """\
@@ -248,27 +253,29 @@ class PutModel[K](pydantic.BaseModel):
     id: K
 
 
-def base_payloads() -> list[Payload]:
-    """A Payload whose model inherits `name` from a plain base, and one whose
+def base_write_models() -> list[WriteModel]:
+    """A WriteModel whose model inherits `name` from a plain base, and one whose
     model inherits `id` from a generic base."""
     return [
-        Payload(
-            name=PayloadName("CompanyCreate"),
-            source=Company,
-            step=steps.project([FieldName("name"), FieldName("tags")]),
+        WriteModel(
+            name=WriteModelName("CompanyCreate"),
+            query=steps.from_(
+                Company, steps.project([FieldName("name"), FieldName("tags")])
+            ),
             base=NamedBase,
         ),
-        Payload(
-            name=PayloadName("CompanyUpdate"),
-            source=Company,
-            step=steps.project([FieldName("id"), FieldName("kind")]),
+        WriteModel(
+            name=WriteModelName("CompanyUpdate"),
+            query=steps.from_(
+                Company, steps.project([FieldName("id"), FieldName("kind")])
+            ),
             base=PutModel[CompanyId],
         ),
     ]
 
 
 def test_golden_models_with_a_plain_and_a_generic_base() -> None:
-    files = generate([], base_payloads(), single_module(ModulePath("app.models")))
+    files = generate([], base_write_models(), single_module(ModulePath("app.models")))
 
     assert files.files[0].text == FileText(
         """\
@@ -301,14 +308,15 @@ class ParentBase(pydantic.BaseModel):
 
 def test_a_field_the_base_declares_is_declared_again_to_set_its_default() -> None:
     parent = FieldName("parent")
-    payload = Payload(
-        name=PayloadName("CompanyCreate"),
-        source=Company,
-        step=steps.pipeline(steps.project([parent]), steps.default(parent, None)),
+    write_model = WriteModel(
+        name=WriteModelName("CompanyCreate"),
+        query=steps.from_(
+            Company, steps.project([parent]), steps.default(parent, None)
+        ),
         base=ParentBase,
     )
 
-    text = generate([], [payload], single_module(ModulePath.fake())).files[0].text
+    text = generate([], [write_model], single_module(ModulePath.fake())).files[0].text
 
     assert "    parent: CompanyId | None = None\n" in text.root
 
@@ -317,8 +325,8 @@ def test_nested_models_subclass_the_default_base() -> None:
     parent = steps.select(lambda field: field.name == FieldName("parent"))
     tree = View(
         name=ViewName("CompanyTree"),
-        source=Company,
-        step=steps.pipeline(
+        query=steps.from_(
+            Company,
             steps.project([FieldName("name"), FieldName("parent")]),
             steps.resolve(parent, steps.project([FieldName("tags")])),
         ),
@@ -335,8 +343,8 @@ def tagged_view() -> View:
     """A View with an added literal tag, as for a tagged union."""
     return View(
         name=ViewName("CompanyTagged"),
-        source=Company,
-        step=steps.pipeline(
+        query=steps.from_(
+            Company,
             steps.project([FieldName("name")]),
             steps.add(FieldName("type"), Literal["company"], default="company"),
         ),
@@ -347,10 +355,10 @@ def test_golden_added_fields() -> None:
     files = generate(
         [tagged_view()],
         [
-            Payload(
-                name=PayloadName("CompanyCreate"),
-                source=Company,
-                step=steps.pipeline(
+            WriteModel(
+                name=WriteModelName("CompanyCreate"),
+                query=steps.from_(
+                    Company,
                     steps.project([FieldName("name")]),
                     steps.add(FieldName("note"), Text | None),
                 ),
@@ -389,16 +397,16 @@ def hydrated_views() -> list[View]:
     return [
         View(
             name=ViewName("CompanyWithParent"),
-            source=Company,
-            step=steps.pipeline(
+            query=steps.from_(
+                Company,
                 steps.project([FieldName("id"), FieldName("parent")]),
                 steps.hydrate(),
             ),
         ),
         View(
             name=ViewName("CompanyTree"),
-            source=Company,
-            step=steps.pipeline(
+            query=steps.from_(
+                Company,
                 steps.project([FieldName("id"), FieldName("parent")]),
                 steps.resolve(parent, steps.project([FieldName("name")])),
             ),
@@ -443,8 +451,14 @@ def test_golden_nested_class_and_empty_model() -> None:
     omit_inner = steps.omit(FieldName("inner"))
     files = generate(
         [
-            View(name=ViewName("WithInner"), source=Outer, step=steps.pipeline()),
-            View(name=ViewName("Empty"), source=Outer, step=omit_inner),
+            View(
+                name=ViewName("WithInner"),
+                query=steps.from_(Outer),
+            ),
+            View(
+                name=ViewName("Empty"),
+                query=steps.from_(Outer, omit_inner),
+            ),
         ],
         [],
         single_module(ModulePath.fake()),
@@ -608,9 +622,10 @@ def test_golden_default(case: DefaultCase) -> None:
         [
             View(
                 name=ViewName("Defaulted"),
-                source=Settings,
-                step=steps.pipeline(
-                    steps.project([case.field]), steps.default(case.field, case.value)
+                query=steps.from_(
+                    Settings,
+                    steps.project([case.field]),
+                    steps.default(case.field, case.value),
                 ),
             )
         ],
@@ -635,8 +650,8 @@ def defaulted_settings() -> View:
     """Settings with the defaults its field types allow."""
     return View(
         name=ViewName("DefaultedSettings"),
-        source=Settings,
-        step=steps.pipeline(
+        query=steps.from_(
+            Settings,
             steps.default(FieldName("note"), None),
             steps.default(FieldName("colour"), Colour.RED),
         ),
@@ -800,7 +815,7 @@ def valid_stamped() -> Stamped:
     ],
     ids=["naive", "future", "optional-future", "not-positive", "out-of-range"],
 )
-def test_a_view_model_validates_as_its_source_does(
+def test_a_view_model_validates_as_its_from_model_does(
     field: FieldName, invalid: object
 ) -> None:
     module = types.ModuleType("app_views")
@@ -814,7 +829,7 @@ def test_a_view_model_validates_as_its_source_does(
     assert [error["loc"] for error in raised.value.errors()] == [(field.root,)]
 
 
-def test_a_view_model_runs_its_sources_validators() -> None:
+def test_a_view_model_runs_its_from_models_validators() -> None:
     module = types.ModuleType("app_views")
     exec(stamped_module().root, module.__dict__)
     row = valid_stamped().model_dump() | {"label": " padded "}
@@ -836,16 +851,18 @@ def test_generated_modules_pass_the_type_checker(tmp_path: Path) -> None:
         [
             View(
                 name=ViewName("CompanySummary"),
-                source=Company,
-                step=steps.omit(FieldName("secret")),
+                query=steps.from_(Company, steps.omit(FieldName("secret"))),
             ),
-            View(name=ViewName("WithInner"), source=Outer, step=steps.pipeline()),
+            View(
+                name=ViewName("WithInner"),
+                query=steps.from_(Outer),
+            ),
             view(Stamped),
             *hydrated_views(),
             defaulted_settings(),
             tagged_view(),
         ],
-        [*base_payloads(), update_payload()],
+        [*base_write_models(), update_write_model()],
         single_module(ModulePath("generated.views")),
         [nested_company_union(), long_union(long_names(Width(30), Count(3)))],
     )
@@ -873,8 +890,8 @@ def company_variant(name: ViewName, tag: Text) -> View:
     """A View of Company tagged `tag` by an added `variant` field."""
     return View(
         name=name,
-        source=Company,
-        step=steps.pipeline(
+        query=steps.from_(
+            Company,
             steps.where(conditions.eq(conditions.field(FieldName("name")), tag)),
             steps.project([FieldName("name")]),
             test_compiler.added_tag(FieldName("variant"), test_compiler.Tag(tag.root)),
@@ -897,8 +914,8 @@ def nested_company_union() -> Union:
             variants=(
                 View(
                     name=ViewName("NamedBrand"),
-                    source=Company,
-                    step=steps.pipeline(
+                    query=steps.from_(
+                        Company,
                         steps.where(
                             conditions.eq(
                                 conditions.field(FieldName("name")), Text("Named")
@@ -911,8 +928,8 @@ def nested_company_union() -> Union:
                 ),
                 View(
                     name=ViewName("UnnamedBrand"),
-                    source=Company,
-                    step=steps.pipeline(
+                    query=steps.from_(
+                        Company,
                         steps.project([]),
                         steps.add(FieldName("variant"), Literal["brand"], "brand"),
                         steps.add(FieldName("name"), Literal["unnamed"], "unnamed"),

@@ -67,7 +67,7 @@ def retype(fields: FieldName | ir.Select, transform: ir.TypeTransform) -> Step:
     """Gives the field named `fields`, or every field `fields` selects, the type
     `transform` maps its type to.
 
-    Only a Payload may retype. E.g. an update payload widens its fields with
+    Only a WriteModel may retype. E.g. an update write model widens its fields with
     `retype(select(...), lambda annotation: annotation | MISSING)`, then defaults
     them to `MISSING`.
     """
@@ -94,7 +94,7 @@ def default(fields: FieldName | ir.Select, value: ir.UncheckedDefault) -> Step:
 
     `value` is a literal: `None`, `MISSING`, a number, a string, a boolean, an
     empty list or dict, or an enum member. A mapping still fills every field from
-    the Source; the default only appears in the model.
+    the from_model; the default only appears in the model.
     """
 
     def step(node: ir.Node) -> ir.Node:
@@ -119,11 +119,11 @@ def add(
     default: ir.UncheckedDefault = ir.NoDefault,
 ) -> Step:
     """Declares a new field `name`, typed `annotation`, with no value from the
-    Source, e.g. the literal tag of a tagged union.
+    from_model, e.g. the literal tag of a tagged union.
 
     `default` is a literal, as for `default`. A View's added field needs one: its
     mapping leaves the field out, so the model fills it with its default. In a
-    Payload it is optional.
+    WriteModel it is optional.
     """
     # The class stands for "no default given", which the overloads spell out;
     # unlike an instance, it calls nothing in the signature.
@@ -141,7 +141,7 @@ def add(
 
 
 def project(fields: Iterable[ir.FieldName]) -> Step:
-    """Keeps only `fields`, in the Source's field order."""
+    """Keeps only `fields`, in the from_model's field order."""
     kept = tuple(fields)
 
     def step(node: ir.Node) -> ir.Node:
@@ -151,10 +151,10 @@ def project(fields: Iterable[ir.FieldName]) -> Step:
 
 
 def where(condition: ir.Condition) -> Step:
-    """Keeps only the Source rows for which `condition` is true; see `conditions`.
+    """Keeps only the from_model rows for which `condition` is true; see `conditions`.
 
     Each kept row still gives one View result. Only a View's own pipeline may
-    filter, not a nested `resolve` pipeline or a Payload.
+    filter, not a nested `resolve` pipeline or a WriteModel.
     """
 
     def step(node: ir.Node) -> ir.Node:
@@ -170,7 +170,7 @@ def require(fields: FieldName | ir.Select) -> Step:
     A required Reference, resolved or reversed, holds its Entity rather than
     `None`. Requiring drops no row: a View result whose field is `None` is an
     unmet requirement, which the InMemoryViewEngine reports and a mapping function
-    raises. Requiring a field that is not optional, or in a Payload, is a
+    raises. Requiring a field that is not optional, or in a WriteModel, is a
     diagnostic.
     """
 
@@ -269,10 +269,8 @@ def is_primary_key(field: ir.RelationField) -> bool:
     subject's `id` field. A Reference renamed to `id` is not the primary key.
     """
     match field:
-        case ir.Field(
-            value=ir.SourceField(field=source) | ir.RequiredField(field=source)
-        ):
-            return source == EntityNode.primary_key
+        case ir.Field(value=ir.SubjectField(field=read) | ir.RequiredField(field=read)):
+            return read == EntityNode.primary_key
         case ir.Field() | ir.NestedField():
             return False
 
@@ -289,3 +287,35 @@ def pipeline(*steps: Step) -> Step:
         return functools.reduce(lambda acc, next_step: next_step(acc), steps, node)
 
     return step
+
+
+class Query(pydantic.BaseModel, frozen=True):
+    """A model and the steps applied to it: what a View or WriteModel reads.
+
+    Only a Query has a from_model. A nested pipeline, e.g. in `resolve`, starts
+    from the Entity it is given, so it takes Steps.
+    """
+
+    from_model: type[pydantic.BaseModel]
+    step: Step
+
+    def then(self, *steps: Step) -> Query:
+        """This query followed by `steps`, e.g. a shared filter extended by one View.
+
+        >>> active = from_(Company, where(...))
+        >>> active.then(omit(FieldName("secret")))
+        """
+        return Query(from_model=self.from_model, step=pipeline(self.step, *steps))
+
+    def node(self) -> ir.Node:
+        """The node tree the steps build over every field of `from_model`."""
+        return self.step(ir.FromModel(from_model=self.from_model))
+
+
+def from_(model: type[pydantic.BaseModel], *steps: Step) -> Query:
+    """A query over every field of `model`, followed by `steps` left to right.
+
+    `model` is any Pydantic model, often an Entity. A View over a model that is not
+    an Entity cannot be run by the InMemoryViewEngine.
+    """
+    return Query(from_model=model, step=pipeline(*steps))

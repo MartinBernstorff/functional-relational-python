@@ -21,8 +21,11 @@ from functional_relational_python.entity_graph.id import (
     OneToOneMarker,
 )
 from functional_relational_python.pipeline import conditions, ir, steps
-from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.views import View, ViewName
+from functional_relational_python.pipeline.write_models import (
+    WriteModel,
+    WriteModelName,
+)
 
 
 class Text(pydantic.RootModel[str], frozen=True):
@@ -93,7 +96,13 @@ def graph() -> EntityGraph:
 
 def compile_campaign(step: steps.Step) -> compiler.CompiledView:
     match compiler.compile_views(
-        graph(), [View(name=ViewName.fake(), source=Campaign, step=step)]
+        graph(),
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(Campaign, step),
+            )
+        ],
     ):
         case Ok(compiled):
             return compiled.views[0]
@@ -105,7 +114,13 @@ def campaign_diagnostics(
     step: steps.Step,
 ) -> tuple[diagnostics.CompileDiagnostic, ...]:
     match compiler.compile_views(
-        graph(), [View(name=ViewName.fake(), source=Campaign, step=step)]
+        graph(),
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(Campaign, step),
+            )
+        ],
     ):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
@@ -289,7 +304,7 @@ def test_require_with_a_select_requires_each_selected_field() -> None:
 
 def owner_lookup() -> ir.Lookup:
     return ir.Lookup(
-        reference=ir.SourceField(field=FieldName("owner_id")),
+        reference=ir.SubjectField(field=FieldName("owner_id")),
         id_type=OwnerId,
         target=Owner,
         optionality=Optionality.OPTIONAL,
@@ -411,7 +426,7 @@ def test_requiring_a_field_that_is_not_optional_is_a_diagnostic(
     assert campaign_diagnostics(step) == (
         diagnostics.RequireOnRequiredField(
             view=ViewName.fake(),
-            source=ir.SourceName("Campaign"),
+            from_model=ir.FromModelName("Campaign"),
             field=field,
             annotation=annotation,
         ),
@@ -452,20 +467,30 @@ def test_requiring_an_unknown_field_is_a_diagnostic_and_later_steps_are_checked(
     ],
     ids=["own", "nested"],
 )
-def test_require_in_a_payload_is_a_diagnostic(step: steps.Step) -> None:
-    payload = PayloadName("CampaignUpdate")
+def test_require_in_a_write_model_is_a_diagnostic(step: steps.Step) -> None:
+    write_model = WriteModelName("CampaignUpdate")
 
     match compiler.compile_catalog(
-        graph(), [], [Payload(name=payload, source=Campaign, step=step)], ()
+        graph(),
+        [],
+        [
+            WriteModel(
+                name=write_model,
+                query=steps.from_(Campaign, step),
+            )
+        ],
+        (),
     ):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
-            assert error.diagnostics == (diagnostics.RequireInPayload(view=payload),)
+            assert error.diagnostics == (
+                diagnostics.RequireInWriteModel(view=write_model),
+            )
 
 
 def test_building_a_require_checks_nothing() -> None:
-    root = ir.FromSource(source=Campaign)
+    root = ir.FromModel(from_model=Campaign)
 
     assert steps.require(FieldName("missing"))(root) == ir.Require(
         input=root, fields=FieldName("missing")
@@ -476,16 +501,16 @@ def test_building_a_require_checks_nothing() -> None:
     ("diagnostic", "message"),
     [
         (
-            diagnostics.RequireInPayload(view=PayloadName("CampaignUpdate")),
+            diagnostics.RequireInWriteModel(view=WriteModelName("CampaignUpdate")),
             (
-                "CampaignUpdate: a Payload cannot `require` a field, because it is "
+                "CampaignUpdate: a WriteModel cannot `require` a field, because it is "
                 "a write model with no values to require."
             ),
         ),
         (
             diagnostics.RequireOnRequiredField(
                 view=ViewName("Submitted"),
-                source=ir.SourceName("Campaign"),
+                from_model=ir.FromModelName("Campaign"),
                 field=FieldName("kind"),
                 annotation=int,
             ),
@@ -504,7 +529,7 @@ def test_building_a_require_checks_nothing() -> None:
             ),
         ),
     ],
-    ids=["payload", "required", "added"],
+    ids=["write model", "required", "added"],
 )
 def test_a_require_diagnostic_message_names_the_offending_values(
     diagnostic: diagnostics.CompileDiagnostic, message: str
@@ -562,7 +587,7 @@ def test_requiring_a_field_lifted_through_an_optional_entity_requires_the_entity
         DetailId,
         ir.Lifted(
             through=(detail_lookup().required(),),
-            field=ir.SourceField(field=FieldName("id")),
+            field=ir.SubjectField(field=FieldName("id")),
         ),
     )
 
@@ -576,7 +601,7 @@ def test_requiring_a_field_a_where_keeps_only_none_in_is_a_diagnostic() -> None:
     ) == (
         diagnostics.RequireOnAlwaysNoneField(
             view=ViewName.fake(),
-            source=ir.SourceName("Campaign"),
+            from_model=ir.FromModelName("Campaign"),
             field=FieldName("submitted_at"),
         ),
     )
@@ -585,7 +610,7 @@ def test_requiring_a_field_a_where_keeps_only_none_in_is_a_diagnostic() -> None:
 def test_the_always_none_requirement_message_names_the_field() -> None:
     diagnostic = diagnostics.RequireOnAlwaysNoneField(
         view=ViewName("Template"),
-        source=ir.SourceName("Campaign"),
+        from_model=ir.FromModelName("Campaign"),
         field=FieldName("submitted_at"),
     )
 
@@ -604,7 +629,7 @@ def test_the_always_none_requirement_message_names_the_field() -> None:
     ],
     ids=["other-member", "none-after-not-none", "same-field"],
 )
-def test_a_condition_is_checked_against_the_type_the_source_declares(
+def test_a_condition_is_checked_against_the_type_the_from_model_declares(
     later: ir.Condition,
 ) -> None:
     view = compile_campaign(
@@ -631,7 +656,7 @@ def test_a_condition_on_a_required_field_may_test_for_none() -> None:
     )
 
     assert view.relation.filters == (
-        ir.FilterIsNull(field=ir.SourceField(field=FieldName("name"))),
+        ir.FilterIsNull(field=ir.SubjectField(field=FieldName("name"))),
     )
 
 
@@ -655,7 +680,13 @@ class Constrained(pydantic.BaseModel):
 def test_narrowing_keeps_the_fields_constraints(step: steps.Step) -> None:
     (compiled,) = (
         compiler.compile_views(
-            graph(), [View(name=ViewName.fake(), source=Constrained, step=step)]
+            graph(),
+            [
+                View(
+                    name=ViewName.fake(),
+                    query=steps.from_(Constrained, step),
+                )
+            ],
         )
         .unwrap()
         .views
@@ -687,7 +718,13 @@ def test_narrowing_an_optional_annotated_alias_keeps_its_metadata(
 ) -> None:
     (compiled,) = (
         compiler.compile_views(
-            graph(), [View(name=ViewName.fake(), source=Stamped, step=step)]
+            graph(),
+            [
+                View(
+                    name=ViewName.fake(),
+                    query=steps.from_(Stamped, step),
+                )
+            ],
         )
         .unwrap()
         .views
@@ -708,8 +745,7 @@ class StampedBase(pydantic.BaseModel):
 def test_a_required_annotated_alias_is_inherited_from_a_base_declaring_it() -> None:
     view = View(
         name=ViewName.fake(),
-        source=Stamped,
-        step=steps.require(FieldName("stamped_at")),
+        query=steps.from_(Stamped, steps.require(FieldName("stamped_at"))),
         base=StampedBase,
     )
 
@@ -723,9 +759,11 @@ def test_a_field_narrowed_to_a_literal_loses_its_constraints() -> None:
             [
                 View(
                     name=ViewName.fake(),
-                    source=Constrained,
-                    step=steps.where(
-                        conditions.is_null(conditions.field(FieldName("label")))
+                    query=steps.from_(
+                        Constrained,
+                        steps.where(
+                            conditions.is_null(conditions.field(FieldName("label")))
+                        ),
                     ),
                 )
             ],
@@ -752,8 +790,8 @@ def test_a_required_reference_marked_outside_its_none_resolves() -> None:
     ).unwrap()
     view = View(
         name=ViewName.fake(),
-        source=MarkedDetail,
-        step=steps.pipeline(
+        query=steps.from_(
+            MarkedDetail,
             steps.require(FieldName("campaign_id")),
             steps.resolve(named(FieldName("campaign_id"))),
         ),
@@ -787,8 +825,8 @@ def test_requiring_a_lifted_field_typed_by_an_optional_alias_requires_it() -> No
             [
                 View(
                     name=ViewName.fake(),
-                    source=Campaign,
-                    step=steps.pipeline(
+                    query=steps.from_(
+                        Campaign,
                         steps.reverse(
                             AliasedDetail, steps.project([FieldName("objective")])
                         ),

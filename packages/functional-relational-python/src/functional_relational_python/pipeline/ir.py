@@ -1,4 +1,4 @@
-"""frp-ir: the relational expression a View's pipeline builds over its Source.
+"""frp-ir: the relational expression a View's pipeline builds over its from_model.
 
 Steps only build nodes; nothing here is checked. The compiler checks a node tree
 and derives its Relation: the fields a View result will have, each with its type
@@ -29,22 +29,22 @@ from functional_relational_python.entity_graph.entity_graph import (
 from functional_relational_python.entity_graph.id import IdType
 
 
-class SourceName(pydantic.RootModel[str], frozen=True):
+class FromModelName(pydantic.RootModel[str], frozen=True):
     @staticmethod
-    def fake() -> SourceName:
-        return SourceName("Company")
+    def fake() -> FromModelName:
+        return FromModelName("Company")
 
 
-class FromSource(pydantic.BaseModel, frozen=True):
-    """The root of every pipeline: all fields of a Source.
+class FromModel(pydantic.BaseModel, frozen=True):
+    """The root of every pipeline: all fields of a from_model.
 
-    A Source is any Pydantic model. It need not be an Entity in the EntityGraph.
+    A from_model is any Pydantic model. It need not be an Entity in the EntityGraph.
     """
 
-    source: type[pydantic.BaseModel]
+    from_model: type[pydantic.BaseModel]
 
-    def source_name(self) -> SourceName:
-        return SourceName(self.source.__name__)
+    def from_model_name(self) -> FromModelName:
+        return FromModelName(self.from_model.__name__)
 
 
 class Omit(pydantic.BaseModel, frozen=True):
@@ -81,7 +81,7 @@ type TypeTransform = Callable[[RuntimeAnnotation], RuntimeAnnotation]
 
 class Retype(pydantic.BaseModel, frozen=True):
     """Gives the named field, or every selected field, the type `transform` maps
-    its type to. Only a Payload may retype; a View's mapping copies each value
+    its type to. Only a WriteModel may retype; a View's mapping copies each value
     unchanged."""
 
     input: Node
@@ -120,12 +120,12 @@ class References(pydantic.BaseModel, frozen=True):
                 return False
             case Field():
                 pass
-        match field.reference_source():
-            case (source, info):
+        match field.read_from():
+            case (read, info):
                 pass
             case Field():
                 return False
-        match entity_graph.reference_of(source, info):
+        match entity_graph.reference_of(read, info):
             case Ok():
                 return True
             case Err(error):
@@ -140,7 +140,7 @@ class References(pydantic.BaseModel, frozen=True):
 class Resolve(pydantic.BaseModel, frozen=True):
     """Replaces each selected Reference with the Entity it points to.
 
-    `then` is applied to the referenced Entity, as if it were a View's Source.
+    `then` is applied to the referenced Entity, as if it were a View's from_model.
     """
 
     input: Node
@@ -165,8 +165,8 @@ class Reverse(pydantic.BaseModel, frozen=True):
     """Adds a field holding the `entity` whose one-to-one Reference `via` points to
     the subject, or `None` when none does.
 
-    The subject is the View's Source, or inside a nested pipeline the Entity it
-    runs on. `then` is applied to `entity`, as if it were a View's Source.
+    The subject is the View's from_model, or inside a nested pipeline the Entity it
+    runs on. `then` is applied to `entity`, as if it were a View's from_model.
     """
 
     input: Node
@@ -290,7 +290,7 @@ type Condition = Comparison | IsNull | And | Or | Not
 class Where(pydantic.BaseModel, frozen=True):
     """Keeps only the rows for which `condition` is true.
 
-    Only a View's own pipeline may filter, not a nested one or a Payload's.
+    Only a View's own pipeline may filter, not a nested one or a WriteModel's.
     """
 
     input: Node
@@ -301,7 +301,7 @@ class Require(pydantic.BaseModel, frozen=True):
     """Narrows the named field, or every selected field, from `X | None` to `X`.
 
     It drops no row: a `None` there is an unmet requirement when the View runs. A
-    View may require anywhere, a nested pipeline included; a Payload may not.
+    View may require anywhere, a nested pipeline included; a WriteModel may not.
     """
 
     input: Node
@@ -309,7 +309,7 @@ class Require(pydantic.BaseModel, frozen=True):
 
 
 type Node = (
-    FromSource
+    FromModel
     | Omit
     | Rename
     | RenameSelected
@@ -356,10 +356,10 @@ type DefaultValue = (
 """A literal a generated model can write out as a field's default."""
 
 
-class SourceField(pydantic.BaseModel, frozen=True):
+class SubjectField(pydantic.BaseModel, frozen=True):
     """The value of one of the subject's own fields.
 
-    The subject is the View's Source, or inside a resolved field the referenced
+    The subject is the View's from_model, or inside a resolved field the referenced
     Entity.
     """
 
@@ -373,7 +373,7 @@ class RequiredField(pydantic.BaseModel, frozen=True):
     """The value of one of the subject's optional fields, which the View requires:
     `None` there is an unmet requirement, not a value.
 
-    Like a SourceField, it reads the subject's field `field`.
+    Like a SubjectField, it reads the subject's field `field`.
     """
 
     field: FieldName
@@ -382,7 +382,7 @@ class RequiredField(pydantic.BaseModel, frozen=True):
         return ()
 
 
-type SubjectColumn = SourceField | RequiredField
+type SubjectColumn = SubjectField | RequiredField
 """A value read from one of the subject's own fields, required or not."""
 
 
@@ -548,7 +548,7 @@ class Lifted(pydantic.BaseModel, frozen=True):
         )
 
 
-type SubjectValue = SourceField | RequiredField | EntityValue | Lifted
+type SubjectValue = SubjectField | RequiredField | EntityValue | Lifted
 """A value computed from the subject's fields."""
 
 type Value = SubjectValue | Added
@@ -598,12 +598,12 @@ class FilterComparison(pydantic.BaseModel, frozen=True):
     """`field <operator> operand`, over the subject's own fields."""
 
     operator: ComparisonOperator
-    field: SourceField
-    operand: SourceField | FilterLiteral
+    field: SubjectField
+    operand: SubjectField | FilterLiteral
 
 
 class FilterIsNull(pydantic.BaseModel, frozen=True):
-    field: SourceField
+    field: SubjectField
 
 
 class FilterAnd(pydantic.BaseModel, frozen=True):
@@ -629,7 +629,7 @@ compared with."""
 
 
 class Field(pydantic.BaseModel, frozen=True):
-    """A field typed by `info.annotation`: a Source's own type, or an Entity."""
+    """A field typed by `info.annotation`: a from_model's own type, or an Entity."""
 
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
 
@@ -659,7 +659,7 @@ class Field(pydantic.BaseModel, frozen=True):
         type's constraints."""
         return self._annotated(annotation, ())
 
-    def reference_source(self) -> tuple[FieldName, FieldInfo] | Field:
+    def read_from(self) -> tuple[FieldName, FieldInfo] | Field:
         """The subject's field this field's ID is read from, with that field's
         info, if it is read unchanged from one: the subject's own, or one of the
         Entity a lifted field is read off. Otherwise, this field itself.
@@ -668,8 +668,8 @@ class Field(pydantic.BaseModel, frozen=True):
         optional one a lifted field may have.
         """
         match self.value:
-            case SourceField(field=source) | RequiredField(field=source):
-                return (source, self.info)
+            case SubjectField(field=read) | RequiredField(field=read):
+                return (read, self.info)
             case Lifted(through=through, field=read):
                 declared = through[-1].target.model_fields.get(read.field.root)
                 # A field recovered from a defective step may name no field of
@@ -728,7 +728,7 @@ class Field(pydantic.BaseModel, frozen=True):
         """This field typed by `annotation` with `metadata`, with a copy of its
         info."""
         info = copy.copy(self.info)
-        # `FieldInfo.annotation` is typed narrower than the annotations a Source
+        # `FieldInfo.annotation` is typed narrower than the annotations a from_model
         # can have, e.g. `int | None`, so set it untyped.
         object.__setattr__(info, "annotation", annotation)
         object.__setattr__(info, "metadata", list(metadata))
@@ -760,29 +760,29 @@ type FieldPredicate = Callable[[RelationField], bool]
 
 
 class Relation(pydantic.BaseModel, frozen=True):
-    """The checked shape of a node: the Source it starts from, its fields, and the
+    """The checked shape of a node: the from_model it starts from, its fields, and the
     Filters a row must pass to be a View result.
 
     A row is kept when every Filter in `filters` is true. Only a View's own
-    Relation has Filters, not a nested one or a Payload's.
+    Relation has Filters, not a nested one or a WriteModel's.
     """
 
-    source: SourceName
+    from_model: FromModelName
     fields: tuple[RelationField, ...]
     filters: tuple[Filter, ...]
 
     @staticmethod
-    def of(node: FromSource) -> Relation:
+    def of(node: FromModel) -> Relation:
         return Relation(
-            source=node.source_name(),
+            from_model=node.from_model_name(),
             fields=tuple(
                 Field(
                     name=FieldName(name),
                     info=info,
-                    value=SourceField(field=FieldName(name)),
+                    value=SubjectField(field=FieldName(name)),
                     default=NoDefault(),
                 )
-                for name, info in node.source.model_fields.items()
+                for name, info in node.from_model.model_fields.items()
             ),
             filters=(),
         )
@@ -816,17 +816,19 @@ class Relation(pydantic.BaseModel, frozen=True):
 
     def with_fields(self, fields: tuple[RelationField, ...]) -> Relation:
         """This relation with `fields` instead of its own, keeping its Filters."""
-        return Relation(source=self.source, fields=fields, filters=self.filters)
+        return Relation(from_model=self.from_model, fields=fields, filters=self.filters)
 
     def filtered(self, kept: Filter) -> Relation:
         """Also keeps only the rows for which `kept` is true."""
         return Relation(
-            source=self.source, fields=self.fields, filters=(*self.filters, kept)
+            from_model=self.from_model,
+            fields=self.fields,
+            filters=(*self.filters, kept),
         )
 
     def unfiltered(self) -> Relation:
         """This relation without its Filters, keeping every row."""
-        return Relation(source=self.source, fields=self.fields, filters=())
+        return Relation(from_model=self.from_model, fields=self.fields, filters=())
 
     def renamed(self, names: Mapping[FieldName, FieldName]) -> Relation:
         """Renames each key of `names` to its value in place, keeping its type."""

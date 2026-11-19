@@ -79,18 +79,18 @@ class UnknownUnionError(Exception):
         )
 
 
-class NonEntitySourceError(Exception):
-    """A View's or Union's Source is not an Entity, so the engine holds no rows to
+class NonEntityFromModelError(Exception):
+    """A View's or Union's from_model is not an Entity, so the engine holds no rows to
     read."""
 
     def __init__(
-        self, view: ViewName | UnionName, source: type[pydantic.BaseModel]
+        self, view: ViewName | UnionName, from_model: type[pydantic.BaseModel]
     ) -> None:
         self.view = view
-        self.source = source
+        self.from_model = from_model
         kind = "View" if isinstance(view, ViewName) else "Union"
         super().__init__(
-            f"{kind} '{view.root}' reads {source.__name__}, which is not an Entity "
+            f"{kind} '{view.root}' reads {from_model.__name__}, which is not an Entity "
             "in the EntityGraph, so the engine holds no rows for it."
         )
 
@@ -281,7 +281,7 @@ class InMemoryViewEngine:
     """Holds Entities by ID and runs compiled Views over them.
 
     `put` inserts an Entity, or replaces the one with the same ID. `read` returns
-    the View results, one per row of the View's Source its Filters keep, in
+    the View results, one per row of the View's from_model its Filters keep, in
     insertion order. `read_union` returns the Union results likewise, one per row
     a Variant keeps.
     """
@@ -308,13 +308,13 @@ class InMemoryViewEngine:
         self, view: ViewName
     ) -> Result[
         tuple[ViewRow, ...],
-        UnknownViewError | NonEntitySourceError | DiagnosticsError[ReadDiagnostic],
+        UnknownViewError | NonEntityFromModelError | DiagnosticsError[ReadDiagnostic],
     ]:
         """The View's results, or every Reference that points to a missing Entity,
         every ID several Entities share in a one-to-one Reference the View follows
         backwards, and every requirement of the View a row does not meet.
 
-        Only Entities are stored, so a View over any other Source is an error. A
+        Only Entities are stored, so a View over any other from_model is an error. A
         row the View's Filters exclude is not looked up, so its References and
         requirements are not reported.
         """
@@ -323,12 +323,12 @@ class InMemoryViewEngine:
                 return Err(UnknownViewError(view, tuple(self._views)))
             case compiled:
                 pass
-        if compiled.source not in self._entity_graph.entities:
-            return Err(NonEntitySourceError(view, compiled.source))
+        if compiled.from_model not in self._entity_graph.entities:
+            return Err(NonEntityFromModelError(view, compiled.from_model))
         run = _Read(self._entities)
         rows = tuple(
             self._row(compiled.relation, entity, run)
-            for entity in self._entities.get(compiled.source, {}).values()
+            for entity in self._entities.get(compiled.from_model, {}).values()
             if InMemoryViewEngine._keeps(compiled, entity)
         )
         return DiagnosticsError.or_ok(run.diagnostics(), lambda: rows)
@@ -337,9 +337,9 @@ class InMemoryViewEngine:
         self, union: UnionName
     ) -> Result[
         tuple[VariantRow, ...],
-        UnknownUnionError | NonEntitySourceError | DiagnosticsError[ReadDiagnostic],
+        UnknownUnionError | NonEntityFromModelError | DiagnosticsError[ReadDiagnostic],
     ]:
-        """The Union's results: per row of its Source, the row of the first Variant
+        """The Union's results: per row of its from_model, the row of the first Variant
         View whose Filters keep it, or nothing when none does.
 
         Problems are reported as `read` reports them, for the Variant each row
@@ -350,12 +350,12 @@ class InMemoryViewEngine:
                 return Err(UnknownUnionError(union, tuple(self._unions)))
             case compiled:
                 pass
-        if compiled.source not in self._entity_graph.entities:
-            return Err(NonEntitySourceError(union, compiled.source))
+        if compiled.from_model not in self._entity_graph.entities:
+            return Err(NonEntityFromModelError(union, compiled.from_model))
         run = _Read(self._entities)
         rows: list[VariantRow] = []
         leaves = compiled.leaves()
-        for entity in self._entities.get(compiled.source, {}).values():
+        for entity in self._entities.get(compiled.from_model, {}).values():
             kept_by = (
                 leaf for leaf in leaves if InMemoryViewEngine._keeps(leaf, entity)
             )
@@ -394,7 +394,7 @@ class InMemoryViewEngine:
                 entity = self._follow(found.lookups(), subject, run)
                 return None if entity is None else self._row(relation, entity, run)
         match value:
-            case ir.SourceField() | ir.RequiredField():
+            case ir.SubjectField() | ir.RequiredField():
                 InMemoryViewEngine._check_required(value, subject, run)
                 return getattr(subject, value.field.root)
             case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
@@ -432,7 +432,7 @@ class InMemoryViewEngine:
         match kept:
             case ir.FilterComparison(operator=operator, field=field, operand=operand):
                 match operand:
-                    case ir.SourceField():
+                    case ir.SubjectField():
                         right = getattr(subject, operand.field.root)
                     case ir.ScalarLiteral() | ir.EnumLiteral() | ir.RootModelLiteral():
                         right = operand.value()
@@ -450,7 +450,7 @@ class InMemoryViewEngine:
     def _compare(
         operator: ir.ComparisonOperator,
         subject: pydantic.BaseModel,
-        field: ir.SourceField,
+        field: ir.SubjectField,
         right: FieldValue,
     ) -> bool:
         """`subject.<field> <operator> right` in Python. The compiler only lets
@@ -537,5 +537,5 @@ class InMemoryViewEngine:
                 run.unmet.add(
                     type(subject), field, getattr(subject, EntityNode.primary_key.root)
                 )
-            case ir.SourceField() | ir.RequiredField():
+            case ir.SubjectField() | ir.RequiredField():
                 pass

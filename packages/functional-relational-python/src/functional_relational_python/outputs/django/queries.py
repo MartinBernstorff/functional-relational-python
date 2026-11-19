@@ -1,9 +1,9 @@
-"""Renders Django query code for every View and Union whose Source is an Entity, so
+"""Renders Django query code for every View and Union whose from_model is an Entity, so
 a Django project can fill View models from its database while keeping its own
 filtering, ordering and pagination.
 
 Per View it writes two functions. `<view>_queryset` makes a QuerySet of the
-Source's Django model keep the rows the View's Filters keep, and load every Entity
+from_model's Django model keep the rows the View's Filters keep, and load every Entity
 the View looks up, in the same query. `<view>_from_row` builds the View model from
 one row of that QuerySet. Per Union it writes the same two functions:
 `<union>_queryset` keeps the rows any Variant keeps, loads what every Variant looks
@@ -205,17 +205,17 @@ class QueryNames(pydantic.BaseModel, frozen=True):
         return Identifier(f"{self.function.root}_from_row")
 
     def method(self) -> Identifier:
-        """The method of the Source's QuerySet and Manager yielding its models."""
+        """The method of the from_model's QuerySet and Manager yielding its models."""
         return Identifier(f"as_{self.function.root}")
 
 
 class ViewQueries(pydantic.BaseModel, frozen=True):
-    """The query code of one View whose Source is an Entity: `model` is its View
-    model, `source` the Django model of its Source."""
+    """The query code of one View whose from_model is an Entity: `model` is its View
+    model, `from_model` the Django model of its from_model."""
 
     view: compiler.CompiledView
     model: Symbol
-    source: Symbol
+    from_model: Symbol
 
     @staticmethod
     def of(
@@ -225,11 +225,11 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
         return ViewQueries(
             view=view,
             model=Symbol(module=module, qualname=(view.names.model.name.identifier(),)),
-            source=config.model_of(view.source),
+            from_model=config.model_of(view.from_model),
         )
 
     def entity(self) -> type[pydantic.BaseModel]:
-        return self.view.source
+        return self.view.from_model
 
     def describe(self) -> AnnotationText:
         return AnnotationText(f"View {self.view.name.root}")
@@ -245,7 +245,7 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
                 RelatedPath.of(path)
                 for path in ViewQueries._paths(
                     self.view.relation,
-                    _Trail.start(self.view.source),
+                    _Trail.start(self.view.from_model),
                     ((),),
                     config,
                 )
@@ -284,13 +284,13 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
 
 
 class UnionQueries(pydantic.BaseModel, frozen=True):
-    """The query code of one Union whose Source is an Entity: `model` is its
-    model, `source` the Django model of its Source, and `leaves` the query code
+    """The query code of one Union whose from_model is an Entity: `model` is its
+    model, `from_model` the Django model of its from_model, and `leaves` the query code
     of the Views a row may be a result of, in the order they are tried."""
 
     union: compiler.CompiledUnion
     model: Symbol
-    source: Symbol
+    from_model: Symbol
     leaves: tuple[ViewQueries, ...]
 
     @staticmethod
@@ -307,7 +307,7 @@ class UnionQueries(pydantic.BaseModel, frozen=True):
                 module=placed.module_of(union),
                 qualname=(union.names.model.identifier(),),
             ),
-            source=config.model_of(union.source),
+            from_model=config.model_of(union.from_model),
             leaves=tuple(
                 ViewQueries.of(leaf, config, placed.module_of(leaf))
                 for leaf in union.leaves()
@@ -315,7 +315,7 @@ class UnionQueries(pydantic.BaseModel, frozen=True):
         )
 
     def entity(self) -> type[pydantic.BaseModel]:
-        return self.union.source
+        return self.union.from_model
 
     def describe(self) -> AnnotationText:
         return AnnotationText(f"Union {self.union.name.root}")
@@ -405,7 +405,7 @@ type ReadQueries = ViewQueries | UnionQueries
 
 
 class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
-    """Writes the query code of every View and Union whose Source is an Entity,
+    """Writes the query code of every View and Union whose from_model is an Entity,
     and a QuerySet and Manager per Entity, into one module.
 
     The output is ruff-format stable: what ruff format could split is split as it
@@ -476,7 +476,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
 
         `placed` has the module of each View's and Union's model, and
         `definitions` has every View a Union has as a Variant. Views and Unions
-        over a Source that is not an Entity get no query code. QuerySets are in
+        over a from_model that is not an Entity get no query code. QuerySets are in
         Entity name order.
 
         Its imports of `first_party` packages are first party.
@@ -491,7 +491,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         queries = tuple(
             ViewQueries.of(view, config, placed.module_of(view))
             for view in views
-            if view.source in graph.entities
+            if view.from_model in graph.entities
         )
         classes: dict[type, Symbol] = {}
         unimportable: list[DjangoQueriesDiagnostic] = []
@@ -515,7 +515,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         union_queries = tuple(
             UnionQueries.of(union, config, placed)
             for union in unions
-            if union.source in graph.entities
+            if union.from_model in graph.entities
         )
         renderer = DjangoQueriesRenderer(
             graph=graph,
@@ -697,7 +697,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         )
         row.define(
             DjangoQueriesRenderer.row_parameter,
-            AnnotationText(f"the parameter for {query.source.describe().root}"),
+            AnnotationText(f"the parameter for {query.from_model.describe().root}"),
         )
         for module in (query.model.module, *class_modules):
             row.refer_to_module(module)
@@ -710,7 +710,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         queryset.define(
             DjangoQueriesRenderer.queryset_parameter,
             AnnotationText(
-                f"the parameter for the QuerySet of {query.source.describe().root}"
+                f"the parameter for the QuerySet of {query.from_model.describe().root}"
             ),
         )
         queryset.define(
@@ -722,7 +722,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         yield from queryset.clashes()
 
     def _over(self, entity: type[pydantic.BaseModel]) -> Iterator[ReadQueries]:
-        """The Views, then the Unions, whose Source is `entity`, in order."""
+        """The Views, then the Unions, whose from_model is `entity`, in order."""
         return (query for query in self._read() if query.entity() is entity)
 
     def _module(self, entities: Sequence[type[pydantic.BaseModel]]) -> FileText:
@@ -785,7 +785,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         checking."""
         return Expression(
             f'"{DjangoQueriesRenderer.django_models.root}.QuerySet'
-            f'[{query.source.qualified().root}]"'
+            f'[{query.from_model.qualified().root}]"'
         )
 
     def _prepared(self, query: ReadQueries) -> Expression:
@@ -848,9 +848,9 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             case ():
                 return _KeepsEvery()
             case (single,):
-                return writer.kept(single, view.source)
+                return writer.kept(single, view.from_model)
             case filters:
-                return writer.kept(ir.FilterAnd(terms=filters), view.source)
+                return writer.kept(ir.FilterAnd(terms=filters), view.from_model)
 
     def _union_queryset_function(self, union: UnionQueries) -> FileText:
         """Annotates each row with the name of the first Variant whose Filters keep
@@ -934,7 +934,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         reader = _RowReader(
             graph=self.graph, config=self.config, classes=self.classes, indent=Indent(8)
         )
-        start = _Reached.start(query.view.source, row)
+        start = _Reached.start(query.view.from_model, row)
         read = reader.fields(query.view.relation, start)
         unread = "".join(
             statement.root
@@ -947,7 +947,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         )
         return FileText(
             f"def {query.names().from_row_function().root}(\n"
-            f'    {row.root}: "{query.source.qualified().root}",\n'
+            f'    {row.root}: "{query.from_model.qualified().root}",\n'
             f"{DjangoQueriesRenderer._returns(query.model).root}\n"
             f"{unread}"
             f"    return {validated.root}\n"
@@ -980,7 +980,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         )
         return FileText(
             f"def {union.names().from_row_function().root}(\n"
-            f'    {row}: "{union.source.qualified().root}",\n'
+            f'    {row}: "{union.from_model.qualified().root}",\n'
             f"{DjangoQueriesRenderer._returns(union.model).root}\n"
             f"    match {variant}:\n"
             f"{cases}"
@@ -1227,7 +1227,7 @@ class _ReadThrough:
         field_types: FieldTypes,
     ) -> _ThroughEnum | _ThroughRootModel | _ReadAsStored:
         match field.value:
-            case ir.SourceField() | ir.RequiredField():
+            case ir.SubjectField() | ir.RequiredField():
                 return _ReadThrough._literal_enum(field.annotation())
             case ir.Lifted() as lifted:
                 return _ReadThrough._wrapping_none(lifted, graph, config, field_types)
@@ -1344,7 +1344,7 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                 read_as = _ReadThrough.of(field, self.graph, self.config, field_types)
         row = reached.row()
         match value:
-            case ir.SourceField() | ir.RequiredField():
+            case ir.SubjectField() | ir.RequiredField():
                 # A required field that is `None` fails the View model's validation.
                 node = self.graph.entities[reached.trail.subject]
                 attribute = DjangoModelsRenderer.attribute_of(

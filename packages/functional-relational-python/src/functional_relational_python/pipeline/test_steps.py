@@ -5,12 +5,12 @@ from functional_relational_python.pipeline import ir, steps
 from functional_relational_python.pipeline.test_ir import Department, Employee, lookup
 
 
-def employee_field(name: FieldName, source: FieldName) -> ir.Field:
-    """An Employee's `source` field, named `name`, as a rename would leave it."""
+def employee_field(name: FieldName, read: FieldName) -> ir.Field:
+    """An Employee's `read` field, named `name`, as a rename would leave it."""
     return ir.Field(
         name=name,
-        info=Employee.model_fields[source.root],
-        value=ir.SourceField(field=source),
+        info=Employee.model_fields[read.root],
+        value=ir.SubjectField(field=read),
         default=ir.NoDefault(),
     )
 
@@ -40,7 +40,7 @@ def test_the_subjects_id_is_the_primary_key_under_any_name(field: ir.Field) -> N
         ir.NestedField(
             name=FieldName("department"),
             value=lookup(FieldName("department_id"), Department),
-            relation=ir.Relation.of(ir.FromSource(source=Department)),
+            relation=ir.Relation.of(ir.FromModel(from_model=Department)),
             default=ir.NoDefault(),
         ),
     ],
@@ -50,3 +50,16 @@ def test_a_field_valued_otherwise_is_not_the_primary_key(
     field: ir.RelationField,
 ) -> None:
     assert not steps.is_primary_key(field)
+
+
+def test_then_applies_its_steps_after_the_querys_own() -> None:
+    query = steps.from_(Employee, steps.omit(FieldName("id"))).then(
+        steps.rename(FieldName("name"), FieldName("title"))
+    )
+
+    assert query.from_model is Employee
+    assert query.node() == ir.Rename(
+        input=ir.Omit(input=ir.FromModel(from_model=Employee), fields=FieldName("id")),
+        field=FieldName("name"),
+        new=FieldName("title"),
+    )
