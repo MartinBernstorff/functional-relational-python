@@ -462,7 +462,10 @@ def profile_engine(*views: View) -> engine.InMemoryViewEngine:
 
 def test_reverse_gives_the_entity_referencing_each_row_or_none() -> None:
     view = employee_view(
-        steps.pipeline(steps.project([FieldName("id")]), steps.reverse(Profile))
+        steps.pipeline(
+            steps.project([FieldName("id")]),
+            steps.reverse(Profile, via_field=ir.ViaField.KEEP),
+        )
     )
     view_engine = profile_engine(view)
     department = DepartmentId(1)
@@ -475,6 +478,42 @@ def test_reverse_gives_the_entity_referencing_each_row_or_none() -> None:
     assert read(view_engine, view.name) == tuple(
         engine.ViewRow({FieldName("id"): employee.id, FieldName("profile"): found})
         for employee, found in ((with_profile, profile), (without_profile, None))
+    )
+
+
+def test_a_reverse_holds_its_entities_without_the_reference_it_follows() -> None:
+    view = employee_view(
+        steps.pipeline(
+            steps.project([FieldName("id")]),
+            steps.reverse(Profile),
+            steps.reverse(Employee, name=FieldName("mentees")),
+        )
+    )
+    view_engine = profile_engine(view)
+    department = DepartmentId(1)
+    mentor = Employee.fake(EmployeeId(1), department, None)
+    mentee = Employee.fake(EmployeeId(2), department, mentor.id)
+    profile = Profile.fake(ProfileId(1), mentor.id)
+    for entity in (mentor, mentee, profile):
+        view_engine.put(entity).unwrap()
+
+    (row, _) = read(view_engine, view.name)
+
+    assert row == engine.ViewRow(
+        {
+            FieldName("id"): mentor.id,
+            FieldName("profile"): engine.ViewRow(
+                {FieldName("id"): profile.id, FieldName("bio"): profile.bio}
+            ),
+            FieldName("mentees"): (
+                engine.ViewRow(
+                    {
+                        FieldName("id"): mentee.id,
+                        FieldName("department_id"): mentee.department_id,
+                    }
+                ),
+            ),
+        }
     )
 
 
@@ -502,7 +541,10 @@ def test_flattening_a_reversed_entity_lifts_its_values_or_none() -> None:
 
 def test_a_reverse_sees_the_entities_put_since_the_last_read() -> None:
     view = employee_view(
-        steps.pipeline(steps.project([FieldName("id")]), steps.reverse(Profile))
+        steps.pipeline(
+            steps.project([FieldName("id")]),
+            steps.reverse(Profile, via_field=ir.ViaField.KEEP),
+        )
     )
     view_engine = profile_engine(view)
     employee = Employee.fake(EmployeeId(1), DepartmentId(1), None)
@@ -548,7 +590,9 @@ def test_a_reversed_many_to_one_reference_holds_its_entities_by_id_or_none() -> 
     view = View(
         name=ViewName.fake(),
         query=steps.from_(
-            Department, steps.project([FieldName("id")]), steps.reverse(Employee)
+            Department,
+            steps.project([FieldName("id")]),
+            steps.reverse(Employee, via_field=ir.ViaField.KEEP),
         ),
     )
     view_engine = hr_engine(view)
@@ -588,7 +632,9 @@ def test_a_sorted_sequence_in_a_nested_pipeline_is_of_the_resolved_entity() -> N
             steps.resolve(
                 named(FieldName("mentor_id")),
                 steps.project([FieldName("id")]),
-                steps.reverse(Employee, name=FieldName("mentees")),
+                steps.reverse(
+                    Employee, name=FieldName("mentees"), via_field=ir.ViaField.KEEP
+                ),
             ),
         )
     )
@@ -652,7 +698,9 @@ def test_a_collection_in_a_collection_holds_each_elements_entities() -> None:
             Company,
             steps.project([FieldName("id")]),
             steps.reverse(
-                Department, steps.project([FieldName("id")]), steps.reverse(Employee)
+                Department,
+                steps.project([FieldName("id")]),
+                steps.reverse(Employee, via_field=ir.ViaField.KEEP),
             ),
         ),
     )

@@ -25,6 +25,7 @@ from functional_relational_python.compiler import compiler, narrowing, test_comp
 from functional_relational_python.compiler.test_compiler import (
     Collections,
     Depth,
+    Start,
     pipelines,
 )
 from functional_relational_python.entity_graph.entity_graph import (
@@ -925,7 +926,7 @@ def colleagues() -> View:
 
 def organisation_chart() -> View:
     """A collection in a collection, whose elements resolve and reverse one-to-one
-    References, beside the same collection without a nested pipeline, which the
+    References, beside the same collection with no steps, which the
     one prefetch of its path loads too."""
     return View(
         name=ViewName("OrganisationChart"),
@@ -947,6 +948,7 @@ def organisation_chart() -> View:
                     ),
                     steps.reverse(Badge, steps.project([FieldName("level")])),
                 ),
+                via_field=ir.ViaField.KEEP,
             ),
             steps.reverse(Department, name=FieldName("all_departments")),
         ),
@@ -1037,7 +1039,6 @@ def organisation_chart_from_row(
                 {
                     "id": _department.id,
                     "name": _department.name,
-                    "company_id": _department.company_id,
                 }
                 for _department in typing.cast(
                     "django.db.models.Manager[frp_generated_django.Department]",
@@ -1124,7 +1125,6 @@ def colleagues_from_row(
                         "name": _employee.name,
                         "nickname": _employee.nickname,
                         "role": _employee.role,
-                        "department_id": _employee.department_id,
                         "mentor_id": _employee.mentor_id,
                     }
                     for _employee in typing.cast(
@@ -1141,7 +1141,6 @@ def colleagues_from_row(
                     "nickname": _employee.nickname,
                     "role": _employee.role,
                     "department_id": _employee.department_id,
-                    "mentor_id": _employee.mentor_id,
                 }
                 for _employee in typing.cast(
                     "django.db.models.Manager[frp_generated_django.Employee]",
@@ -3042,7 +3041,11 @@ def filtered_pipelines(
     return steps.pipeline(
         *map(steps.require, required),
         *map(steps.where, where),
-        draw(pipelines(entity_graph(), from_model, Depth(2), Collections.DRAWN)),
+        draw(
+            pipelines(
+                entity_graph(), Start.whole(from_model), Depth(2), Collections.DRAWN
+            )
+        ),
     )
 
 

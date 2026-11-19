@@ -1471,7 +1471,9 @@ def meta_campaign_lookup() -> ir.ReverseLookup:
 
 
 def test_reverse_appends_the_referencing_entity_as_an_optional_field() -> None:
-    view = compile_reversing(ChannelCampaign, steps.reverse(MetaCampaign))
+    view = compile_reversing(
+        ChannelCampaign, steps.reverse(MetaCampaign, via_field=ir.ViaField.KEEP)
+    )
 
     assert [
         (field.name, field.info.annotation, field.value)
@@ -1492,7 +1494,9 @@ def campaign_notes_lookup() -> ir.CollectionLookup:
 
 
 def test_reversing_a_many_to_one_reference_appends_a_sorted_sequence() -> None:
-    view = compile_reversing(ChannelCampaign, steps.reverse(CampaignNote))
+    view = compile_reversing(
+        ChannelCampaign, steps.reverse(CampaignNote, via_field=ir.ViaField.KEEP)
+    )
 
     assert [
         (field.name, field.info.annotation, field.value)
@@ -1592,40 +1596,64 @@ def test_flattening_a_reversed_entity_lifts_its_fields_as_optional() -> None:
     ]
 
 
-def test_a_reversed_nested_pipeline_types_the_field_by_its_relation() -> None:
-    view = compile_reversing(
-        ChannelCampaign,
-        steps.reverse(MetaCampaign, steps.omit(FieldName("channel_campaign_id"))),
-    )
+@pytest.mark.parametrize(
+    ("entity", "name", "lookup", "optionality", "kept"),
+    [
+        (
+            MetaCampaign,
+            FieldName("meta_campaign"),
+            meta_campaign_lookup(),
+            Optionality.OPTIONAL,
+            (FieldName("id"), FieldName("ad_account")),
+        ),
+        (
+            CampaignNote,
+            FieldName("campaign_notes"),
+            campaign_notes_lookup(),
+            Optionality.REQUIRED,
+            (FieldName("id"),),
+        ),
+    ],
+    ids=["one-to-one", "many-to-one"],
+)
+def test_a_reverse_omits_the_reference_it_follows_into_a_nested_model(
+    entity: type[pydantic.BaseModel],
+    name: FieldName,
+    lookup: ir.Finder,
+    optionality: Optionality,
+    kept: tuple[FieldName, ...],
+) -> None:
+    view = compile_reversing(ChannelCampaign, steps.reverse(entity))
 
     match view.relation.fields[-1]:
-        case ir.NestedField(name=name, value=lookup, relation=relation) as field:
-            assert (name, lookup, field.optionality(), relation.field_names()) == (
-                FieldName("meta_campaign"),
-                meta_campaign_lookup(),
-                Optionality.OPTIONAL,
-                (FieldName("id"), FieldName("ad_account")),
-            )
+        case ir.NestedField() as field:
+            assert (
+                field.name,
+                field.value,
+                field.optionality(),
+                field.relation.field_names(),
+            ) == (name, lookup, optionality, kept)
         case field:
             pytest.fail(f"expected a nested field, got {field}")
 
 
-def test_a_nested_pipeline_on_a_collection_types_the_field_by_its_relation() -> None:
-    view = compile_reversing(
-        ChannelCampaign,
-        steps.reverse(CampaignNote, steps.omit(FieldName("campaign_id"))),
-    )
+def test_omitting_the_reference_a_reverse_omitted_is_an_unknown_field() -> None:
+    via = FieldName("channel_campaign_id")
 
-    match view.relation.fields[-1]:
-        case ir.NestedField(name=name, value=lookup, relation=relation) as field:
-            assert (name, lookup, field.optionality(), relation.field_names()) == (
-                FieldName("campaign_notes"),
-                campaign_notes_lookup(),
-                Optionality.REQUIRED,
-                (FieldName("id"),),
-            )
-        case field:
-            pytest.fail(f"expected a nested field, got {field}")
+    assert reverse_diagnostics(
+        ChannelCampaign, steps.reverse(MetaCampaign, steps.omit(via))
+    ) == (
+        diagnostics.UnknownField(
+            owner=ViewName.fake(),
+            from_model=ir.FromModelName("MetaCampaign"),
+            field=via,
+            valid=tuple(
+                name
+                for name in map(FieldName, MetaCampaign.model_fields)
+                if name != via
+            ),
+        ),
+    )
 
 
 def test_a_collection_in_a_collection_is_looked_up_from_each_element() -> None:
@@ -1952,7 +1980,8 @@ def test_a_defect_in_a_reversed_nested_pipeline_names_the_reversed_entity() -> N
     unknown = FieldName("budget")
 
     assert reverse_diagnostics(
-        ChannelCampaign, steps.reverse(MetaCampaign, steps.omit(unknown))
+        ChannelCampaign,
+        steps.reverse(MetaCampaign, steps.omit(unknown), via_field=ir.ViaField.KEEP),
     ) == (
         diagnostics.UnknownField(
             owner=ViewName.fake(),
@@ -1982,12 +2011,19 @@ def test_building_a_reverse_checks_nothing(
     node = step(root)
 
     match node:
-        case ir.Reverse(input=input_node, entity=entity, via=built_via, name=name):
-            assert (input_node, entity, built_via, name) == (
+        case ir.Reverse(
+            input=input_node,
+            entity=entity,
+            via=built_via,
+            name=name,
+            via_field=via_field,
+        ):
+            assert (input_node, entity, built_via, name, via_field) == (
                 root,
                 Company,
                 via,
                 ir.DefaultName(),
+                ir.ViaField.OMIT,
             )
         case _:
             pytest.fail(f"expected a Reverse node, got {node}")
@@ -2693,16 +2729,39 @@ class Collections(enum.Enum):
     NONE = "none"
 
 
+class Start(pydantic.BaseModel, frozen=True):
+    """What a drawn pipeline runs on: `model`, without the fields in `omitted`."""
+
+    model: type[pydantic.BaseModel]
+    omitted: frozenset[FieldName]
+
+    @staticmethod
+    def whole(model: type[pydantic.BaseModel]) -> Start:
+        return Start(model=model, omitted=frozenset())
+
+    @staticmethod
+    def reversed(
+        model: type[pydantic.BaseModel], via: FieldName, via_field: ir.ViaField
+    ) -> Start:
+        """What a reverse's nested pipeline runs on: `model`, without `via`
+        unless `via_field` keeps it."""
+        match via_field:
+            case ir.ViaField.OMIT:
+                return Start(model=model, omitted=frozenset({via}))
+            case ir.ViaField.KEEP:
+                return Start.whole(model)
+
+
 @st.composite
 def pipelines(
     draw: st.DrawFn,
     graph: EntityGraph,
-    from_model: type[pydantic.BaseModel],
+    start: Start,
     depth: Depth,
     collections: Collections,
 ) -> steps.Step:
     """A valid pipeline of omits, renames, projects, adds, resolves, reverses
-    and flattens over `from_model`.
+    and flattens over `start`.
 
     Omits and renames name one field or select several. It may start by adding a
     field.
@@ -2710,18 +2769,28 @@ def pipelines(
     Each step names only fields the earlier steps kept, and each rename gets a name
     no field has, so it never collides. A resolve selects Reference fields only,
     and its nested pipeline is drawn the same way over the referenced Entity. A
-    reverse follows a one-to-one Reference to `from_model` backwards, onto a name no
+    reverse follows a one-to-one Reference to `start.model` backwards, onto a name no
     field has, and its nested pipeline is drawn over the referencing Entity. A
     flatten lifts the fields of one such resolve, each renamed to a name no other
     field has. Later steps leave the lifted fields alone. With `Collections.DRAWN`,
     a reverse may also follow a many-to-one Reference backwards, without a nested
     pipeline, into a SortedSequence named in the plural, and a nested pipeline
-    may too.
+    may too. A reverse omits the Reference it follows, or keeps it.
     """
-    fields = list(map(FieldName, from_model.model_fields))
+    # An added field comes first, so later steps can omit, rename or project it.
+    added = [FieldName("added") for _ in range(draw(st.integers(0, 1)))]
+    fields = [
+        *(
+            field
+            for field in map(FieldName, start.model.model_fields)
+            if field not in start.omitted
+        ),
+        *added,
+    ]
     references = {
         reference.field: reference.target
-        for reference in graph.entities[from_model].references
+        for reference in graph.entities[start.model].references
+        if reference.field not in start.omitted
     }
     # The name each reverse gives its field, the referencing Entity, its
     # Reference and whether it may be drawn here. Sorted, because the order of the
@@ -2743,7 +2812,7 @@ def pipelines(
             )
             for model, node in graph.entities.items()
             for reference in node.references
-            if reference.target is from_model
+            if reference.target is start.model
             and (
                 reference.cardinality == Cardinality.ONE_TO_ONE
                 or collections is Collections.DRAWN
@@ -2751,9 +2820,6 @@ def pipelines(
         ),
         key=lambda reversal: (reversal[0].root, reversal[2].root),
     )
-    # An added field comes first, so later steps can omit, rename or project it.
-    added = [FieldName("added") for _ in range(draw(st.integers(0, 1)))]
-    fields.extend(added)
     drawn: list[steps.Step] = [
         steps.add(name, str, default=draw(st.sampled_from(["tag", pydantic.MISSING])))
         for name in added
@@ -2824,7 +2890,10 @@ def pipelines(
                         target,
                         draw(
                             pipelines(
-                                graph, target, Depth(depth.root - 1), Collections.NONE
+                                graph,
+                                Start.whole(target),
+                                Depth(depth.root - 1),
+                                Collections.NONE,
                             )
                         ),
                         Text(f"flat_{index}"),
@@ -2842,10 +2911,11 @@ def pipelines(
                 ]
             ):
                 name, model, via, _ = draw(st.sampled_from(unused))
+                via_field = draw(st.sampled_from(ir.ViaField))
                 nested = draw(
                     pipelines(
                         graph,
-                        model,
+                        Start.reversed(model, via, via_field),
                         Depth(depth.root - 1),
                         Collections.NONE
                         if action == "reverse_flatten"
@@ -2868,6 +2938,7 @@ def pipelines(
                                 if action == "reverse_flatten"
                                 else []
                             ),
+                            via_field=via_field,
                         ),
                         *([steps.flatten(name)] if action == "reverse_flatten" else []),
                     )
@@ -2880,7 +2951,9 @@ def pipelines(
                 target = references[draw(st.sampled_from(resolved))]
                 chosen = [name for name in resolved if references[name] is target]
                 nested = draw(
-                    pipelines(graph, target, Depth(depth.root - 1), collections)
+                    pipelines(
+                        graph, Start.whole(target), Depth(depth.root - 1), collections
+                    )
                 )
                 for name in chosen:
                     del references[name]
@@ -2959,7 +3032,9 @@ def view_cases(draw: st.DrawFn) -> ViewCase:
         from_model = draw(st.sampled_from(drawn_models.from_models()))
         if from_model in graph.entities and draw(st.booleans()):
             valid.add(name)
-            step = draw(pipelines(graph, from_model, Depth(2), Collections.DRAWN))
+            step = draw(
+                pipelines(graph, Start.whole(from_model), Depth(2), Collections.DRAWN)
+            )
         else:
             # A single step often has a single defect, which a longer pipeline
             # would rarely leave as the only one.
@@ -3093,7 +3168,9 @@ def pipeline_cases(draw: st.DrawFn) -> PipelineCase:
     drawn_models = draw(models())
     from_model = draw(st.sampled_from(drawn_models.entities))
     step = draw(
-        pipelines(drawn_models.graph(), from_model, Depth(1), Collections.DRAWN)
+        pipelines(
+            drawn_models.graph(), Start.whole(from_model), Depth(1), Collections.DRAWN
+        )
     )
     return PipelineCase(models=drawn_models, from_model=from_model, step=step)
 
@@ -3137,7 +3214,7 @@ def compiled_views(draw: st.DrawFn) -> compiler.CompiledView:
     drawn = draw(models())
     graph = drawn.graph()
     from_model = draw(st.sampled_from(drawn.entities))
-    step = draw(pipelines(graph, from_model, Depth(2), Collections.DRAWN))
+    step = draw(pipelines(graph, Start.whole(from_model), Depth(2), Collections.DRAWN))
     view = View(
         name=ViewName.fake(),
         query=steps.from_(from_model, step),

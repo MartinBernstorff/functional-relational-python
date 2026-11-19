@@ -368,7 +368,10 @@ def test_require_in_a_nested_pipeline_requires_the_referenced_entitys_field() ->
 
 def test_requiring_a_reversed_field_requires_its_lookup() -> None:
     view = compile_campaign(
-        steps.pipeline(steps.reverse(Detail), steps.require(FieldName("detail")))
+        steps.pipeline(
+            steps.reverse(Detail, via_field=ir.ViaField.KEEP),
+            steps.require(FieldName("detail")),
+        )
     )
 
     field = field_of(view, FieldName("detail"))

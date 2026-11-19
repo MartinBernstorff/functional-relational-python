@@ -21,6 +21,7 @@ from functional_relational_python.compiler.test_compiler import (
     Depth,
     Score,
     Stage,
+    Start,
     pipelines,
 )
 from functional_relational_python.entity_graph.entity_graph import (
@@ -455,7 +456,9 @@ def reversing_views() -> list[View]:
         View(
             name=ViewName("EmployeeProfile"),
             query=steps.from_(
-                Employee, steps.project([FieldName("id")]), steps.reverse(Profile)
+                Employee,
+                steps.project([FieldName("id")]),
+                steps.reverse(Profile, via_field=ir.ViaField.KEEP),
             ),
         ),
         View(
@@ -627,7 +630,9 @@ def collecting_views() -> list[View]:
         View(
             name=ViewName("DepartmentStaff"),
             query=steps.from_(
-                Department, steps.project([FieldName("id")]), steps.reverse(Employee)
+                Department,
+                steps.project([FieldName("id")]),
+                steps.reverse(Employee, via_field=ir.ViaField.KEEP),
             ),
         ),
         View(
@@ -705,12 +710,15 @@ def employee_colleagues(
     return frp_generated_models.EmployeeColleagues(
         department=frp_generated_models.EmployeeColleaguesDepartment(
             id=department_by_id[source.department_id].id,
-            colleagues=employee_by_department_id.get(
-                department_by_id[source.department_id].id,
-                functional_relational_python.entity_graph.sorted_sequence.SortedSequence[
-                    functional_relational_python.outputs.python.test_mappings.Employee,
-                    typing.Literal["id"],
-                ](),
+            colleagues=functional_relational_python.entity_graph.sorted_sequence.SortedSequence(
+                frp_generated_models.EmployeeColleaguesDepartmentColleagues(
+                    id=_employee.id,
+                    name=_employee.name,
+                    mentor_id=_employee.mentor_id,
+                )
+                for _employee in employee_by_department_id.get(
+                    department_by_id[source.department_id].id, ()
+                )
             ),
         ),
     )
@@ -736,6 +744,8 @@ from functional_relational_python.entity_graph.sorted_sequence import SortedSequ
 from functional_relational_python.outputs.python.test_mappings import (
     DepartmentId,
     Employee,
+    EmployeeId,
+    Text,
 )
 
 
@@ -744,9 +754,15 @@ class DepartmentStaff(BaseModel, frozen=True):
     employees: SortedSequence[Employee, Literal["id"]]
 
 
+class EmployeeColleaguesDepartmentColleagues(BaseModel, frozen=True):
+    id: EmployeeId
+    name: Text
+    mentor_id: EmployeeId | None
+
+
 class EmployeeColleaguesDepartment(BaseModel, frozen=True):
     id: DepartmentId
-    colleagues: SortedSequence[Employee, Literal["id"]]
+    colleagues: SortedSequence[EmployeeColleaguesDepartmentColleagues, Literal["id"]]
 
 
 class EmployeeColleagues(BaseModel, frozen=True):
@@ -1651,7 +1667,10 @@ def differential_cases(draw: st.DrawFn) -> DifferentialCase:
                         *map(steps.where, filters),
                         draw(
                             pipelines(
-                                entity_graph(), from_model, Depth(2), Collections.DRAWN
+                                entity_graph(),
+                                Start.whole(from_model),
+                                Depth(2),
+                                Collections.DRAWN,
                             )
                         ),
                     ),
@@ -2200,10 +2219,17 @@ def employee_profiled(
 ) -> frp_generated_models.EmployeeProfiled:
     return frp_generated_models.EmployeeProfiled(
         id=source.id,
-        profile=_required(
-            profile_by_employee_id.get(source.id),
-            source,
-            "a Profile by employee_id",
+        profile=frp_generated_models.EmployeeProfiledProfile(
+            id=_required(
+                profile_by_employee_id.get(source.id),
+                source,
+                "a Profile by employee_id",
+            ).id,
+            bio=_required(
+                profile_by_employee_id.get(source.id),
+                source,
+                "a Profile by employee_id",
+            ).bio,
         ),
     )
 
@@ -2427,7 +2453,10 @@ def required_differential_cases(draw: st.DrawFn) -> DifferentialCase:
                         *map(steps.where, filters),
                         draw(
                             pipelines(
-                                entity_graph(), from_model, Depth(2), Collections.DRAWN
+                                entity_graph(),
+                                Start.whole(from_model),
+                                Depth(2),
+                                Collections.DRAWN,
                             )
                         ),
                         steps.require(steps.select(selected)),
@@ -2727,7 +2756,10 @@ def union_cases(draw: st.DrawFn) -> DifferentialCase:
                         *map(steps.where, filters),
                         draw(
                             pipelines(
-                                entity_graph(), from_model, Depth(1), Collections.DRAWN
+                                entity_graph(),
+                                Start.whole(from_model),
+                                Depth(1),
+                                Collections.DRAWN,
                             )
                         ),
                         steps.add(FieldName("variant_tag"), tags[index], f"v{index}"),

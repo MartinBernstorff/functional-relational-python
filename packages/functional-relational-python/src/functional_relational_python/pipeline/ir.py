@@ -167,13 +167,28 @@ class DefaultName(pydantic.BaseModel, frozen=True):
     snake_case, plural when the field holds several Entities."""
 
 
+class ViaField(enum.Enum):
+    """Whether the Entities `reverse` adds keep the Reference it follows back to
+    the subject.
+
+    That Reference holds the subject's own `id`, so it says nothing new.
+    """
+
+    OMIT = enum.auto()
+    """Drops the Reference from each Entity before the nested pipeline runs, so
+    the field holds a generated nested model, even with no steps."""
+    KEEP = enum.auto()
+    """Keeps the Reference: without steps, the field holds the Entity itself."""
+
+
 class Reverse(pydantic.BaseModel, frozen=True):
     """Adds a field holding what references the subject by the `entity`'s
     Reference `via`: for a one-to-one Reference the Entity, or `None` when none
     does; for a many-to-one Reference every such Entity, in a SortedSequence.
 
     The subject is the View's from_model, or inside a nested pipeline the Entity it
-    runs on. `then` is applied to `entity`, as if it were a View's from_model.
+    runs on. `then` is applied to `entity`, as if it were a View's from_model,
+    after dropping the Reference `via` unless `via_field` keeps it.
     """
 
     input: Node
@@ -181,6 +196,7 @@ class Reverse(pydantic.BaseModel, frozen=True):
     via: FieldName | SoleReference
     then: Callable[[Node], Node]
     name: FieldName | DefaultName
+    via_field: ViaField
 
 
 type UncheckedDefault = object

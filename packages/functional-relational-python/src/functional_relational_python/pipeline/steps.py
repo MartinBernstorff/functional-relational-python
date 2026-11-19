@@ -213,6 +213,7 @@ def reverse(
     entity: type[pydantic.BaseModel],
     *then: Step,
     name: FieldName | None = None,
+    via_field: ir.ViaField = ir.ViaField.OMIT,
 ) -> Step:
     """Adds a field holding what references the subject by `entity`'s one
     Reference to it.
@@ -226,12 +227,19 @@ def reverse(
     `entity`'s `id`, empty when there is none, and is named in the plural, e.g.
     `ads` for `Ad`. `name` names the field instead.
 
+    The Reference followed holds the subject's own `id`, so by default
+    (`via_field=ViaField.OMIT`) it is dropped from each `entity` before the steps
+    in `then` run, and the field holds a generated nested model, even with no
+    steps. `via_field=ViaField.KEEP` keeps it; then without steps the field
+    holds the Entities themselves.
+
     The steps in `then` form a pipeline applied to `entity`, or for a many-to-one
     Reference to each `entity`, which may resolve and reverse in turn but not
-    filter with `where`; without them, the field holds the Entities themselves.
+    filter with `where`.
     """
-    # `name` is optional, unlike TY-k8 asks, so that the common call stays short.
-    return _reversing(entity, ir.SoleReference(), then, name)
+    # `name` and `via_field` are optional, unlike TY-k8 asks, so that the common
+    # call stays short.
+    return _reversing(entity, ir.SoleReference(), then, name, via_field)
 
 
 def reverse_via(
@@ -239,12 +247,14 @@ def reverse_via(
     via: FieldName,
     *then: Step,
     name: FieldName | None = None,
+    via_field: ir.ViaField = ir.ViaField.OMIT,
 ) -> Step:
     """Like `reverse`, following `entity`'s Reference `via` backwards.
 
-    For an `entity` with several References to the subject.
+    For an `entity` with several References to the subject. By default `via` is
+    dropped from each `entity`, as for `reverse`.
     """
-    return _reversing(entity, via, then, name)
+    return _reversing(entity, via, then, name, via_field)
 
 
 def _reversing(
@@ -252,13 +262,19 @@ def _reversing(
     via: FieldName | ir.SoleReference,
     then: Iterable[Step],
     name: FieldName | None,
+    via_field: ir.ViaField,
 ) -> Step:
     nested = pipeline(*then)
     field_name = ir.DefaultName() if name is None else name
 
     def step(node: ir.Node) -> ir.Node:
         return ir.Reverse(
-            input=node, entity=entity, via=via, then=nested, name=field_name
+            input=node,
+            entity=entity,
+            via=via,
+            then=nested,
+            name=field_name,
+            via_field=via_field,
         )
 
     return step

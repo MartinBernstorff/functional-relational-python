@@ -1118,8 +1118,21 @@ def _reversed(
 ) -> _CheckedField:
     """The field holding what references the subject by `reference`: by a
     one-to-one Reference the Entity, by a many-to-one Reference every such
-    Entity; after `node.then` if it does anything."""
+    Entity; after `node.then` if it does anything.
+
+    Unless `node.via_field` keeps it, `reference` is omitted before `node.then`,
+    so the field holds a nested model even when `node.then` does nothing."""
     name = _reversed_name(node, reference.cardinality)
+    then: Callable[[ir.Node], ir.Node]
+    match node.via_field:
+        case ir.ViaField.OMIT:
+
+            def omitting(entity: ir.Node) -> ir.Node:
+                return node.then(ir.Omit(input=entity, fields=reference.field))
+
+            then = omitting
+        case ir.ViaField.KEEP:
+            then = node.then
     found: ir.FoundValue
     match reference.cardinality:
         case Cardinality.ONE_TO_ONE:
@@ -1133,7 +1146,7 @@ def _reversed(
             found = ir.CollectionLookup(
                 target=node.entity, via=reference.field, id_type=reference.id_type
             )
-    return _resolved(entity_graph, view, node.then, name, found)
+    return _resolved(entity_graph, view, then, name, found)
 
 
 def _resolved(
