@@ -7,11 +7,16 @@ carries that meaning rather than an enum variant. A View that resolves Reference
 also takes, per Entity it looks up, a keyword parameter mapping IDs to Entities; a
 dangling ID raises `KeyError` there. A View that reverses a one-to-one Reference
 takes a parameter mapping the IDs in that Reference to the Entities holding them;
-a missing ID gives `None`. A value the View requires goes through a function
-`_required` the module defines, which raises `ValueError` naming the subject's
-field and ID when the value is `None`. A module of mapping functions imports only
-the from_model, Entity and View model modules, so it runs and type checks without
-this library installed.
+a missing ID gives `None`. A View that reverses a many-to-one Reference takes a
+parameter mapping each ID in that Reference to a SortedSequence of the Entities
+holding it, ascending by their `id`; the function trusts the caller to have
+sorted them, and passes them on as they are. A missing ID gives an empty
+SortedSequence. A value the View requires goes through a function `_required` the
+module defines, which raises `ValueError` naming the subject's field and ID when
+the value is `None`. A module of mapping functions imports only the from_model,
+Entity and View model modules, and `typing` and frp's SortedSequence for a
+reversed many-to-one Reference; without one, it runs and type checks without this
+library installed.
 
 A Union becomes a function that calls its Variants' functions in turn, and
 returns what the first that maps the row gives, or `None` when none does. It
@@ -261,9 +266,11 @@ class _Depth(pydantic.RootModel[int], frozen=True):
 
 
 class _Bracketed(pydantic.BaseModel, frozen=True):
-    """A one-line expression around its last top-level brackets: `head` up to
-    and including the opening bracket, `body` inside them, and `tail` from the
-    closing bracket on."""
+    """A one-line expression around its last top-level brackets that are not
+    empty: `head` up to and including the opening bracket, `body` inside them,
+    and `tail` from the closing bracket on. Like ruff format, it passes over
+    trailing empty brackets, e.g. of `.all()`, which cannot be split. Only
+    empty brackets have an empty `body`."""
 
     head: Expression
     body: Expression
@@ -272,23 +279,21 @@ class _Bracketed(pydantic.BaseModel, frozen=True):
     @staticmethod
     def of(text: Expression) -> _Bracketed | _Unbracketed:
         depths = _Bracketed._depths(text)
-        closings = [
-            index
-            for index, character in enumerate(text.root)
-            if character in ")]}" and depths[index] == _Depth(1)
-        ]
-        if not closings:
+        pairs: list[tuple[int, int]] = []
+        opening = 0
+        for index, character in enumerate(text.root):
+            if character in "([{" and depths[index] == _Depth(0):
+                opening = index
+            elif character in ")]}" and depths[index] == _Depth(1):
+                pairs.append((opening, index))
+        if not pairs:
             return _Unbracketed()
-        closing = closings[-1]
-        opening = max(
-            index
-            for index in range(closing)
-            if text.root[index] in "([{" and depths[index] == _Depth(0)
-        )
+        filled = [(start, end) for start, end in pairs if end > start + 1]
+        start, end = filled[-1] if filled else pairs[-1]
         return _Bracketed(
-            head=Expression(text.root[: opening + 1]),
-            body=Expression(text.root[opening + 1 : closing]),
-            tail=Expression(text.root[closing:]),
+            head=Expression(text.root[: start + 1]),
+            body=Expression(text.root[start + 1 : end]),
+            tail=Expression(text.root[end:]),
         )
 
     @staticmethod
@@ -443,10 +448,12 @@ class MappingsRenderer:
     ) -> Expression:
         """`def <function>(source: ..., *, <lookups>) -> <model>:`, the model
         optional when the function may map a row to nothing."""
+        values = Indent(8)
         parameters = "".join(
             f"    {parameter.name.root}: {FunctionPlan.mapping.root}.Mapping[\n"
             f"        {parameter.id_type.qualified().root},\n"
-            f"        {parameter.target.qualified().root},\n"
+            f"{values.pad().root}"
+            f"{values.fitted(Expression(parameter.value_annotation().root), Expression(',')).root},\n"
             "    ],\n"
             for parameter in function.lookups
         )
@@ -579,7 +586,7 @@ class _Construction(pydantic.BaseModel, frozen=True):
         match value:
             case ir.SubjectField() | ir.RequiredField():
                 return self.column(value, subject)
-            case ir.ReverseLookup():
+            case ir.ReverseLookup() | ir.CollectionLookup():
                 return self._reverse(value, subject)
             case ir.Lookup() | ir.ChainedLookup():
                 followed = self._followed(value.lookups(), subject)
@@ -644,10 +651,23 @@ class _Construction(pydantic.BaseModel, frozen=True):
             case ir.RequiredField():
                 return self.required(value, subject, _Construction._what(column))
 
-    def _reverse(self, lookup: ir.ReverseLookup, subject: Expression) -> Expression:
-        """The Entity referencing `subject` by `lookup.via`: through `_required` if
-        the View requires it, else `None` if there is none."""
-        found = self._reversed(lookup, subject)
+    def _reverse(
+        self, lookup: ir.ReverseLookup | ir.CollectionLookup, subject: Expression
+    ) -> Expression:
+        """The Entity referencing `subject` by a one-to-one `lookup.via`: through
+        `_required` if the View requires it, else `None` if there is none. By a
+        many-to-one `lookup.via`, every such Entity, in the order the parameter
+        holds them, or an empty SortedSequence."""
+        match lookup:
+            case ir.CollectionLookup():
+                access = self._access(lookup, subject)
+                parameter = self.function.parameter_of(lookup)
+                empty = f"{parameter.value_annotation().root}()"
+                return Expression(
+                    f"{access.parameter.root}.get({access.key.root}, {empty})"
+                )
+            case ir.ReverseLookup():
+                found = self._reversed(lookup, subject)
         match lookup.optionality:
             case Optionality.OPTIONAL:
                 return found
@@ -714,17 +734,17 @@ class _Construction(pydantic.BaseModel, frozen=True):
         access = self._access(lookup, subject)
         return Expression(f"{access.parameter.root}.get({access.key.root})")
 
-    def _access(self, lookup: ir.EntityLookup, subject: Expression) -> _Access:
-        """The parameter `lookup` finds its Entity in, and the subject's value it
-        is keyed by: the Reference's ID, or for a reversed Reference the subject's
-        own ID."""
+    def _access(self, lookup: ir.Finder, subject: Expression) -> _Access:
+        """The parameter `lookup` finds its Entities in, and the subject's value
+        it is keyed by: the Reference's ID, or for a reversed Reference the
+        subject's own ID."""
         match lookup:
             case ir.Lookup():
                 field = lookup.reference.field
-            case ir.ReverseLookup():
+            case ir.ReverseLookup() | ir.CollectionLookup():
                 field = EntityNode.primary_key
         return _Access(
-            parameter=Expression(self.function.parameter_of(lookup).root),
+            parameter=Expression(self.function.parameter_of(lookup).name.root),
             key=Expression(f"{subject.root}.{field.root}"),
         )
 

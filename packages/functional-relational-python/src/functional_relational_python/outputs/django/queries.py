@@ -4,7 +4,8 @@ filtering, ordering and pagination.
 
 Per View it writes two functions. `<view>_queryset` makes a QuerySet of the
 from_model's Django model keep the rows the View's Filters keep, and load every Entity
-the View looks up, in the same query. `<view>_from_row` builds the View model from
+the View looks up, in the same query, and every SortedSequence of Entities it
+reverses a many-to-one Reference into, in one more query each. `<view>_from_row` builds the View model from
 one row of that QuerySet. Per Union it writes the same two functions:
 `<union>_queryset` keeps the rows any Variant keeps, loads what every Variant looks
 up, and annotates each row with the name of the first Variant that keeps it;
@@ -12,7 +13,8 @@ up, and annotates each row with the name of the first Variant that keeps it;
 QuerySet with a method `as_<view>()` per View and Union over the Entity, and a
 Manager, which is the Entity's Django model's manager `objects`. The method yields
 View models from the QuerySet as filtered, ordered and sliced so far, so a list
-costs one query. An Entity whose Django model the application already has, see
+costs one query, and one more per SortedSequence the View holds, however many rows
+it has. An Entity whose Django model the application already has, see
 `ExistingDjangoModel`, gets no QuerySet or Manager, since its model's manager is
 its own; its Views and Unions still get their two functions.
 
@@ -58,6 +60,14 @@ back over it returns to the row it came from: Django fills that in itself, and
 drops what it selected related past it, so the reader resumes at that row, and
 selects related from there.
 
+A many-to-one Reference is followed backwards through its reverse accessor with
+`prefetch_related`, whose `Prefetch` orders the rows by their primary key in SQL,
+through the default manager of their Django model, as Django follows the
+accessor. A string key may order differently under the database's collation than
+the InMemoryViewEngine orders it in Python. The queryset function imports that
+Django model when it runs, by which time the models have been imported. The row
+reader reads the accessor's rows from the prefetch, in its order.
+
 Like the InMemoryViewEngine, it computes each field from the Values of the
 compiled Relation, so the two agree (the differential test in `test_queries.py`
 checks this). The generated module imports the Django models only for type
@@ -74,7 +84,7 @@ from pydantic.fields import FieldInfo
 from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler, narrowing
-from functional_relational_python.compiler.model_names import FunctionName
+from functional_relational_python.compiler.model_names import FunctionName, PascalCase
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
     FieldName,
@@ -185,7 +195,9 @@ type DjangoQueriesDiagnostic = (
 
 class RelatedPath(pydantic.RootModel[str], frozen=True):
     """A chain of relations `select_related` follows, e.g. `department__company`:
-    foreign keys, and reverse accessors of one-to-one References."""
+    foreign keys, and reverse accessors of one-to-one References; or that
+    `prefetch_related` follows, which ends in the reverse accessor of a
+    many-to-one Reference, e.g. `department__employee_by_department`."""
 
     @staticmethod
     def of(relations: Sequence[FieldName]) -> RelatedPath:
@@ -238,18 +250,29 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
         return QueryNames(function=self.view.names.function)
 
     def related_paths(self, config: DjangoModels) -> tuple[RelatedPath, ...]:
-        """Every chain of relations to the Entities the View looks up, in the
-        order they are first looked up."""
+        """Every chain of relations to the Entities the View looks up one at a
+        time, in the order they are first looked up."""
         return tuple(
             dict.fromkeys(
-                RelatedPath.of(path)
-                for path in ViewQueries._paths(
-                    self.view.relation,
-                    _Trail.start(self.view.from_model),
-                    ((),),
-                    config,
-                )
+                RelatedPath.of(found.path)
+                for found in self._found(config)
+                if isinstance(found, _Selected)
             )
+        )
+
+    def prefetches(self, config: DjangoModels) -> tuple[_Prefetched, ...]:
+        """Every reverse accessor of a many-to-one Reference the View follows to
+        a SortedSequence of Entities, through the chain of relations to the
+        Entity it follows it from, in the order they are first followed."""
+        return tuple(
+            dict.fromkeys(
+                found for found in self._found(config) if isinstance(found, _Prefetched)
+            )
+        )
+
+    def _found(self, config: DjangoModels) -> Iterator[_Selected | _Prefetched]:
+        return ViewQueries._paths(
+            self.view.relation, _Trail.start(self.view.from_model), ((),), config
         )
 
     @staticmethod
@@ -258,13 +281,22 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
         trail: _Trail,
         paths: tuple[tuple[FieldName, ...], ...],
         config: DjangoModels,
-    ) -> Iterator[tuple[FieldName, ...]]:
+    ) -> Iterator[_Selected | _Prefetched]:
         """`trail` is the way to the subject of `relation`, and `paths` the chain
         of relations to each Entity on it, the subject's last. A Hop back needs
         no relation: Django fills it in."""
         for field in relation.fields:
             at, here = trail, paths
-            for lookup in field.value.lookups():
+            match field.value:
+                case ir.CollectionLookup(target=target, via=via):
+                    accessor = config.reverse_accessor_of(target, via)
+                    yield _Prefetched(
+                        path=RelatedPath.of((*here[-1], accessor)), target=target
+                    )
+                    continue
+                case found:
+                    lookups = found.lookups()
+            for lookup in lookups:
                 hop, at = at.hop(lookup)
                 match hop:
                     case _Follow():
@@ -272,7 +304,7 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
                             *here[-1],
                             DjangoQueriesRenderer.related(lookup, config),
                         )
-                        yield path
+                        yield _Selected(path=path)
                         here = (*here, path)
                     case _Back():
                         here = here[:-1]
@@ -281,6 +313,21 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
                     pass
                 case ir.NestedField(relation=nested):
                     yield from ViewQueries._paths(nested, at, here, config)
+
+
+class _Selected(pydantic.BaseModel, frozen=True):
+    """A chain of relations `select_related` follows, to one Entity."""
+
+    path: tuple[FieldName, ...]
+
+
+class _Prefetched(pydantic.BaseModel, frozen=True):
+    """A chain of relations `prefetch_related` follows, ending in the reverse
+    accessor of a many-to-one Reference of `target`, whose rows it orders by
+    their primary key."""
+
+    path: RelatedPath
+    target: type[pydantic.BaseModel]
 
 
 class UnionQueries(pydantic.BaseModel, frozen=True):
@@ -328,6 +375,14 @@ class UnionQueries(pydantic.BaseModel, frozen=True):
         return tuple(
             dict.fromkeys(
                 path for leaf in self.leaves for path in leaf.related_paths(config)
+            )
+        )
+
+    def prefetches(self, config: DjangoModels) -> tuple[_Prefetched, ...]:
+        """Every Variant's prefetches, each once, in Variant order."""
+        return tuple(
+            dict.fromkeys(
+                found for leaf in self.leaves for found in leaf.prefetches(config)
             )
         )
 
@@ -717,7 +772,11 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             DjangoQueriesRenderer.kept_variable,
             AnnotationText("the variable holding the QuerySet of kept rows"),
         )
-        for module in (DjangoQueriesRenderer.django_models, *class_modules):
+        for module in (
+            DjangoQueriesRenderer.django_models,
+            *class_modules,
+            *self._prefetched_modules(query),
+        ):
             queryset.refer_to_module(module)
         yield from queryset.clashes()
 
@@ -790,15 +849,83 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
 
     def _prepared(self, query: ReadQueries) -> Expression:
         """The QuerySet loading every field and every Entity `query` reads, at the
-        indentation of a function body."""
-        prepared = f"{DjangoQueriesRenderer.queryset_parameter.root}.defer(None)"
+        indentation of a function body: the Entities it looks up one at a time
+        in the same query, and each SortedSequence of Entities in one query more,
+        ordered by their primary key.
+
+        With both, the calls are chained one per line in parentheses, as ruff
+        format chains them."""
+        deferred = Expression(
+            f"{DjangoQueriesRenderer.queryset_parameter.root}.defer(None)"
+        )
         paths = query.related_paths(self.config)
-        if not paths:
-            return Expression(prepared)
-        return Indent(4).exploded(
-            Expression(f"{prepared}.select_related("),
-            (Expression(PythonString(path.root).literal().root) for path in paths),
+        prefetches = query.prefetches(self.config)
+
+        def selected(indent: Indent) -> Expression:
+            return indent.exploded(
+                Expression(".select_related("),
+                (Expression(PythonString(path.root).literal().root) for path in paths),
+                Expression(")"),
+            )
+
+        def prefetched(indent: Indent) -> Expression:
+            return indent.exploded(
+                Expression(".prefetch_related("),
+                (self._prefetch(found, indent.deeper()) for found in prefetches),
+                Expression(")"),
+            )
+
+        body = Indent(4)
+        if paths and prefetches:
+            inner = body.deeper()
+            lines = "".join(
+                f"{inner.pad().root}{line.root}\n"
+                for line in (deferred, selected(inner), prefetched(inner))
+            )
+            return Expression(f"(\n{lines}{body.pad().root})")
+        if paths:
+            return Expression(f"{deferred.root}{selected(body).root}")
+        if prefetches:
+            return Expression(f"{deferred.root}{prefetched(body).root}")
+        return deferred
+
+    def _prefetch(self, found: _Prefetched, indent: Indent) -> Expression:
+        """`Prefetch(<path>, queryset=<model>._default_manager.order_by("pk"))`, on
+        a line at `indent`. The default manager is the one Django follows a
+        reverse accessor with."""
+        model = self.config.model_of(found.target).qualified().root
+        ordered = f'{model}._default_manager.order_by("pk")'
+        return indent.exploded(
+            Expression(f"{DjangoQueriesRenderer.django_models.root}.Prefetch("),
+            (
+                Expression(PythonString(found.path.root).literal().root),
+                Expression(f"queryset={ordered}"),
+            ),
             Expression(")"),
+        )
+
+    def _model_imports(self, query: ReadQueries) -> FileText:
+        """The statements at the start of a queryset function importing the
+        Django models its prefetches order, if any. The module imports them only
+        for type checking, since they import it; when the function runs, they
+        have been imported."""
+        modules = self._prefetched_modules(query)
+        if not modules:
+            return FileText("")
+        imports = ImportBlock(
+            modules=modules, symbols=frozenset(), first_party=self.first_party
+        ).text()
+        lines = "".join(
+            f"    {line}" if line != "\n" else line
+            for line in imports.root.splitlines(keepends=True)
+        )
+        return FileText(f"{lines}\n")
+
+    def _prefetched_modules(self, query: ReadQueries) -> frozenset[ModulePath]:
+        """The modules of the Django models `query`'s prefetches order."""
+        return frozenset(
+            self.config.model_of(found.target).module
+            for found in query.prefetches(self.config)
         )
 
     @staticmethod
@@ -812,7 +939,10 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
 
     def _queryset_function(self, query: ViewQueries) -> FileText:
         prepared = self._prepared(query)
-        signature = DjangoQueriesRenderer._queryset_signature(query).root
+        signature = (
+            f"{DjangoQueriesRenderer._queryset_signature(query).root}"
+            f"{self._model_imports(query).root}"
+        )
         writer = self.writer
         match DjangoQueriesRenderer._kept_by(writer, query.view):
             case _KeepsEvery():
@@ -912,6 +1042,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         )
         return FileText(
             f"{DjangoQueriesRenderer._queryset_signature(union).root}"
+            f"{self._model_imports(union).root}"
             f"    {kept} = {self._prepared(union).root}\n"
             f"    {kept} = {annotated.root}\n"
             f"{added}"
@@ -1231,7 +1362,13 @@ class _ReadThrough:
                 return _ReadThrough._literal_enum(field.annotation())
             case ir.Lifted() as lifted:
                 return _ReadThrough._wrapping_none(lifted, graph, config, field_types)
-            case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() | ir.Added():
+            case (
+                ir.Lookup()
+                | ir.ReverseLookup()
+                | ir.ChainedLookup()
+                | ir.Added()
+                | ir.CollectionLookup()
+            ):
                 return _ReadAsStored()
 
     @staticmethod
@@ -1373,8 +1510,34 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                     Expression(f"{followed.reached.row().root}.{attribute.root}"),
                 )
                 return self.indent.looked_up(prefix, followed.absent, lambda _: lifted)
+            case ir.CollectionLookup():
+                return self._collection(value, row)
             case ir.Added():
                 return LeftOut()
+
+    def _collection(self, lookup: ir.CollectionLookup, row: Expression) -> Expression:
+        """A list of a dict per Entity the reverse accessor of `lookup` holds for
+        `row`, in the order the prefetch gave them, on a line at this
+        indentation. The accessor is read with `getattr`, cast to a manager of the
+        Django model it holds, because the Django models do not declare it."""
+        accessor = self.config.reverse_accessor_of(lookup.target, lookup.via)
+        model = self.config.model_of(lookup.target).qualified().root
+        manager = (
+            f'{DjangoQueriesRenderer.typing_module.root}.cast("'
+            f'{DjangoQueriesRenderer.django_models.root}.Manager[{model}]", '
+            f"getattr({row.root}, {PythonString(accessor.root).literal().root}))"
+        )
+        snake = PascalCase(lookup.target.__name__).snake_case().root
+        variable = Expression(f"_{snake}")
+        inner = self.indent.deeper()
+        element = self.at(inner).entity(lookup.target, variable)
+        iterated = inner.fitted(
+            Expression(f"for {variable.root} in {manager}.all()"), Expression("")
+        )
+        return Expression(
+            f"[\n{inner.pad().root}{element.root}\n"
+            f"{inner.pad().root}{iterated.root}\n{self.indent.pad().root}]"
+        )
 
     def _through(
         self,
@@ -1431,7 +1594,11 @@ class _RowReader(pydantic.BaseModel, frozen=True):
         """Every lookup of every field of `relation`, nested ones included, as
         often as it is used."""
         for field in relation.fields:
-            yield from field.value.lookups()
+            match field.value:
+                case ir.CollectionLookup():
+                    pass
+                case found:
+                    yield from found.lookups()
             match field:
                 case ir.NestedField(relation=nested):
                     yield from _RowReader.every_lookup(nested)

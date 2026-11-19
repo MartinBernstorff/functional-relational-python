@@ -19,6 +19,7 @@ from functional_relational_python.entity_graph.id import (
     OneToOne,
     OneToOneMarker,
 )
+from functional_relational_python.entity_graph.sorted_sequence import SortedSequence
 from functional_relational_python.outputs import engine
 from functional_relational_python.pipeline import conditions, ir, steps
 from functional_relational_python.pipeline.unions import Union, UnionName
@@ -543,6 +544,73 @@ def test_a_nested_pipeline_runs_on_the_reversed_entity() -> None:
     )
 
 
+def test_a_reversed_many_to_one_reference_holds_its_entities_by_id_or_none() -> None:
+    view = View(
+        name=ViewName.fake(),
+        query=steps.from_(
+            Department, steps.project([FieldName("id")]), steps.reverse(Employee)
+        ),
+    )
+    view_engine = hr_engine(view)
+    staffed = Department.fake(DepartmentId(1), CompanyId.fake())
+    empty = Department.fake(DepartmentId(2), CompanyId.fake())
+    later, earlier = (
+        Employee.fake(EmployeeId(index), staffed.id, None) for index in (2, 1)
+    )
+    for entity in (staffed, empty, later, earlier):
+        view_engine.put(entity).unwrap()
+
+    assert read(view_engine, view.name) == (
+        engine.ViewRow(
+            {FieldName("id"): staffed.id, FieldName("employees"): (earlier, later)}
+        ),
+        engine.ViewRow({FieldName("id"): empty.id, FieldName("employees"): ()}),
+    )
+
+
+def test_a_reversed_many_to_one_reference_is_a_sorted_sequence() -> None:
+    view = View(
+        name=ViewName.fake(),
+        query=steps.from_(Department, steps.reverse(Employee)),
+    )
+    view_engine = hr_engine(view)
+    view_engine.put(Department.fake(DepartmentId(1), CompanyId.fake())).unwrap()
+
+    (row,) = read(view_engine, view.name)
+
+    assert isinstance(row.root[FieldName("employees")], SortedSequence)
+
+
+def test_a_sorted_sequence_in_a_nested_pipeline_is_of_the_resolved_entity() -> None:
+    view = employee_view(
+        steps.pipeline(
+            steps.project([FieldName("mentor_id")]),
+            steps.resolve(
+                named(FieldName("mentor_id")),
+                steps.project([FieldName("id")]),
+                steps.reverse(Employee, name=FieldName("mentees")),
+            ),
+        )
+    )
+    view_engine = hr_engine(view)
+    department = DepartmentId(1)
+    mentor = Employee.fake(EmployeeId(1), department, None)
+    mentee = Employee.fake(EmployeeId(2), department, mentor.id)
+    for entity in (mentor, mentee):
+        view_engine.put(entity).unwrap()
+
+    assert read(view_engine, view.name) == (
+        engine.ViewRow({FieldName("mentor"): None}),
+        engine.ViewRow(
+            {
+                FieldName("mentor"): engine.ViewRow(
+                    {FieldName("id"): mentor.id, FieldName("mentees"): (mentee,)}
+                )
+            }
+        ),
+    )
+
+
 def test_every_id_several_entities_share_in_a_one_to_one_reference_is_reported() -> (
     None
 ):
@@ -878,8 +946,8 @@ def with_ids_again(
                 values[reference.field.root] = (
                     vars(value)["id"] if isinstance(value, pydantic.BaseModel) else None
                 )
-            case ir.Added() | ir.ReverseLookup():
-                # Neither holds a value of the from_model.
+            case ir.Added() | ir.ReverseLookup() | ir.CollectionLookup():
+                # None holds a value of the from_model.
                 pass
             case ir.ChainedLookup() | ir.Lifted():
                 pytest.fail(f"a View that only resolves lifted {field.name.root}")

@@ -5,7 +5,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     FieldName,
     RuntimeAnnotation,
 )
-from functional_relational_python.entity_graph.id import IdType, OneToOneMarker
+from functional_relational_python.entity_graph.id import IdType
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.constraints import ConditionOwner
 from functional_relational_python.pipeline.unions import UnionName
@@ -127,36 +127,24 @@ class ReverseOfNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class NoOneToOneReference(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`reverse` named an Entity with no one-to-one Reference to the subject.
-
-    `many_to_one` are its References to the subject that `one_to_one_marker`,
-    the catalog's, does not mark; following one backwards would give several
-    Entities.
-    """
+class NoReferenceToSubject(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`reverse` named an Entity with no Reference to the subject."""
 
     view: DefinitionName
     from_model: ir.FromModelName
     entity: type[pydantic.BaseModel]
-    many_to_one: tuple[FieldName, ...]
-    one_to_one_marker: OneToOneMarker
 
     def describe(self) -> DiagnosticMessage:
-        message = (
+        return DiagnosticMessage(
             f"{self.view.root}: cannot reverse {self.entity.__qualname__} onto "
-            f"{self.from_model.root}, because it has no one-to-one Reference to "
+            f"{self.from_model.root}, because it has no Reference to "
             f"{self.from_model.root}."
         )
-        if self.many_to_one:
-            fields = ", ".join(f"'{field.root}'" for field in self.many_to_one)
-            marker = self.one_to_one_marker.root.__qualname__
-            message += f" Its References {fields} are not marked {marker}."
-        return DiagnosticMessage(message)
 
 
 class AmbiguousReverse(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`reverse` named an Entity with several one-to-one References to the subject,
-    without choosing one with `reverse_via`."""
+    """`reverse` named an Entity with several References to the subject, of
+    either Cardinality, without choosing one with `reverse_via`."""
 
     view: DefinitionName
     from_model: ir.FromModelName
@@ -167,14 +155,14 @@ class AmbiguousReverse(pydantic.BaseModel, Diagnostic, frozen=True):
         fields = ", ".join(f"'{field.root}'" for field in self.references)
         return DiagnosticMessage(
             f"{self.view.root}: cannot reverse {self.entity.__qualname__} onto "
-            f"{self.from_model.root}, because each of {fields} is a one-to-one "
-            f"Reference to {self.from_model.root}. Choose one with reverse_via."
+            f"{self.from_model.root}, because each of {fields} is a Reference to "
+            f"{self.from_model.root}. Choose one with reverse_via."
         )
 
 
-class NotAOneToOneReference(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`reverse_via` named a field that is not one of the Entity's one-to-one
-    References to the subject. `valid` are those it has."""
+class NotAReferenceToSubject(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`reverse_via` named a field that is not one of the Entity's References to
+    the subject. `valid` are those it has."""
 
     view: DefinitionName
     from_model: ir.FromModelName
@@ -187,7 +175,26 @@ class NotAOneToOneReference(pydantic.BaseModel, Diagnostic, frozen=True):
         return DiagnosticMessage(
             f"{self.view.root}: cannot reverse {self.entity.__qualname__}."
             f"{self.field.root} onto {self.from_model.root}, because it is not a "
-            f"one-to-one Reference to {self.from_model.root}. Valid fields: {valid}."
+            f"Reference to {self.from_model.root}. Valid fields: {valid}."
+        )
+
+
+class NestedPipelineOnCollection(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`reverse` gave a nested pipeline to a many-to-one Reference, whose field
+    holds a SortedSequence of Entities, which takes none yet."""
+
+    view: DefinitionName
+    from_model: ir.FromModelName
+    entity: type[pydantic.BaseModel]
+    via: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot apply a nested pipeline to the "
+            f"{self.entity.__qualname__} entities referencing {self.from_model.root} "
+            f"by the many-to-one Reference {self.entity.__qualname__}."
+            f"{self.via.root}. Reverse it without steps; it holds the entities "
+            "themselves."
         )
 
 
@@ -218,6 +225,37 @@ class NotAResolvedField(pydantic.BaseModel, Diagnostic, frozen=True):
         return DiagnosticMessage(
             f"{self.view.root}: cannot flatten {self.from_model.root}.{self.field.root}, "
             "because it is not a resolved Reference."
+        )
+
+
+class FlattenCollection(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`flatten` named a field holding a SortedSequence of Entities, which has no
+    one Entity to lift fields out of."""
+
+    view: DefinitionName
+    from_model: ir.FromModelName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot flatten {self.from_model.root}.{self.field.root}, "
+            "because it holds several entities, not one."
+        )
+
+
+class LiftedCollection(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A field `flatten` would lift out of `flattened` holds a SortedSequence of
+    Entities, which cannot be found through the Entity `flattened` holds."""
+
+    view: DefinitionName
+    flattened: FieldName
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: cannot lift '{self.field.root}' out of "
+            f"'{self.flattened.root}', because it holds several entities. Omit it "
+            "in the nested pipeline of the resolve, or do not flatten."
         )
 
 
@@ -395,7 +433,7 @@ class WhereInNestedPipeline(pydantic.BaseModel, Diagnostic, frozen=True):
 
 class NotAFromModelColumn(pydantic.BaseModel, Diagnostic, frozen=True):
     """A Condition names a field whose value is not one of the from_model's own
-    fields: a resolved or an added field."""
+    fields: a resolved, reversed or added field."""
 
     owner: ConditionOwner
     from_model: ir.FromModelName
@@ -777,11 +815,14 @@ type CompileDiagnostic = (
     | ResolvedNameCollision
     | ReverseFromNonEntity
     | ReverseOfNonEntity
-    | NoOneToOneReference
+    | NoReferenceToSubject
     | AmbiguousReverse
-    | NotAOneToOneReference
+    | NotAReferenceToSubject
+    | NestedPipelineOnCollection
     | ReverseOntoExistingField
     | NotAResolvedField
+    | FlattenCollection
+    | LiftedCollection
     | FlattenOntoExistingField
     | NonLiteralDefault
     | AddOntoExistingField

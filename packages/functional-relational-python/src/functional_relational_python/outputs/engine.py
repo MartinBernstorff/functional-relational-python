@@ -5,8 +5,8 @@ as a stateful fake in their own tests, and every other backend is compared
 against it.
 """
 
-from collections.abc import Iterable, Mapping
-from typing import Protocol
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Literal, Protocol
 
 import pydantic
 from safe_result import Err, Ok, Result
@@ -19,6 +19,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     Optionality,
 )
 from functional_relational_python.entity_graph.id import IdValue
+from functional_relational_python.entity_graph.sorted_sequence import SortedSequence
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.unions import UnionName
 from functional_relational_python.pipeline.views import ViewName
@@ -34,7 +35,8 @@ class ViewRow(pydantic.RootModel[Mapping[FieldName, object]], frozen=True):
 
     Values are the Entity's own field values, so their types are the user's. A
     resolved field holds the referenced Entity, or a ViewRow if it has a nested
-    pipeline.
+    pipeline. A reversed many-to-one Reference holds a SortedSequence of the
+    Entities referencing the subject.
     """
 
     @staticmethod
@@ -179,7 +181,8 @@ type ReadDiagnostic = (
 
 
 type FieldValue = object
-"""A View result's field value: the Entity's own value, an Entity, or a ViewRow."""
+"""A View result's field value: the Entity's own value, an Entity, a ViewRow, or
+a SortedSequence of Entities."""
 
 
 class _IdsFound:
@@ -227,7 +230,28 @@ class _Read:
         self, lookup: ir.ReverseLookup, id_value: IdValue
     ) -> pydantic.BaseModel | None:
         """The Entity whose `lookup.via` holds `id_value`: the first in insertion
-        order when several do, which `shared` records, or `None`.
+        order when several do, which `shared` records, or `None`."""
+        found = self._holding(lookup, id_value)
+        if len(found) > 1:
+            self.shared.add(lookup.target, lookup.via, id_value)
+        return found[0] if found else None
+
+    def collection(
+        self, lookup: ir.CollectionLookup, id_value: IdValue
+    ) -> SortedSequence[pydantic.BaseModel, Literal["id"]]:
+        """Every Entity whose `lookup.via` holds `id_value`, ascending by the
+        root of its primary key."""
+        return SortedSequence(
+            sorted(
+                self._holding(lookup, id_value),
+                key=lambda entity: getattr(entity, EntityNode.primary_key.root).root,
+            )
+        )
+
+    def _holding(
+        self, lookup: ir.ReverseLookup | ir.CollectionLookup, id_value: IdValue
+    ) -> Sequence[pydantic.BaseModel]:
+        """Every Entity whose `lookup.via` holds `id_value`, in insertion order.
 
         The index of `lookup.via` is built the first time it is followed.
         """
@@ -237,10 +261,7 @@ class _Read:
             for entity in self._stored.get(lookup.target, {}).values():
                 index.setdefault(getattr(entity, lookup.via.root), []).append(entity)
             self._indexes[key] = index
-        found = self._indexes[key].get(id_value, [])
-        if len(found) > 1:
-            self.shared.add(lookup.target, lookup.via, id_value)
-        return found[0] if found else None
+        return self._indexes[key].get(id_value, [])
 
     def diagnostics(self) -> tuple[ReadDiagnostic, ...]:
         """One per Entity and field, each with every ID found."""
@@ -283,7 +304,8 @@ class InMemoryViewEngine:
     `put` inserts an Entity, or replaces the one with the same ID. `read` returns
     the View results, one per row of the View's from_model its Filters keep, in
     insertion order. `read_union` returns the Union results likewise, one per row
-    a Variant keeps.
+    a Variant keeps. A reversed many-to-one Reference holds its Entities sorted in
+    Python by the root of their primary key.
     """
 
     def __init__(
@@ -397,8 +419,13 @@ class InMemoryViewEngine:
             case ir.SubjectField() | ir.RequiredField():
                 InMemoryViewEngine._check_required(value, subject, run)
                 return getattr(subject, value.field.root)
-            case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
-                return self._follow(value.lookups(), subject, run)
+            case (
+                ir.Lookup()
+                | ir.ReverseLookup()
+                | ir.ChainedLookup()
+                | ir.CollectionLookup()
+            ):
+                return self._found(value, subject, run)
             case ir.Lifted(through=through, field=read):
                 entity = self._follow(through, subject, run)
                 if entity is None:
@@ -407,6 +434,21 @@ class InMemoryViewEngine:
                 return getattr(entity, read.field.root)
             case ir.Added():
                 return InMemoryViewEngine._default(field)
+
+    def _found(
+        self,
+        value: ir.EntityValue | ir.CollectionLookup,
+        subject: pydantic.BaseModel,
+        run: _Read,
+    ) -> FieldValue:
+        """The Entity `value` finds from `subject`, or `None`; or for a
+        CollectionLookup, every Entity it finds."""
+        match value:
+            case ir.CollectionLookup():
+                subject_id = getattr(subject, EntityNode.primary_key.root)
+                return run.collection(value, subject_id)
+            case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
+                return self._follow(value.lookups(), subject, run)
 
     def _follow(
         self,
