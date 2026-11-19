@@ -1414,14 +1414,13 @@ def test_reverse_accessors_of_an_existing_model_are_checked_as_declared(
     assert reported == expected
 
 
-def test_an_existing_model_declaring_no_many_to_one_reverse_accessor_is_a_diagnostic() -> (
-    None
-):
+def test_an_existing_model_may_declare_no_many_to_one_reverse_accessor() -> None:
+    """Only a View reversing it needs it, which the Django queries report."""
     models = config({}, {}, {Company: ExistingDjangoModel.fake()})
 
-    assert diagnostics([Company], models) == (
-        UndeclaredReverseAccessor(entity=Company, field=FieldName("parent")),
-    )
+    text = render([Company, Department], models).root
+
+    assert 'related_name="department_by_company"' in text
 
 
 def test_on_delete_for_a_reference_of_an_existing_model_is_a_diagnostic() -> None:

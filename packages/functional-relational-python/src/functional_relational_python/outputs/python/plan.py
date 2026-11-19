@@ -533,17 +533,38 @@ class ParameterValues(enum.Enum):
                 return ParameterValues.SORTED_SEQUENCE
 
 
+class SortedSequenceAnnotation:
+    """Writes `SortedSequence[<element>, Literal["id"]]`: a SortedSequence of
+    `element`, ascending by the `id` of the Entity each is built from."""
+
+    sequence: typing.ClassVar[Symbol] = Symbol(
+        module=ModulePath(SortedSequence.__module__),
+        qualname=(Identifier(SortedSequence.__qualname__),),
+    )
+    literal: typing.ClassVar[Symbol] = Symbol(
+        module=ModulePath("typing"), qualname=(Identifier("Literal"),)
+    )
+    symbols: typing.ClassVar[frozenset[Symbol]] = frozenset({sequence, literal})
+    """Every Symbol the annotation refers to."""
+
+    @staticmethod
+    def of(
+        element: TypeExpression, written: Callable[[Symbol], TypeExpression]
+    ) -> TypeExpression:
+        """The annotation of a SortedSequence of `element`, each Symbol in it
+        as `written` writes it."""
+        sequence = written(SortedSequenceAnnotation.sequence).root
+        literal = written(SortedSequenceAnnotation.literal).root
+        key = PythonString(EntityNode.primary_key.root).literal().root
+        return TypeExpression(f"{sequence}[{element.root}, {literal}[{key}]]")
+
+
 class LookupParameter(pydantic.BaseModel, frozen=True):
     """A mapping function's keyword parameter, mapping each value of the field
     `keyed_by` of the Entity `entity` to what holds it, as `values` says: its
     primary key for a resolved Reference, its one-to-one Reference for a reversed
     one, each to the Entity; its many-to-one Reference for a reversed one, to a
     SortedSequence of the Entities."""
-
-    sorted_sequence: typing.ClassVar[Symbol] = Symbol(
-        module=ModulePath(SortedSequence.__module__),
-        qualname=(Identifier(SortedSequence.__qualname__),),
-    )
 
     name: Identifier
     entity: type[pydantic.BaseModel]
@@ -559,10 +580,9 @@ class LookupParameter(pydantic.BaseModel, frozen=True):
             case ParameterValues.ENTITY:
                 return TypeExpression(target)
             case ParameterValues.SORTED_SEQUENCE:
-                sequence = LookupParameter.sorted_sequence.qualified().root
-                literal = _AnnotationRenderer.literal.qualified().root
-                key = PythonString(EntityNode.primary_key.root).literal().root
-                return TypeExpression(f"{sequence}[{target}, {literal}[{key}]]")
+                return SortedSequenceAnnotation.of(
+                    TypeExpression(target), Symbol.qualified
+                )
 
     def modules(self) -> frozenset[ModulePath]:
         """The modules `value_annotation` and the ID type refer to."""
@@ -571,10 +591,7 @@ class LookupParameter(pydantic.BaseModel, frozen=True):
                 annotation: frozenset[ModulePath] = frozenset()
             case ParameterValues.SORTED_SEQUENCE:
                 annotation = frozenset(
-                    {
-                        LookupParameter.sorted_sequence.module,
-                        _AnnotationRenderer.literal.module,
-                    }
+                    symbol.module for symbol in SortedSequenceAnnotation.symbols
                 )
         return annotation | {self.target.module, self.id_type.module}
 
@@ -871,15 +888,6 @@ class _AnnotationRenderer:
         arguments = ", ".join(self.render(arg).root for arg in generic["args"])
         return TypeExpression(f"{self._named(origin).root}[{arguments}]")
 
-    def render_sorted_sequence(self, element: TypeExpression) -> TypeExpression:
-        """`SortedSequence[<element>, Literal["id"]]`: a SortedSequence of a
-        generated model, ascending by the `id` of the Entity each is built from."""
-        sequence = self._named(SortedSequence)
-        self.symbols.add(_AnnotationRenderer.literal)
-        literal = _AnnotationRenderer.literal.reference().root
-        key = PythonString(EntityNode.primary_key.root).literal().root
-        return TypeExpression(f"{sequence.root}[{element.root}, {literal}[{key}]]")
-
     def render(self, annotation: ir.RuntimeAnnotation) -> TypeExpression:
         origin = typing.get_origin(annotation)
         if origin is None:
@@ -1151,8 +1159,9 @@ class _ModelPlanner:
                     uses.add(model.symbol)
                     match found:
                         case ir.CollectionLookup():
-                            rendered = renderer.render_sorted_sequence(
-                                model.symbol.reference()
+                            uses |= SortedSequenceAnnotation.symbols
+                            rendered = SortedSequenceAnnotation.of(
+                                model.symbol.reference(), Symbol.reference
                             )
                         case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
                             rendered = field.optionality().annotate_text(

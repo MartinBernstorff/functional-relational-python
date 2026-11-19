@@ -42,9 +42,9 @@ from functional_relational_python.entity_graph.entity_graph import (
 )
 from functional_relational_python.outputs.python.plan import (
     FunctionPlan,
-    LookupParameter,
     ModelPlan,
     PythonPlan,
+    SortedSequenceAnnotation,
     UnionFunctionPlan,
 )
 from functional_relational_python.outputs.python.symbols import (
@@ -239,32 +239,37 @@ class Indent(pydantic.RootModel[int], frozen=True):
         return self.guarded(absent, evaluated)
 
     def looped(
-        self,
-        absent: Sequence[Expression],
-        clause: Expression,
-        body: Callable[[Indent], Expression],
+        self, absent: Sequence[Expression], clause: Expression, body: Expression
     ) -> Expression:
-        """`<clause>:`, e.g. `for _ad in ads`, with `body` one level deeper, at
-        this indentation, run when none of `absent` holds. `body` gets the
-        indentation to write its statements at."""
+        """`<clause>:`, e.g. `for _ad in ads`, at this indentation, run when none
+        of `absent` holds, with `body`: statements written at the indentation
+        `loop_body` gives."""
 
         def loop(indent: Indent) -> Expression:
             header = indent.fitted(clause, Expression(":"))
-            return Expression(
-                f"{indent.pad().root}{header.root}:\n{body(indent.deeper()).root}"
-            )
+            return Expression(f"{indent.pad().root}{header.root}:\n{body.root}")
 
         return self.guarded(absent, loop)
+
+    def loop_body(self, absent: Sequence[Expression]) -> Indent:
+        """The indentation of the body of a loop `looped` writes at this
+        indentation, guarded by `absent`."""
+        return self.guarded_at(absent).deeper()
+
+    def guarded_at(self, absent: Sequence[Expression]) -> Indent:
+        """The indentation `guarded` writes statements at: this one, or one level
+        deeper when `absent` has conditions."""
+        return self.deeper() if absent else self
 
     def guarded(
         self, absent: Sequence[Expression], statements: Callable[[Indent], Expression]
     ) -> Expression:
-        """`statements`, written at the indentation they get: this one, or one
-        level deeper under `if not (<absent> or ...):` when `absent` has
+        """`statements`, written at the indentation `guarded_at` gives: this one,
+        or one level deeper under `if not (<absent> or ...):` when `absent` has
         conditions, split one condition per line if it does not fit."""
+        inner = self.guarded_at(absent)
         if not absent:
-            return statements(self)
-        inner = self.deeper()
+            return statements(inner)
         line = f"{self.pad().root}if not ({' or '.join(c.root for c in absent)}):"
         if len(line) > LineLength.default().root:
             terms = "".join(
@@ -674,7 +679,24 @@ class _Construction(pydantic.BaseModel, frozen=True):
                 nested = model.nested_in(field)
                 match found:
                     case ir.CollectionLookup():
-                        built = self._nested_collection(prefix, nested, found, subject)
+                        # A SortedSequence of a nested model per Entity found, in
+                        # the order the parameter holds them; none for a missing
+                        # ID. It takes its type arguments from the field it fills.
+                        variable = self.variables.variable(found.target)
+                        element = self.model_copy(
+                            update={
+                                "indent": self.indent.deeper(),
+                                "variables": self.variables.binding(variable),
+                            }
+                        ).call(nested, Expression(variable.root))
+                        sequence = SortedSequenceAnnotation.sequence.qualified().root
+                        built = self.indent.comprehension(
+                            prefix,
+                            Expression(f"{sequence}("),
+                            element,
+                            self._iterated(variable, found, subject),
+                            Expression(")"),
+                        )
                     case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
                         followed = self._followed(found.lookups(), subject)
                         built = self.indent.looked_up(
@@ -708,32 +730,6 @@ class _Construction(pydantic.BaseModel, frozen=True):
                 )
             case ir.Added():
                 return LeftOut()
-
-    def _nested_collection(
-        self,
-        prefix: Expression,
-        nested: ModelPlan,
-        collection: ir.CollectionLookup,
-        subject: Expression,
-    ) -> Expression:
-        """A SortedSequence of a `nested` model per Entity `collection` finds from
-        `subject`, in the order the parameter holds them; none for a missing ID.
-        The SortedSequence takes its type arguments from the field it fills."""
-        variable = self.variables.variable(collection.target)
-        element = self.model_copy(
-            update={
-                "indent": self.indent.deeper(),
-                "variables": self.variables.binding(variable),
-            }
-        ).call(nested, Expression(variable.root))
-        sequence = LookupParameter.sorted_sequence.qualified().root
-        return self.indent.comprehension(
-            prefix,
-            Expression(f"{sequence}("),
-            element,
-            self._iterated(variable, collection, subject),
-            Expression(")"),
-        )
 
     def _iterated(
         self, variable: Identifier, collection: ir.CollectionLookup, subject: Expression
@@ -820,7 +816,8 @@ class _Construction(pydantic.BaseModel, frozen=True):
         model built from `subject`, or one nested in it, reads nothing from: it
         looks the Entity up, so that a missing one raises. `absent` are the
         conditions under which a lookup on the way to `subject` finds nothing,
-        when there is nothing to look up."""
+        when there is nothing to look up. For the models built from each Entity
+        of a SortedSequence, the statements are in a loop over those Entities."""
         statements: list[Expression] = []
         for planned in model.fields:
             match planned.field:
@@ -830,9 +827,26 @@ class _Construction(pydantic.BaseModel, frozen=True):
                     continue
             match found:
                 case ir.CollectionLookup():
-                    statements.extend(
-                        self._unread_in_elements(nested, found, subject, absent)
+                    # A loop over every Entity it finds, with the statements for
+                    # the model built from each, if there are any.
+                    variable = self.variables.variable(found.target)
+                    body = "".join(
+                        statement.root
+                        for statement in self.model_copy(
+                            update={
+                                "indent": self.indent.loop_body(absent),
+                                "variables": self.variables.binding(variable),
+                            }
+                        ).unread_requirements(nested, Expression(variable.root), ())
                     )
+                    if body:
+                        statements.append(
+                            self.indent.looped(
+                                absent,
+                                self._iterated(variable, found, subject),
+                                Expression(body),
+                            )
+                        )
                     continue
                 case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
                     pass
@@ -854,39 +868,6 @@ class _Construction(pydantic.BaseModel, frozen=True):
                 self.unread_requirements(nested, followed.entity, conditions)
             )
         return tuple(statements)
-
-    def _unread_in_elements(
-        self,
-        nested: ModelPlan,
-        collection: ir.CollectionLookup,
-        subject: Expression,
-        absent: tuple[Expression, ...],
-    ) -> tuple[Expression, ...]:
-        """A loop over every Entity `collection` finds from `subject`, unless one
-        of `absent` holds, with the statements `unread_requirements` gives for
-        the `nested` model built from each, if it gives any."""
-        variable = self.variables.variable(collection.target)
-
-        def unread(indent: Indent) -> Expression:
-            return Expression(
-                "".join(
-                    statement.root
-                    for statement in self.model_copy(
-                        update={
-                            "indent": indent,
-                            "variables": self.variables.binding(variable),
-                        }
-                    ).unread_requirements(nested, Expression(variable.root), ())
-                )
-            )
-
-        if not unread(self.indent).root:
-            return ()
-        return (
-            self.indent.looped(
-                absent, self._iterated(variable, collection, subject), unread
-            ),
-        )
 
     def required(
         self, value: Expression, subject: Expression, what: Expression

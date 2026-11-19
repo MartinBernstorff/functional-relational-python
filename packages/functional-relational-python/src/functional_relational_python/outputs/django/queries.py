@@ -61,7 +61,7 @@ drops what it selected related past it, so the reader resumes at that row, and
 selects related from there.
 
 A many-to-one Reference is followed backwards through its reverse accessor with
-`prefetch_related`, whose `Prefetch` orders the rows by their primary key in SQL,
+`prefetch_related`, whose `Prefetch` orders the rows by their Entity's `id` in SQL,
 through the default manager of their Django model, as Django follows the
 accessor. A string key may order differently under the database's collation than
 the InMemoryViewEngine orders it in Python. The queryset function imports that
@@ -93,6 +93,7 @@ from functional_relational_python.compiler import compiler, narrowing
 from functional_relational_python.compiler.model_names import FunctionName
 from functional_relational_python.entity_graph.entity_graph import (
     EntityGraph,
+    EntityNode,
     FieldName,
     Optionality,
 )
@@ -191,10 +192,28 @@ class ViewModelIntoDjangoModelsModule(pydantic.BaseModel, Diagnostic, frozen=Tru
         )
 
 
+class ReversedUndeclaredAccessor(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A View reverses a many-to-one Reference of an Entity with an existing
+    Django model whose `ExistingDjangoModel.reverse_accessors` does not declare
+    its reverse accessor, so its query cannot follow it."""
+
+    view: ViewName
+    entity: type[pydantic.BaseModel]
+    field: FieldName
+
+    def describe(self) -> DiagnosticMessage:
+        return DiagnosticMessage(
+            f"{self.view.root}: reverses {self.entity.__qualname__}."
+            f"{self.field.root}, a many-to-one Reference of an existing Django "
+            "model, but its reverse_accessors does not name the related_name."
+        )
+
+
 type DjangoQueriesDiagnostic = (
     QueriesIntoDjangoModelsModule
     | ViewModelIntoQueriesModule
     | ViewModelIntoDjangoModelsModule
+    | ReversedUndeclaredAccessor
     | Unimportable
     | NameClash
 )
@@ -230,21 +249,46 @@ class QueryNames(pydantic.BaseModel, frozen=True):
 
 class ViewQueries(pydantic.BaseModel, frozen=True):
     """The query code of one View whose from_model is an Entity: `model` is its View
-    model, `from_model` the Django model of its from_model."""
+    model, `from_model` the Django model of its from_model.
+
+    `related_paths` are every chain of relations to the Entities the View looks
+    up one at a time, in the order they are first looked up. `prefetches` are
+    every reverse accessor of a many-to-one Reference the View follows to a
+    SortedSequence of Entities, through the chain of relations to the Entity it
+    follows it from, in the order they are first followed, each with what the
+    View reads from those Entities.
+    """
 
     view: compiler.CompiledView
     model: Symbol
     from_model: Symbol
+    related_paths: tuple[RelatedPath, ...]
+    prefetches: tuple[Prefetched, ...]
 
     @staticmethod
     def of(
         view: compiler.CompiledView, config: DjangoModels, module: ModulePath
     ) -> ViewQueries:
         """`module` is the one the View's model is generated into."""
+        found = tuple(
+            ViewQueries._paths(
+                view.relation, _Trail.start(view.from_model), ((),), config
+            )
+        )
         return ViewQueries(
             view=view,
             model=Symbol(module=module, qualname=(view.names.model.name.identifier(),)),
             from_model=config.model_of(view.from_model),
+            related_paths=tuple(
+                dict.fromkeys(
+                    RelatedPath.of(selected.path)
+                    for selected in found
+                    if isinstance(selected, _Selected)
+                )
+            ),
+            prefetches=Prefetched.merged(
+                prefetched for prefetched in found if isinstance(prefetched, Prefetched)
+            ),
         )
 
     def entity(self) -> type[pydantic.BaseModel]:
@@ -255,31 +299,6 @@ class ViewQueries(pydantic.BaseModel, frozen=True):
 
     def names(self) -> QueryNames:
         return QueryNames(function=self.view.names.function)
-
-    def related_paths(self, config: DjangoModels) -> tuple[RelatedPath, ...]:
-        """Every chain of relations to the Entities the View looks up one at a
-        time, in the order they are first looked up."""
-        return tuple(
-            dict.fromkeys(
-                RelatedPath.of(found.path)
-                for found in self._found(config)
-                if isinstance(found, _Selected)
-            )
-        )
-
-    def prefetches(self, config: DjangoModels) -> tuple[Prefetched, ...]:
-        """Every reverse accessor of a many-to-one Reference the View follows to
-        a SortedSequence of Entities, through the chain of relations to the
-        Entity it follows it from, in the order they are first followed, each
-        with what the View reads from those Entities."""
-        return Prefetched.merged(
-            found for found in self._found(config) if isinstance(found, Prefetched)
-        )
-
-    def _found(self, config: DjangoModels) -> Iterator[_Selected | Prefetched]:
-        return ViewQueries._paths(
-            self.view.relation, _Trail.start(self.view.from_model), ((),), config
-        )
 
     @staticmethod
     def _paths(
@@ -343,7 +362,7 @@ class _Selected(pydantic.BaseModel, frozen=True):
 class Prefetched(pydantic.BaseModel, frozen=True):
     """A chain of relations `prefetch_related` follows, ending in the reverse
     accessor of a many-to-one Reference of `target`, whose rows it orders by
-    their primary key. Its query selects `related` from each row, and
+    their Entity's `id`. Its query selects `related` from each row, and
     prefetches `prefetches` from each: what a nested pipeline reads."""
 
     path: RelatedPath
@@ -407,12 +426,18 @@ class Prefetched(pydantic.BaseModel, frozen=True):
 class UnionQueries(pydantic.BaseModel, frozen=True):
     """The query code of one Union whose from_model is an Entity: `model` is its
     model, `from_model` the Django model of its from_model, and `leaves` the query code
-    of the Views a row may be a result of, in the order they are tried."""
+    of the Views a row may be a result of, in the order they are tried.
+
+    `related_paths` are every Variant's chains of relations, each once, and
+    `prefetches` every Variant's prefetches, one per path, both in Variant
+    order."""
 
     union: compiler.CompiledUnion
     model: Symbol
     from_model: Symbol
     leaves: tuple[ViewQueries, ...]
+    related_paths: tuple[RelatedPath, ...]
+    prefetches: tuple[Prefetched, ...]
 
     @staticmethod
     def of(
@@ -422,6 +447,10 @@ class UnionQueries(pydantic.BaseModel, frozen=True):
     ) -> UnionQueries:
         """`placed` has the module of the Union's model, and of each of its
         leaves'."""
+        leaves = tuple(
+            ViewQueries.of(leaf, config, placed.module_of(leaf))
+            for leaf in union.leaves()
+        )
         return UnionQueries(
             union=union,
             model=Symbol(
@@ -429,9 +458,12 @@ class UnionQueries(pydantic.BaseModel, frozen=True):
                 qualname=(union.names.model.identifier(),),
             ),
             from_model=config.model_of(union.from_model),
-            leaves=tuple(
-                ViewQueries.of(leaf, config, placed.module_of(leaf))
-                for leaf in union.leaves()
+            leaves=leaves,
+            related_paths=tuple(
+                dict.fromkeys(path for leaf in leaves for path in leaf.related_paths)
+            ),
+            prefetches=Prefetched.merged(
+                found for leaf in leaves for found in leaf.prefetches
             ),
         )
 
@@ -443,20 +475,6 @@ class UnionQueries(pydantic.BaseModel, frozen=True):
 
     def names(self) -> QueryNames:
         return QueryNames(function=self.union.names.function)
-
-    def related_paths(self, config: DjangoModels) -> tuple[RelatedPath, ...]:
-        """Every Variant's chains of relations, each once, in Variant order."""
-        return tuple(
-            dict.fromkeys(
-                path for leaf in self.leaves for path in leaf.related_paths(config)
-            )
-        )
-
-    def prefetches(self, config: DjangoModels) -> tuple[Prefetched, ...]:
-        """Every Variant's prefetches, one per path, in Variant order."""
-        return Prefetched.merged(
-            found for leaf in self.leaves for found in leaf.prefetches(config)
-        )
 
 
 class _Follow(pydantic.BaseModel, frozen=True):
@@ -667,9 +685,20 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             (entity for entity in graph.entities if config.generates(entity)),
             key=lambda entity: entity.__name__,
         )
+        undeclared = (
+            ReversedUndeclaredAccessor(
+                view=query.view.name, entity=lookup.target, field=lookup.via
+            )
+            for query in queries
+            for lookup in query.view.relation.lookups()
+            if isinstance(lookup, ir.CollectionLookup)
+            and (existing := config.existing.get(lookup.target)) is not None
+            and lookup.via not in existing.reverse_accessors
+        )
         return DiagnosticsError.or_ok(
             (
                 *DjangoQueriesRenderer._modules(config, (*views, *unions), placed),
+                *undeclared,
                 *unimportable,
                 *renderer._clashes(entities),
             ),
@@ -923,15 +952,15 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         """The QuerySet loading every field and every Entity `query` reads, at the
         indentation of a function body: the Entities it looks up one at a time
         in the same query, and each SortedSequence of Entities in one query more,
-        ordered by their primary key.
+        ordered by their Entity's `id`.
 
         With both, the calls are chained one per line in parentheses, as ruff
         format chains them."""
         deferred = Expression(
             f"{DjangoQueriesRenderer.queryset_parameter.root}.defer(None)"
         )
-        paths = query.related_paths(self.config)
-        prefetches = query.prefetches(self.config)
+        paths = query.related_paths
+        prefetches = query.prefetches
 
         def selected(indent: Indent) -> Expression:
             return indent.exploded(
@@ -962,31 +991,25 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         return deferred
 
     def _prefetch(self, found: Prefetched, indent: Indent) -> Expression:
-        """`Prefetch(<path>, queryset=<model>._default_manager.order_by("pk"))`, on
-        a line at `indent`, the queryset also selecting and prefetching what
-        `found` loads from each row. The default manager is the one Django
-        follows a reverse accessor with."""
-        return indent.exploded(
-            Expression(f"{DjangoQueriesRenderer.django_models.root}.Prefetch("),
-            (
-                Expression(PythonString(found.path.root).literal().root),
-                Expression(
-                    f"queryset={self._prefetch_queryset(found, indent.deeper()).root}"
-                ),
-            ),
-            Expression(")"),
-        )
+        """`Prefetch(<path>, queryset=<model>._default_manager.order_by(<id>))`,
+        on a line at `indent`, ordered by the attribute holding the Entity's `id`,
+        which need not be the model's primary key. The default manager is the
+        one Django follows a reverse accessor with.
 
-    def _prefetch_queryset(self, found: Prefetched, indent: Indent) -> Expression:
-        """The queryset of `found`, as the value of a keyword argument on a line at
-        `indent`. Selecting or prefetching from its rows, it is a parenthesized
-        chain of calls, as ruff format writes it: one call per line when it
-        chains both, else split at its last call's brackets, and before that at
-        `order_by`'s if the line up to them does not fit."""
+        Selecting or prefetching what `found` loads from each row, the queryset
+        is a parenthesized chain of calls, as ruff format writes it: one call
+        per line when it chains both, else split at its last call's brackets,
+        and before that at `order_by`'s if the line up to them does not fit."""
         model = self.config.model_of(found.target).qualified().root
         manager = f"{model}._default_manager"
-        ordered = Expression(f'{manager}.order_by("pk")')
-        inner = indent.deeper()
+        key = PythonString(
+            DjangoModelsRenderer.attribute_of(
+                self.config, self.graph.entities[found.target], EntityNode.primary_key
+            ).root
+        ).literal()
+        ordered = Expression(f"{manager}.order_by({key.root})")
+        keyword = indent.deeper()
+        inner = keyword.deeper()
         calls = tuple(
             (Expression(opening), entries)
             for opening, entries in (
@@ -1009,7 +1032,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         )
         match calls:
             case ():
-                return ordered
+                queryset = ordered
             case ((opening, entries),):
                 if len(f"{inner.pad().root}{ordered.root}{opening.root}") <= (
                     LineLength.default().root
@@ -1017,11 +1040,13 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                     head = ordered.root
                 else:
                     pad = inner.deeper().pad().root
-                    head = f'{manager}.order_by(\n{pad}"pk"\n{inner.pad().root})'
+                    head = f"{manager}.order_by(\n{pad}{key.root}\n{inner.pad().root})"
                 called = inner.exploded(
                     Expression(f"{head}{opening.root}"), entries, Expression(")")
                 )
-                lines = f"{inner.pad().root}{called.root}\n"
+                queryset = Expression(
+                    f"(\n{inner.pad().root}{called.root}\n{keyword.pad().root})"
+                )
             case _:
                 lines = "".join(
                     f"{inner.pad().root}{line.root}\n"
@@ -1033,7 +1058,15 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                         ),
                     )
                 )
-        return Expression(f"(\n{lines}{indent.pad().root})")
+                queryset = Expression(f"(\n{lines}{keyword.pad().root})")
+        return indent.exploded(
+            Expression(f"{DjangoQueriesRenderer.django_models.root}.Prefetch("),
+            (
+                Expression(PythonString(found.path.root).literal().root),
+                Expression(f"queryset={queryset.root}"),
+            ),
+            Expression(")"),
+        )
 
     def _model_imports(self, query: ReadQueries) -> FileText:
         """The statements at the start of a queryset function importing the
@@ -1056,7 +1089,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         """The modules of the Django models `query`'s prefetches order."""
         return frozenset(
             self.config.model_of(target).module
-            for found in query.prefetches(self.config)
+            for found in query.prefetches
             for target in found.targets()
         )
 
@@ -1847,11 +1880,29 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                     continue
             match found:
                 case ir.CollectionLookup():
-                    statements.extend(
-                        self._unread_in_elements(
-                            nested, found, reached.row(), absent, at
+                    # A loop over every row the reverse accessor holds, with the
+                    # statements for the model built from each, if there are any.
+                    variable = self.variables.variable(found.target)
+                    reader = self.model_copy(
+                        update={"variables": self.variables.binding(variable)}
+                    )
+                    body = "".join(
+                        statement.root
+                        for statement in reader.unread_requirements(
+                            nested,
+                            _Reached.start(found.target, Expression(variable.root)),
+                            (),
+                            at.loop_body(absent),
                         )
                     )
+                    if body:
+                        statements.append(
+                            at.looped(
+                                absent,
+                                self._iterated(found, reached.row(), variable),
+                                Expression(body),
+                            )
+                        )
                     continue
                 case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
                     pass
@@ -1869,36 +1920,6 @@ class _RowReader(pydantic.BaseModel, frozen=True):
                 self.unread_requirements(nested, followed.reached, conditions, at)
             )
         return tuple(statements)
-
-    def _unread_in_elements(
-        self,
-        nested: ir.Relation,
-        collection: ir.CollectionLookup,
-        row: Expression,
-        absent: tuple[Expression, ...],
-        at: Indent,
-    ) -> tuple[Expression, ...]:
-        """A loop at `at` over every row the reverse accessor of `collection`
-        holds for `row`, unless one of `absent` holds, with the statements
-        `unread_requirements` gives for the `nested` model built from each, if
-        it gives any."""
-        variable = self.variables.variable(collection.target)
-        reader = self.model_copy(update={"variables": self.variables.binding(variable)})
-        element = _Reached.start(collection.target, Expression(variable.root))
-
-        def unread(indent: Indent) -> Expression:
-            return Expression(
-                "".join(
-                    statement.root
-                    for statement in reader.unread_requirements(
-                        nested, element, (), indent
-                    )
-                )
-            )
-
-        if not unread(at).root:
-            return ()
-        return (at.looped(absent, self._iterated(collection, row, variable), unread),)
 
 
 class _Reached(pydantic.BaseModel, frozen=True):

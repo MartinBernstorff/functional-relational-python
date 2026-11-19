@@ -1029,7 +1029,49 @@ def _check_reverse(
         default=ir.NoDefault(),
     )
     if not reported:
-        match _chosen_reference(entity_graph, view, node, relation, subject):
+        # The Reference of the Entity to the subject that `node.via` chooses, of
+        # either Cardinality, or why there is not exactly one.
+        to_subject = tuple(
+            reference
+            for reference in entity_graph.entities[node.entity].references
+            if reference.target is subject.from_model
+        )
+        chosen: (
+            Reference
+            | diagnostics.NoReferenceToSubject
+            | diagnostics.AmbiguousReverse
+            | diagnostics.NotAReferenceToSubject
+        )
+        match node.via:
+            case ir.SoleReference():
+                match to_subject:
+                    case (reference,):
+                        chosen = reference
+                    case ():
+                        chosen = diagnostics.NoReferenceToSubject(
+                            view=view, from_model=from_model, entity=node.entity
+                        )
+                    case _:
+                        chosen = diagnostics.AmbiguousReverse(
+                            view=view,
+                            from_model=from_model,
+                            entity=node.entity,
+                            references=tuple(
+                                reference.field for reference in to_subject
+                            ),
+                        )
+            case FieldName() as via:
+                chosen = next(
+                    (reference for reference in to_subject if reference.field == via),
+                    diagnostics.NotAReferenceToSubject(
+                        view=view,
+                        from_model=from_model,
+                        entity=node.entity,
+                        field=via,
+                        valid=tuple(reference.field for reference in to_subject),
+                    ),
+                )
+        match chosen:
             case Reference() as reference:
                 checked = _reversed(entity_graph, view, node, reference)
                 field = checked.field
@@ -1050,54 +1092,6 @@ def _check_reverse(
     if not reported:
         return reversed_relation
     return Poisoned(recovered=reversed_relation, diagnostics=tuple(reported))
-
-
-def _chosen_reference(
-    entity_graph: EntityGraph,
-    view: DefinitionName,
-    node: ir.Reverse,
-    relation: ir.Relation,
-    subject: ir.FromModel,
-) -> (
-    Reference
-    | diagnostics.NoReferenceToSubject
-    | diagnostics.AmbiguousReverse
-    | diagnostics.NotAReferenceToSubject
-):
-    """The Reference of `node.entity` to the subject that `node.via` chooses, of
-    either Cardinality, or why there is not exactly one. Both are Entities."""
-    to_subject = tuple(
-        reference
-        for reference in entity_graph.entities[node.entity].references
-        if reference.target is subject.from_model
-    )
-    match node.via:
-        case ir.SoleReference():
-            match to_subject:
-                case (reference,):
-                    return reference
-                case ():
-                    return diagnostics.NoReferenceToSubject(
-                        view=view, from_model=relation.from_model, entity=node.entity
-                    )
-                case _:
-                    return diagnostics.AmbiguousReverse(
-                        view=view,
-                        from_model=relation.from_model,
-                        entity=node.entity,
-                        references=tuple(reference.field for reference in to_subject),
-                    )
-        case FieldName() as via:
-            for reference in to_subject:
-                if reference.field == via:
-                    return reference
-            return diagnostics.NotAReferenceToSubject(
-                view=view,
-                from_model=relation.from_model,
-                entity=node.entity,
-                field=via,
-                valid=tuple(reference.field for reference in to_subject),
-            )
 
 
 def _reversed_name(node: ir.Reverse, cardinality: Cardinality) -> FieldName:

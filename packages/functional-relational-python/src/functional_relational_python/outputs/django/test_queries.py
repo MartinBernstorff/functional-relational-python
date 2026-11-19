@@ -62,6 +62,7 @@ from functional_relational_python.outputs.django.queries import (
     Prefetched,
     QueriesIntoDjangoModelsModule,
     RelatedPath,
+    ReversedUndeclaredAccessor,
     ViewModelIntoDjangoModelsModule,
     ViewModelIntoQueriesModule,
     ViewQueries,
@@ -966,7 +967,7 @@ def organisation_chart_queryset(
         django.db.models.Prefetch(
             "department_by_company",
             queryset=(
-                frp_generated_django.Department._default_manager.order_by("pk")
+                frp_generated_django.Department._default_manager.order_by("id")
                 .select_related(
                     "company",
                 )
@@ -975,7 +976,7 @@ def organisation_chart_queryset(
                         "employee_by_department",
                         queryset=(
                             frp_generated_django.Employee._default_manager.order_by(
-                                "pk"
+                                "id"
                             ).select_related(
                                 "mentor",
                                 "badge_by_employee",
@@ -1094,11 +1095,11 @@ def colleagues_queryset(
         .prefetch_related(
             django.db.models.Prefetch(
                 "department__employee_by_department",
-                queryset=frp_generated_django.Employee._default_manager.order_by("pk"),
+                queryset=frp_generated_django.Employee._default_manager.order_by("id"),
             ),
             django.db.models.Prefetch(
                 "employee_by_mentor",
-                queryset=frp_generated_django.Employee._default_manager.order_by("pk"),
+                queryset=frp_generated_django.Employee._default_manager.order_by("id"),
             ),
         )
     )
@@ -1573,7 +1574,7 @@ class Database:
             chain
             for view in views
             for chain in chains(
-                ViewQueries.of(view, config, Generated.models).prefetches(config), ()
+                ViewQueries.of(view, config, Generated.models).prefetches, ()
             )
         )
 
@@ -2100,6 +2101,115 @@ def test_a_query_follows_the_reverse_accessor_an_existing_model_declares() -> No
 
     assert "badge_by_employee" not in file.text.root
     assert '"medal"' in file.text.root
+
+
+def undeclaring_company() -> DjangoModels:
+    """`ExistingCompany`'s config, its model declaring no reverse accessor."""
+    config = ExistingCompany.config()
+    existing = config.existing[Company].model_copy(update={"reverse_accessors": {}})
+    return config.model_copy(update={"existing": {Company: existing}})
+
+
+def rendered_with(
+    config: DjangoModels, view: View
+) -> Result[GeneratedFiles, DiagnosticsError[DjangoQueriesDiagnostic]]:
+    compiled = compile_all([view])
+    return DjangoQueriesRenderer.render(
+        entity_graph(),
+        config,
+        compiled.views,
+        placed_into(Generated.models, compiled),
+        first_party=generated_by(config, placed_into(Generated.models, compiled)),
+    )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        steps.from_(Company, steps.reverse(Company)),
+        steps.from_(
+            Department,
+            steps.resolve(named(FieldName("company_id")), steps.reverse(Company)),
+        ),
+    ],
+    ids=["top-level", "nested"],
+)
+def test_reversing_a_reference_an_existing_model_declares_no_accessor_for_is_a_diagnostic(
+    query: steps.Query,
+) -> None:
+    view = View(name=ViewName("Subsidiaries"), query=query)
+
+    match rendered_with(undeclaring_company(), view):
+        case Ok(files):
+            pytest.fail(f"expected diagnostics, got {files}")
+        case Err(error):
+            assert error.diagnostics == (
+                ReversedUndeclaredAccessor(
+                    view=view.name, entity=Company, field=FieldName("parent")
+                ),
+            )
+
+
+def test_a_view_not_reversing_a_reference_needs_no_declared_accessor() -> None:
+    view = View(name=ViewName("Hydrated"), query=steps.from_(Company, steps.hydrate()))
+
+    assert isinstance(rendered_with(undeclaring_company(), view), Ok)
+
+
+class ExistingCompanyKeyedApart:
+    """`Company`'s Django model as the application wrote it, `Firm`, whose
+    primary key `key` is not the Entity's `id`, which a unique column holds. Its
+    Reference `parent` holds a parent's `id`, not its key."""
+
+    source: ClassVar[FileText] = FileText(
+        "from django.db import models\n"
+        "\n"
+        "\n"
+        "class Firm(models.Model):\n"
+        "    key = models.BigAutoField(primary_key=True)\n"
+        "    id = models.BigIntegerField(unique=True)\n"
+        "    name = models.TextField()\n"
+        "    parent = models.ForeignKey(\n"
+        '        "self",\n'
+        "        on_delete=models.PROTECT,\n"
+        '        to_field="id",\n'
+        '        related_name="subsidiaries",\n'
+        "        null=True,\n"
+        "    )\n"
+        "\n"
+        "    class Meta:\n"
+        '        app_label = "frp_generated"\n'
+    )
+
+
+def test_a_sorted_sequence_is_ordered_by_id_where_the_primary_key_is_not_id() -> None:
+    """The Companies are stored in descending `id` order, so their keys ascend
+    as their `id`s descend."""
+    view = View(
+        name=ViewName("Subsidiaries"),
+        query=steps.from_(Company, steps.reverse(Company)),
+    )
+    companies = tuple(
+        entity for entity in organisation() if isinstance(entity, Company)
+    )
+    config = ExistingCompany.config()
+    (compiled,) = compile_all([view]).views
+    function = compiled.names.function.root
+    existing = ((ExistingCompany.module, ExistingCompanyKeyedApart.source),)
+
+    with Database.of([view], (), config, existing):
+        Database.put(
+            sorted(companies, key=lambda company: company.id.root, reverse=True),
+            config,
+        )
+        queries = sys.modules[Modules.queries.root]
+        firms = Database.model_of(Company, config).objects.order_by("id")
+        rows = tuple(
+            Executed.row_of(getattr(queries, f"{function}_from_row")(row))
+            for row in getattr(queries, f"{function}_queryset")(firms)
+        )
+
+    assert rows == engine_rows([compiled], companies)[view.name]
 
 
 @pytest.mark.parametrize("view", read_views(), ids=lambda view: view.name.root)

@@ -694,9 +694,9 @@ class ExistingDjangoModel(pydantic.BaseModel, frozen=True):
     model would, so that a query reads it: a field under its name, and a
     Reference `x_id` as the foreign key `x`. Its manager is its own.
     `reverse_accessors` is the `related_name` its model gives each Reference of
-    the Entity, one-to-one or many-to-one, e.g. `meta_detail` for
-    `channel_campaign_id`, which a query follows backwards. frp checks none of
-    this against the model.
+    the Entity, e.g. `meta_detail` for `channel_campaign_id`, which a query
+    follows backwards: every one-to-one Reference, and each many-to-one one a
+    View reverses. frp checks none of this against the model.
     """
 
     module: ModulePath
@@ -817,7 +817,8 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
         existing model declares, else the related name a generated model's
         options give it, else the one frp generates, see
         `DjangoModelsRenderer.reverse_accessor`. An existing model declaring none
-        is a diagnostic of the Django models."""
+        is a diagnostic: of the Django models for a one-to-one Reference, of the
+        Django queries for a many-to-one one a View reverses."""
         match self.existing.get(entity):
             case ExistingDjangoModel(reverse_accessors=declared) if (
                 reference in declared
@@ -1115,15 +1116,16 @@ class ExistingModelInGeneratedModule(pydantic.BaseModel, Diagnostic, frozen=True
 
 
 class UndeclaredReverseAccessor(pydantic.BaseModel, Diagnostic, frozen=True):
-    """An Entity with an existing Django model has a Reference whose reverse
-    accessor its `ExistingDjangoModel.reverse_accessors` does not declare."""
+    """An Entity with an existing Django model has a one-to-one Reference whose
+    reverse accessor its `ExistingDjangoModel.reverse_accessors` does not
+    declare."""
 
     entity: type[pydantic.BaseModel]
     field: FieldName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.entity.__qualname__}.{self.field.root}: a Reference "
+            f"{self.entity.__qualname__}.{self.field.root}: a one-to-one Reference "
             "of an existing Django model, but its reverse_accessors does not name "
             "the related_name."
         )
@@ -2795,8 +2797,10 @@ class DjangoModelsRenderer:
         | ReverseAccessorOfNonReference
     ]:
         """Existing Django models named for a non-Entity, or in a generated
-        module, or declaring other reverse accessors than their Entity's
-        References have."""
+        module, or declaring a reverse accessor for a field that is no
+        Reference, or none for a one-to-one Reference. One for a many-to-one
+        Reference is needed only by a View reversing it, which the Django
+        queries report."""
         for entity, existing in config.existing.items():
             if existing.module in (config.module, config.queries):
                 yield ExistingModelInGeneratedModule(
@@ -2810,9 +2814,10 @@ class DjangoModelsRenderer:
                     pass
             references = [reference.field for reference in node.references]
             yield from (
-                UndeclaredReverseAccessor(entity=entity, field=field)
-                for field in references
-                if field not in existing.reverse_accessors
+                UndeclaredReverseAccessor(entity=entity, field=reference.field)
+                for reference in node.references
+                if reference.cardinality == Cardinality.ONE_TO_ONE
+                and reference.field not in existing.reverse_accessors
             )
             yield from (
                 ReverseAccessorOfNonReference(entity=entity, field=field)
@@ -2843,8 +2848,14 @@ class DjangoModelsRenderer:
         for entity, node in sorted(
             graph.entities.items(), key=lambda item: item[0].__name__
         ):
+            declared = config.existing.get(entity)
             for reference in node.references:
-                if reference.target is not model:
+                # frp does not know the name of a reverse accessor an existing
+                # model does not declare.
+                if reference.target is not model or (
+                    declared is not None
+                    and reference.field not in declared.reverse_accessors
+                ):
                     continue
                 key = ReferenceKey(entity=entity, field=reference.field)
                 match DjangoModelsRenderer._related_name(config, entity, reference):
