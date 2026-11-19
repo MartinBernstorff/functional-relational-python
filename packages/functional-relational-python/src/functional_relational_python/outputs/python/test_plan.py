@@ -70,9 +70,9 @@ def plan_of(compiled: compiler.CompiledViews, python: PythonLayout) -> PythonPla
     match PythonPlan.of(
         compiler.CompiledCatalog(
             views=compiled.views,
-            payloads=(),
+            write_models=(),
             unions=compiled.unions,
-            payload_unions=(),
+            write_model_unions=(),
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         python,
@@ -89,9 +89,9 @@ def diagnostics_of(
     match PythonPlan.of(
         compiler.CompiledCatalog(
             views=compiled.views,
-            payloads=(),
+            write_models=(),
             unions=compiled.unions,
-            payload_unions=(),
+            write_model_unions=(),
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         python,
@@ -110,8 +110,9 @@ def overview() -> View:
     """A View with a nested model, looking up two Entities."""
     return View(
         name=ViewName("EmployeeOverview"),
-        source=Employee,
-        step=steps.resolve(named(FieldName("department_id")), steps.hydrate()),
+        query=steps.from_(
+            Employee, steps.resolve(named(FieldName("department_id")), steps.hydrate())
+        ),
     )
 
 
@@ -182,7 +183,10 @@ def local_entity_and_source() -> tuple[type[pydantic.BaseModel], ...]:
 
 def test_whatever_cannot_be_imported_is_reported_once() -> None:
     team, team_id, player = local_entity_and_source()
-    view = View(name=ViewName.fake(), source=player, step=steps.hydrate())
+    view = View(
+        name=ViewName.fake(),
+        query=steps.from_(player, steps.hydrate()),
+    )
     compiled = compiler.compile_views(
         EntityGraph.build([team], IdBase.fake(), OneToOneMarker.fake()).unwrap(), [view]
     ).unwrap()
@@ -206,7 +210,10 @@ def test_whatever_cannot_be_imported_is_reported_once() -> None:
 
 def test_a_models_only_layout_reports_only_what_the_models_cannot_import() -> None:
     team, _, player = local_entity_and_source()
-    view = View(name=ViewName.fake(), source=player, step=steps.hydrate())
+    view = View(
+        name=ViewName.fake(),
+        query=steps.from_(player, steps.hydrate()),
+    )
     compiled = compiler.compile_views(
         EntityGraph.build([team], IdBase.fake(), OneToOneMarker.fake()).unwrap(), [view]
     ).unwrap()
@@ -226,9 +233,7 @@ def test_a_base_that_cannot_be_imported_is_reported() -> None:
     class LocalBase(pydantic.BaseModel):
         pass
 
-    view = View(
-        name=ViewName.fake(), source=Company, step=steps.pipeline(), base=LocalBase
-    )
+    view = View(name=ViewName.fake(), query=steps.from_(Company), base=LocalBase)
 
     assert diagnostics_of(compile_all([view]), app_layout()) == (
         Unimportable(
@@ -244,8 +249,7 @@ def test_a_default_whose_enum_cannot_be_imported_is_reported_for_its_field() -> 
     field = FieldName("name")
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.default(field, LocalColour.RED),
+        query=steps.from_(Company, steps.default(field, LocalColour.RED)),
     )
 
     assert diagnostics_of(
@@ -263,9 +267,11 @@ def test_a_filter_literal_whose_class_cannot_be_imported_is_reported() -> None:
 
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.where(
-            conditions.eq(conditions.field(FieldName("name")), LocalText("Acme"))
+        query=steps.from_(
+            Company,
+            steps.where(
+                conditions.eq(conditions.field(FieldName("name")), LocalText("Acme"))
+            ),
         ),
     )
 
@@ -277,7 +283,10 @@ def test_a_filter_literal_whose_class_cannot_be_imported_is_reported() -> None:
 
 
 def test_every_unsupported_annotation_is_reported() -> None:
-    view = View(name=ViewName.fake(), source=WithUnsupported, step=steps.pipeline())
+    view = View(
+        name=ViewName.fake(),
+        query=steps.from_(WithUnsupported),
+    )
 
     assert [
         diagnostic.field
@@ -287,11 +296,17 @@ def test_every_unsupported_annotation_is_reported() -> None:
 
 
 def company_view(name: ViewName) -> View:
-    return View(name=name, source=Company, step=steps.pipeline())
+    return View(
+        name=name,
+        query=steps.from_(Company),
+    )
 
 
 def hydrated(source: type[pydantic.BaseModel]) -> View:
-    return View(name=ViewName.fake(), source=source, step=steps.hydrate())
+    return View(
+        name=ViewName.fake(),
+        query=steps.from_(source, steps.hydrate()),
+    )
 
 
 def lookup_parameter_module() -> ModulePath:
@@ -414,7 +429,10 @@ class UsesNestedClasses(pydantic.BaseModel, frozen=True):
 
 
 def test_two_classes_nested_in_one_imported_class_do_not_clash() -> None:
-    view = View(name=ViewName.fake(), source=UsesNestedClasses, step=steps.pipeline())
+    view = View(
+        name=ViewName.fake(),
+        query=steps.from_(UsesNestedClasses),
+    )
 
     plan = plan_of(
         compile_all([view]), PythonLayout.models_only(into(ModulePath.fake()))
@@ -446,7 +464,8 @@ def test_generating_into_a_module_that_defines_a_used_class_is_a_diagnostic(
     python: PythonLayout,
 ) -> None:
     view = View(
-        name=ViewName.fake(), source=Company, step=steps.project([FieldName("name")])
+        name=ViewName.fake(),
+        query=steps.from_(Company, steps.project([FieldName("name")])),
     )
 
     assert [
@@ -606,9 +625,9 @@ def test_a_union_named_like_a_class_its_module_imports_clashes() -> None:
 
 def unplaced(
     _: compiler.CompiledView
-    | compiler.CompiledPayload
+    | compiler.CompiledWriteModel
     | compiler.CompiledUnion
-    | compiler.CompiledPayloadUnion,
+    | compiler.CompiledWriteModelUnion,
 ) -> ModulePath:
     """A layout returning `None`, as one that does not handle what it receives
     does, though its type says otherwise."""
@@ -616,25 +635,25 @@ def unplaced(
     return typing.cast("ModulePath", returned)
 
 
-def test_a_layout_giving_a_union_of_payloads_no_module_is_a_diagnostic() -> None:
+def test_a_layout_giving_a_union_of_write_models_no_module_is_a_diagnostic() -> None:
     union = test_compiler.paid_or_free()
     compiled = compiler.compile_catalog(
         test_compiler.empty_graph(), (), (), [union]
     ).unwrap()
 
-    def views_and_payloads(
+    def views_and_write_models(
         placed: compiler.CompiledView
-        | compiler.CompiledPayload
+        | compiler.CompiledWriteModel
         | compiler.CompiledUnion
-        | compiler.CompiledPayloadUnion,
+        | compiler.CompiledWriteModelUnion,
     ) -> ModulePath:
         match placed:
-            case compiler.CompiledPayloadUnion():
+            case compiler.CompiledWriteModelUnion():
                 return unplaced(placed)
             case _:
-                return ModulePath("app.payloads")
+                return ModulePath("app.write_models")
 
-    match PythonPlan.of(compiled, PythonLayout.models_only(views_and_payloads)):
+    match PythonPlan.of(compiled, PythonLayout.models_only(views_and_write_models)):
         case Ok(plan):
             pytest.fail(f"expected diagnostics, got {plan}")
         case Err(error):
@@ -674,5 +693,5 @@ def test_a_layout_diagnostic_message_names_the_definition() -> None:
 
     assert diagnostic.describe().root == (
         "Writes: the models layout returned None for it, not a ModulePath. A "
-        "layout returns a ModulePath for every View, Payload and Union it receives."
+        "layout returns a ModulePath for every View, WriteModel and Union it receives."
     )

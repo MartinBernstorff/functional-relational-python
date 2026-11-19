@@ -21,8 +21,11 @@ from functional_relational_python.entity_graph.id import (
     OneToOneMarker,
 )
 from functional_relational_python.pipeline import conditions, ir, steps
-from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.views import View, ViewName
+from functional_relational_python.pipeline.write_models import (
+    WriteModel,
+    WriteModelName,
+)
 
 
 class Text(pydantic.RootModel[str], frozen=True):
@@ -93,7 +96,13 @@ def graph() -> EntityGraph:
 
 def compile_campaign(step: steps.Step) -> compiler.CompiledView:
     match compiler.compile_views(
-        graph(), [View(name=ViewName.fake(), source=Campaign, step=step)]
+        graph(),
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(Campaign, step),
+            )
+        ],
     ):
         case Ok(compiled):
             return compiled.views[0]
@@ -105,7 +114,13 @@ def campaign_diagnostics(
     step: steps.Step,
 ) -> tuple[diagnostics.CompileDiagnostic, ...]:
     match compiler.compile_views(
-        graph(), [View(name=ViewName.fake(), source=Campaign, step=step)]
+        graph(),
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(Campaign, step),
+            )
+        ],
     ):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
@@ -452,16 +467,26 @@ def test_requiring_an_unknown_field_is_a_diagnostic_and_later_steps_are_checked(
     ],
     ids=["own", "nested"],
 )
-def test_require_in_a_payload_is_a_diagnostic(step: steps.Step) -> None:
-    payload = PayloadName("CampaignUpdate")
+def test_require_in_a_write_model_is_a_diagnostic(step: steps.Step) -> None:
+    write_model = WriteModelName("CampaignUpdate")
 
     match compiler.compile_catalog(
-        graph(), [], [Payload(name=payload, source=Campaign, step=step)], ()
+        graph(),
+        [],
+        [
+            WriteModel(
+                name=write_model,
+                query=steps.from_(Campaign, step),
+            )
+        ],
+        (),
     ):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
-            assert error.diagnostics == (diagnostics.RequireInPayload(view=payload),)
+            assert error.diagnostics == (
+                diagnostics.RequireInWriteModel(view=write_model),
+            )
 
 
 def test_building_a_require_checks_nothing() -> None:
@@ -476,9 +501,9 @@ def test_building_a_require_checks_nothing() -> None:
     ("diagnostic", "message"),
     [
         (
-            diagnostics.RequireInPayload(view=PayloadName("CampaignUpdate")),
+            diagnostics.RequireInWriteModel(view=WriteModelName("CampaignUpdate")),
             (
-                "CampaignUpdate: a Payload cannot `require` a field, because it is "
+                "CampaignUpdate: a WriteModel cannot `require` a field, because it is "
                 "a write model with no values to require."
             ),
         ),
@@ -504,7 +529,7 @@ def test_building_a_require_checks_nothing() -> None:
             ),
         ),
     ],
-    ids=["payload", "required", "added"],
+    ids=["write model", "required", "added"],
 )
 def test_a_require_diagnostic_message_names_the_offending_values(
     diagnostic: diagnostics.CompileDiagnostic, message: str
@@ -655,7 +680,13 @@ class Constrained(pydantic.BaseModel):
 def test_narrowing_keeps_the_fields_constraints(step: steps.Step) -> None:
     (compiled,) = (
         compiler.compile_views(
-            graph(), [View(name=ViewName.fake(), source=Constrained, step=step)]
+            graph(),
+            [
+                View(
+                    name=ViewName.fake(),
+                    query=steps.from_(Constrained, step),
+                )
+            ],
         )
         .unwrap()
         .views
@@ -687,7 +718,13 @@ def test_narrowing_an_optional_annotated_alias_keeps_its_metadata(
 ) -> None:
     (compiled,) = (
         compiler.compile_views(
-            graph(), [View(name=ViewName.fake(), source=Stamped, step=step)]
+            graph(),
+            [
+                View(
+                    name=ViewName.fake(),
+                    query=steps.from_(Stamped, step),
+                )
+            ],
         )
         .unwrap()
         .views
@@ -708,8 +745,7 @@ class StampedBase(pydantic.BaseModel):
 def test_a_required_annotated_alias_is_inherited_from_a_base_declaring_it() -> None:
     view = View(
         name=ViewName.fake(),
-        source=Stamped,
-        step=steps.require(FieldName("stamped_at")),
+        query=steps.from_(Stamped, steps.require(FieldName("stamped_at"))),
         base=StampedBase,
     )
 
@@ -723,9 +759,11 @@ def test_a_field_narrowed_to_a_literal_loses_its_constraints() -> None:
             [
                 View(
                     name=ViewName.fake(),
-                    source=Constrained,
-                    step=steps.where(
-                        conditions.is_null(conditions.field(FieldName("label")))
+                    query=steps.from_(
+                        Constrained,
+                        steps.where(
+                            conditions.is_null(conditions.field(FieldName("label")))
+                        ),
                     ),
                 )
             ],
@@ -752,8 +790,8 @@ def test_a_required_reference_marked_outside_its_none_resolves() -> None:
     ).unwrap()
     view = View(
         name=ViewName.fake(),
-        source=MarkedDetail,
-        step=steps.pipeline(
+        query=steps.from_(
+            MarkedDetail,
             steps.require(FieldName("campaign_id")),
             steps.resolve(named(FieldName("campaign_id"))),
         ),
@@ -787,8 +825,8 @@ def test_requiring_a_lifted_field_typed_by_an_optional_alias_requires_it() -> No
             [
                 View(
                     name=ViewName.fake(),
-                    source=Campaign,
-                    step=steps.pipeline(
+                    query=steps.from_(
+                        Campaign,
                         steps.reverse(
                             AliasedDetail, steps.project([FieldName("objective")])
                         ),

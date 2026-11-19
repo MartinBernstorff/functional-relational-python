@@ -50,3 +50,16 @@ def test_a_field_valued_otherwise_is_not_the_primary_key(
     field: ir.RelationField,
 ) -> None:
     assert not steps.is_primary_key(field)
+
+
+def test_then_applies_its_steps_after_the_querys_own() -> None:
+    query = steps.from_(Employee, steps.omit(FieldName("id"))).then(
+        steps.rename(FieldName("name"), FieldName("title"))
+    )
+
+    assert query.from_ is Employee
+    assert query.node() == ir.Rename(
+        input=ir.Omit(input=ir.FromSource(source=Employee), fields=FieldName("id")),
+        field=FieldName("name"),
+        new=FieldName("title"),
+    )

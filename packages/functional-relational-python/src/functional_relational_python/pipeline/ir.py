@@ -81,7 +81,7 @@ type TypeTransform = Callable[[RuntimeAnnotation], RuntimeAnnotation]
 
 class Retype(pydantic.BaseModel, frozen=True):
     """Gives the named field, or every selected field, the type `transform` maps
-    its type to. Only a Payload may retype; a View's mapping copies each value
+    its type to. Only a WriteModel may retype; a View's mapping copies each value
     unchanged."""
 
     input: Node
@@ -290,7 +290,7 @@ type Condition = Comparison | IsNull | And | Or | Not
 class Where(pydantic.BaseModel, frozen=True):
     """Keeps only the rows for which `condition` is true.
 
-    Only a View's own pipeline may filter, not a nested one or a Payload's.
+    Only a View's own pipeline may filter, not a nested one or a WriteModel's.
     """
 
     input: Node
@@ -301,7 +301,7 @@ class Require(pydantic.BaseModel, frozen=True):
     """Narrows the named field, or every selected field, from `X | None` to `X`.
 
     It drops no row: a `None` there is an unmet requirement when the View runs. A
-    View may require anywhere, a nested pipeline included; a Payload may not.
+    View may require anywhere, a nested pipeline included; a WriteModel may not.
     """
 
     input: Node
@@ -764,7 +764,7 @@ class Relation(pydantic.BaseModel, frozen=True):
     Filters a row must pass to be a View result.
 
     A row is kept when every Filter in `filters` is true. Only a View's own
-    Relation has Filters, not a nested one or a Payload's.
+    Relation has Filters, not a nested one or a WriteModel's.
     """
 
     source: SourceName

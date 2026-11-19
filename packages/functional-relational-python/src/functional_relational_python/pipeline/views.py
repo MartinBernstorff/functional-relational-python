@@ -10,13 +10,12 @@ class ViewName(pydantic.RootModel[str], frozen=True):
 
 
 class View(pydantic.BaseModel, frozen=True):
-    """A read model: a name, a Source and a pipeline of steps over it.
+    """A read model: a name and the Query it reads.
 
     `base` is the class its generated model subclasses. It may be generic, e.g.
     `PutModel[CompanyId]`. A kept field the base declares is not re-declared.
     """
 
     name: ViewName
-    source: type[pydantic.BaseModel]
-    step: steps.Step
+    query: steps.Query
     base: type[pydantic.BaseModel] = pydantic.BaseModel

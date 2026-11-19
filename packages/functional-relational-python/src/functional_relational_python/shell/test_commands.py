@@ -21,9 +21,12 @@ from functional_relational_python.outputs.python.plan import (
 )
 from functional_relational_python.outputs.python.symbols import ModulePath
 from functional_relational_python.pipeline import conditions, steps
-from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
+from functional_relational_python.pipeline.write_models import (
+    WriteModel,
+    WriteModelName,
+)
 from functional_relational_python.shell import commands
 from functional_relational_python.shell.catalog import (
     Catalog,
@@ -61,25 +64,31 @@ class Company(pydantic.BaseModel):
 
 
 def by_kind(
-    compiled: compiler.CompiledView | compiler.CompiledPayload | compiler.CompiledUnion,
+    compiled: compiler.CompiledView
+    | compiler.CompiledWriteModel
+    | compiler.CompiledUnion,
 ) -> ModulePath:
     match compiled:
         case compiler.CompiledView() | compiler.CompiledUnion():
             return ModulePath("app.cards")
-        case compiler.CompiledPayload():
-            return ModulePath("app.payloads")
+        case compiler.CompiledWriteModel():
+            return ModulePath("app.write_models")
 
 
 catalog = Catalog(
     entities=[Company],
     id_base=IdBase.fake(),
     one_to_one_marker=OneToOneMarker.fake(),
-    views=[View(name=ViewName("CompanyCard"), source=Company, step=steps.pipeline())],
-    payloads=[
-        Payload(
-            name=PayloadName("CompanyCreate"),
-            source=Company,
-            step=steps.omit(FieldName("id")),
+    views=[
+        View(
+            name=ViewName("CompanyCard"),
+            query=steps.from_(Company),
+        )
+    ],
+    write_models=[
+        WriteModel(
+            name=WriteModelName("CompanyCreate"),
+            query=steps.from_(Company, steps.omit(FieldName("id"))),
         )
     ],
     unions=[],
@@ -96,23 +105,29 @@ def mappings_into(module: ModulePath) -> Catalog:
 
 
 mappings_into_a_view_module_catalog = mappings_into(ModulePath("app.cards"))
-mappings_into_a_payload_module_catalog = mappings_into(ModulePath("app.payloads"))
+mappings_into_a_write_model_module_catalog = mappings_into(
+    ModulePath("app.write_models")
+)
 mappings_into_the_django_module_catalog = mappings_into(DjangoModels.fake().module)
 mappings_over_a_package_catalog = mappings_into(ModulePath("app"))
 
 invalid_catalog = catalog.model_copy(
     update={
         "views": [
-            View(name=ViewName("not valid"), source=Company, step=steps.pipeline())
+            View(
+                name=ViewName("not valid"),
+                query=steps.from_(Company),
+            )
         ]
     }
 )
 
 shared_name_catalog = catalog.model_copy(
     update={
-        "payloads": [
-            Payload(
-                name=PayloadName(view.name.root), source=Company, step=steps.pipeline()
+        "write_models": [
+            WriteModel(
+                name=WriteModelName(view.name.root),
+                query=steps.from_(Company),
             )
             for view in catalog.views
         ]
@@ -158,7 +173,7 @@ def test_generate_writes_files_that_check_accepts() -> None:
 
     assert written == (
         root.file(ModulePath("app.cards").file_path()),
-        root.file(ModulePath("app.payloads").file_path()),
+        root.file(ModulePath("app.write_models").file_path()),
         root.file(ModulePath("app.mappings").file_path()),
         root.file(DjangoModels.fake().module.file_path()),
         root.file(DjangoModels.fake().queries.file_path()),
@@ -279,8 +294,8 @@ def test_generate_reports_why_it_cannot_run(
             ModelsAndMappingsInOneModule(module=ModulePath("app.cards")),
         ),
         (
-            Text("mappings_into_a_payload_module_catalog"),
-            ModelsAndMappingsInOneModule(module=ModulePath("app.payloads")),
+            Text("mappings_into_a_write_model_module_catalog"),
+            ModelsAndMappingsInOneModule(module=ModulePath("app.write_models")),
         ),
         (
             Text("mappings_into_the_django_module_catalog"),
@@ -325,8 +340,8 @@ def test_generate_reports_the_diagnostics_of_every_output() -> None:
 def tagged_card(tag: Text) -> View:
     return View(
         name=ViewName(f"{tag.root.title()}Card"),
-        source=Company,
-        step=steps.pipeline(
+        query=steps.from_(
+            Company,
             steps.where(conditions.eq(conditions.field(FieldName("name")), tag)),
             test_compiler.added_tag(FieldName("kind"), test_compiler.Tag(tag.root)),
         ),
@@ -379,9 +394,9 @@ def test_generate_writes_django_queries_for_a_union_over_an_entity() -> None:
 
 def views_only(
     compiled: compiler.CompiledView
-    | compiler.CompiledPayload
+    | compiler.CompiledWriteModel
     | compiler.CompiledUnion
-    | compiler.CompiledPayloadUnion,
+    | compiler.CompiledWriteModelUnion,
 ) -> ModulePath:
     """Places no Union, as a layout written before Unions might."""
     match compiled:

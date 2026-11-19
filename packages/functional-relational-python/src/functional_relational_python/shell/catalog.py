@@ -9,7 +9,12 @@ from safe_result import Err, Ok, Result
 
 from functional_relational_python.compiler import compiler
 from functional_relational_python.entity_graph.entity_graph import EntityGraph
-from functional_relational_python.entity_graph.id import IdBase, OneToOneMarker
+from functional_relational_python.entity_graph.id import (
+    Id,
+    IdBase,
+    OneToOne,
+    OneToOneMarker,
+)
 from functional_relational_python.outputs.django.models import (
     DjangoModels,
     DjangoModelsRenderer,
@@ -25,9 +30,9 @@ from functional_relational_python.outputs.python.plan import (
 )
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import FirstParty, ModulePath
-from functional_relational_python.pipeline.payloads import Payload
 from functional_relational_python.pipeline.unions import Union
 from functional_relational_python.pipeline.views import View
+from functional_relational_python.pipeline.write_models import WriteModel
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticsError,
@@ -39,13 +44,12 @@ from functional_relational_python.support.identifier import Identifier
 
 class Catalog(pydantic.BaseModel, frozen=True):
     """The Entities, the class their ID types subclass, the Views over them, the
-    Payloads, the Unions of Views or of Payloads, the module each View's,
-    Payload's or Union's model goes to, and whether and where mapping functions
+    WriteModels, the Unions of Views or of WriteModels, the module each View's,
+    WriteModel's or Union's model goes to, and whether and where mapping functions
     and Django models go.
 
-    Views are read models, Payloads are write models. A View and a Payload cannot
-    share a name. A Union's Variants are generated as if `views` or `payloads`
-    listed them. `layout` receives each compiled View, Payload and Union.
+    A View and a WriteModel cannot share a name. A Union's Variants are generated as if `views` or `write_models`
+    listed them. `layout` receives each compiled View, WriteModel and Union.
     `mappings` is the one module every View's and Union of Views' mapping
     function goes to, see `MappingsRenderer`.
     It cannot be a module `layout` returns, a Django module, a module defining a
@@ -53,24 +57,18 @@ class Catalog(pydantic.BaseModel, frozen=True):
     files are generated into (`app` when generating `app.views`). `django`
     generates a Django model per Entity, and Django queries for each View over
     an Entity, see `DjangoModels`. An Entity listed in `DjangoModels.existing`
-    gets no generated model, since the application already has one. `id_base` is `IdBase(Id)`, or an application's
-    own base, and `one_to_one_marker` is `OneToOneMarker(OneToOne)`, or an
-    application's own marker, so that the Entity modules, and with them the
-    generated code, do not need frp installed.
+    gets no generated model, since the application already has one. `id_base` defaults to `IdBase(Id)`, and
+    `one_to_one_marker` to `OneToOneMarker(OneToOne)`. An application passes its
+    own base and marker so that the Entity modules, and with them the generated
+    code, do not need frp installed.
 
-    >>> from functional_relational_python.entity_graph.id import (
-    ...     Id,
-    ...     IdBase,
-    ...     OneToOne,
-    ...     OneToOneMarker,
-    ... )
     >>> catalog = Catalog(
     ...     entities=[Company],
-    ...     id_base=IdBase(Id),
-    ...     one_to_one_marker=OneToOneMarker(OneToOne),
-    ...     views=[View(name=ViewName("CompanySummary"), source=Company, step=...)],
-    ...     payloads=[
-    ...         Payload(name=PayloadName("CompanyCreate"), source=Company, step=...)
+    ...     views=[View(name=ViewName("CompanySummary"), query=from_(Company, ...))],
+    ...     write_models=[
+    ...         WriteModel(
+    ...             name=WriteModelName("CompanyCreate"), query=from_(Company, ...)
+    ...         )
     ...     ],
     ...     unions=[],
     ...     layout=lambda compiled: ModulePath("myapp.models"),
@@ -80,10 +78,10 @@ class Catalog(pydantic.BaseModel, frozen=True):
     """
 
     entities: Sequence[type[pydantic.BaseModel]]
-    id_base: IdBase
-    one_to_one_marker: OneToOneMarker
+    id_base: IdBase = IdBase(Id)
+    one_to_one_marker: OneToOneMarker = OneToOneMarker(OneToOne)
     views: Sequence[View]
-    payloads: Sequence[Payload]
+    write_models: Sequence[WriteModel]
     unions: Sequence[Union]
     layout: ModuleLayout
     mappings: ModulePath | WithoutMappings
@@ -147,7 +145,9 @@ class Catalog(pydantic.BaseModel, frozen=True):
             case ModulePath() as mappings:
                 mappings_modules = (mappings,)
         generated = first_party.with_generated((*django_modules, *mappings_modules))
-        match compiler.compile_catalog(graph, self.views, self.payloads, self.unions):
+        match compiler.compile_catalog(
+            graph, self.views, self.write_models, self.unions
+        ):
             case Err(compile_error):
                 return [Err(compile_error), self._django_models(graph, generated)]
             case Ok(compiled):

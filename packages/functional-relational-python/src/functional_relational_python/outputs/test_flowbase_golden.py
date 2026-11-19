@@ -23,8 +23,8 @@ a View over the base table that filters by the campaign's `kind` and
 `submit_state`, and flattens the Meta detail row into itself. The Meta campaign
 Union is itself a Variant of a cross-channel Union, discriminated by `channel`.
 
-A fifth rebuilds Flowbase's Meta campaign update payloads (`services/channels/
-meta/entities/campaign.py`) as a Union of a draft and a submitted update Payload,
+A fifth rebuilds Flowbase's Meta campaign update write models (`services/channels/
+meta/entities/campaign.py`) as a Union of a draft and a submitted update WriteModel,
 each tagged by a `submit_state` field it adds.
 """
 
@@ -55,9 +55,12 @@ from functional_relational_python.outputs.python.plan import PythonLayout, Pytho
 from functional_relational_python.outputs.python.render import PythonRenderer
 from functional_relational_python.outputs.python.symbols import FirstParty, ModulePath
 from functional_relational_python.pipeline import conditions, ir, steps
-from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
+from functional_relational_python.pipeline.write_models import (
+    WriteModel,
+    WriteModelName,
+)
 from functional_relational_python.support.filesystem import FileText
 
 
@@ -212,13 +215,12 @@ def flowbase_views() -> list[View]:
     return [
         View(
             name=ViewName("CompanyMembershipHydrated"),
-            source=CompanyMembership,
-            step=hydrate_membership(),
+            query=steps.from_(CompanyMembership, hydrate_membership()),
         ),
         View(
             name=ViewName("ShopOrderHydrated"),
-            source=ShopOrder,
-            step=steps.pipeline(
+            query=steps.from_(
+                ShopOrder,
                 steps.resolve(named(FieldName("department_id"))),
                 steps.resolve(
                     named(FieldName("company_membership_id")), hydrate_membership()
@@ -248,9 +250,9 @@ def test_golden_flowbase_view_models() -> None:
     match PythonPlan.of(
         compiler.CompiledCatalog(
             views=compiled_views().views,
-            payloads=(),
+            write_models=(),
             unions=(),
-            payload_unions=(),
+            write_model_unions=(),
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
@@ -384,8 +386,8 @@ def campaign_view() -> View:
     without_base = steps.omit(FieldName("channel_campaign_id"))
     return View(
         name=ViewName("ChannelCampaignDetails"),
-        source=ChannelCampaign,
-        step=steps.pipeline(
+        query=steps.from_(
+            ChannelCampaign,
             steps.reverse(MetaCampaign, without_base),
             steps.reverse(LinkedInCampaign, without_base),
         ),
@@ -412,9 +414,9 @@ def test_golden_flowbase_campaign_view_model() -> None:
     match PythonPlan.of(
         compiler.CompiledCatalog(
             views=compiled_campaign_views().views,
-            payloads=(),
+            write_models=(),
             unions=(),
-            payload_unions=(),
+            write_model_unions=(),
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
@@ -613,8 +615,8 @@ def meta_campaign_variants() -> tuple[View, View, View]:
     return (
         View(
             name=ViewName("TemplateMetaCampaign"),
-            source=ChannelCampaignEntity,
-            step=steps.pipeline(
+            query=steps.from_(
+                ChannelCampaignEntity,
                 steps.where(
                     conditions.and_(
                         has(FieldName("channel"), Channel.META),
@@ -628,8 +630,8 @@ def meta_campaign_variants() -> tuple[View, View, View]:
         ),
         View(
             name=ViewName("DraftMetaCampaign"),
-            source=ChannelCampaignEntity,
-            step=steps.pipeline(
+            query=steps.from_(
+                ChannelCampaignEntity,
                 steps.where(
                     conditions.and_(
                         *instance, has(FieldName("submit_state"), SubmitState.DRAFT)
@@ -640,8 +642,8 @@ def meta_campaign_variants() -> tuple[View, View, View]:
         ),
         View(
             name=ViewName("SubmittedMetaCampaign"),
-            source=ChannelCampaignEntity,
-            step=steps.pipeline(
+            query=steps.from_(
+                ChannelCampaignEntity,
                 steps.where(
                     conditions.and_(
                         *instance, has(FieldName("submit_state"), SubmitState.SUBMITTED)
@@ -657,8 +659,8 @@ def meta_campaign_variants() -> tuple[View, View, View]:
 def linkedin_campaign() -> View:
     return View(
         name=ViewName("LinkedInCampaign"),
-        source=ChannelCampaignEntity,
-        step=steps.pipeline(
+        query=steps.from_(
+            ChannelCampaignEntity,
             steps.where(has(FieldName("channel"), Channel.LINKEDIN)),
             with_detail(LinkedInCampaignEntity),
         ),
@@ -711,9 +713,9 @@ def test_golden_flowbase_meta_campaign_union_models() -> None:
     match PythonPlan.of(
         compiler.CompiledCatalog(
             views=compiled.views,
-            payloads=(),
+            write_models=(),
             unions=compiled.unions,
-            payload_unions=(),
+            write_model_unions=(),
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         PythonLayout.models_only(lambda _: ModulePath("flowbase.views")),
@@ -930,21 +932,25 @@ def test_golden_flowbase_meta_campaign_union_results() -> None:
     )
 
 
-def update_meta_campaign_payload() -> Union:
+def update_meta_campaign_write_model() -> Union:
     """Flowbase's `UpdateDraftMetaCampaignPayload` and
     `UpdateSubmittedMetaCampaignPayload`, as one Union tagged by `submit_state`.
     An update may leave any field out; a submitted campaign keeps its name."""
     every_field = steps.select(lambda _: True)
 
-    def update(name: PayloadName, tag: ir.AddedType, *retypes: steps.Step) -> Payload:
-        return Payload(
+    def update(
+        name: WriteModelName, tag: ir.AddedType, *retypes: steps.Step
+    ) -> WriteModel:
+        return WriteModel(
             name=name,
-            source=MetaCampaignEntity,
-            step=steps.pipeline(
-                steps.project([FieldName("name"), FieldName("lifetime_budget")]),
-                *retypes,
-                steps.default(every_field, MISSING),
-                steps.add(FieldName("submit_state"), tag),
+            query=steps.from_(
+                MetaCampaignEntity,
+                steps.pipeline(
+                    steps.project([FieldName("name"), FieldName("lifetime_budget")]),
+                    *retypes,
+                    steps.default(every_field, MISSING),
+                    steps.add(FieldName("submit_state"), tag),
+                ),
             ),
         )
 
@@ -953,12 +959,12 @@ def update_meta_campaign_payload() -> Union:
         discriminator=FieldName("submit_state"),
         variants=(
             update(
-                PayloadName("UpdateDraftMetaCampaignPayload"),
+                WriteModelName("UpdateDraftMetaCampaignPayload"),
                 Literal[SubmitState.DRAFT],
                 steps.retype(every_field, lambda annotation: annotation | MISSING),
             ),
             update(
-                PayloadName("UpdateSubmittedMetaCampaignPayload"),
+                WriteModelName("UpdateSubmittedMetaCampaignPayload"),
                 Literal[SubmitState.SUBMITTED],
                 steps.retype_to(FieldName("name"), CampaignName | MISSING),
                 steps.retype(
@@ -970,23 +976,23 @@ def update_meta_campaign_payload() -> Union:
     )
 
 
-def update_meta_campaign_payload_module() -> FileText:
+def update_meta_campaign_write_model_module() -> FileText:
     compiled = compiler.compile_catalog(
-        channel_campaign_graph(), [], [], [update_meta_campaign_payload()]
+        channel_campaign_graph(), [], [], [update_meta_campaign_write_model()]
     ).unwrap()
     match PythonPlan.of(
         compiled,
-        PythonLayout.models_only(lambda _: ModulePath("flowbase.payloads")),
+        PythonLayout.models_only(lambda _: ModulePath("flowbase.write_models")),
     ):
         case Ok(plan):
             (file,) = PythonRenderer.render(plan, first_party=FirstParty.fake()).files
             return file.text
         case Err(error):
-            pytest.fail(f"expected a Payload Union model, got {error}")
+            pytest.fail(f"expected a WriteModel Union model, got {error}")
 
 
-def test_golden_flowbase_update_meta_campaign_payload_union_model() -> None:
-    assert update_meta_campaign_payload_module() == FileText(
+def test_golden_flowbase_update_meta_campaign_write_model_union_model() -> None:
+    assert update_meta_campaign_write_model_module() == FileText(
         """\
 # Generated by functional-relational-python. Do not edit.
 # Regenerate with `frp generate`; `frp check` fails when this is stale.
@@ -1022,9 +1028,11 @@ type UpdateMetaCampaignPayload = Annotated[
     )
 
 
-def test_the_update_meta_campaign_payload_union_reads_each_payload_by_its_tag() -> None:
-    module = types.ModuleType("flowbase_payloads")
-    exec(update_meta_campaign_payload_module().root, module.__dict__)
+def test_the_update_meta_campaign_write_model_union_reads_each_write_model_by_its_tag() -> (
+    None
+):
+    module = types.ModuleType("flowbase_write_models")
+    exec(update_meta_campaign_write_model_module().root, module.__dict__)
     adapter = pydantic.TypeAdapter(module.UpdateMetaCampaignPayload)
 
     assert [

@@ -62,7 +62,10 @@ def make_engine(*views: View) -> engine.InMemoryViewEngine:
 
 
 def view_of(step: steps.Step) -> View:
-    return View(name=ViewName.fake(), source=Company, step=step)
+    return View(
+        name=ViewName.fake(),
+        query=steps.from_(Company, step),
+    )
 
 
 def read(
@@ -207,9 +210,13 @@ def test_a_view_over_an_empty_engine_has_no_rows() -> None:
 
 
 def test_views_over_the_same_entities_are_independent() -> None:
-    full = View(name=ViewName("Full"), source=Company, step=steps.pipeline())
+    full = View(
+        name=ViewName("Full"),
+        query=steps.from_(Company),
+    )
     public = View(
-        name=ViewName("Public"), source=Company, step=steps.omit(FieldName("secret"))
+        name=ViewName("Public"),
+        query=steps.from_(Company, steps.omit(FieldName("secret"))),
     )
     view_engine = make_engine(full, public)
     company = Company.fake(CompanyId.fake())
@@ -230,7 +237,10 @@ def test_put_rejects_a_model_that_is_not_an_entity() -> None:
 
 
 def test_reading_a_view_over_a_source_that_is_not_an_entity_is_an_error() -> None:
-    view = View(name=ViewName.fake(), source=Memo, step=steps.pipeline())
+    view = View(
+        name=ViewName.fake(),
+        query=steps.from_(Memo),
+    )
 
     match make_engine(view).read(view.name):
         case Err(engine.NonEntitySourceError() as error):
@@ -307,7 +317,10 @@ def hr_engine(*views: View) -> engine.InMemoryViewEngine:
 
 
 def employee_view(step: steps.Step) -> View:
-    return View(name=ViewName.fake(), source=Employee, step=step)
+    return View(
+        name=ViewName.fake(),
+        query=steps.from_(Employee, step),
+    )
 
 
 def named(*fields: FieldName) -> ir.Select:
@@ -878,8 +891,7 @@ def test_resolving_then_replacing_entities_by_their_ids_gives_the_original(
     graph = case.models.graph()
     view = View(
         name=ViewName.fake(),
-        source=case.source,
-        step=steps.resolve(named(*case.resolved)),
+        query=steps.from_(case.source, steps.resolve(named(*case.resolved))),
     )
     compiled = compiler.compile_views(graph, [view]).unwrap()
     view_engine = engine.InMemoryViewEngine(graph, compiled)
@@ -995,9 +1007,11 @@ def test_an_ordering_condition_keeps_the_rows_on_its_side(
 ) -> None:
     view = View(
         name=ViewName.fake(),
-        source=Player,
-        step=steps.where(
-            condition(conditions.field(FieldName("score")), test_compiler.Score(2))
+        query=steps.from_(
+            Player,
+            steps.where(
+                condition(conditions.field(FieldName("score")), test_compiler.Score(2))
+            ),
         ),
     )
     graph = EntityGraph.build([Player], IdBase.fake(), OneToOneMarker.fake()).unwrap()
@@ -1239,7 +1253,10 @@ class Ticket(pydantic.BaseModel, frozen=True):
 
 
 def ticket_view(name: ViewName, *then: steps.Step) -> View:
-    return View(name=name, source=Ticket, step=steps.pipeline(*then))
+    return View(
+        name=name,
+        query=steps.from_(Ticket, steps.pipeline(*then)),
+    )
 
 
 def has_status(status: TicketStatus) -> steps.Step:
@@ -1365,8 +1382,8 @@ def test_reading_a_union_over_a_source_that_is_not_an_entity_is_an_error() -> No
     def memo(name: ViewName, tag: Text) -> View:
         return View(
             name=name,
-            source=Memo,
-            step=steps.pipeline(
+            query=steps.from_(
+                Memo,
                 steps.where(conditions.eq(conditions.field(FieldName("body")), tag)),
                 test_compiler.added_tag(FieldName("kind"), test_compiler.Tag(tag.root)),
             ),

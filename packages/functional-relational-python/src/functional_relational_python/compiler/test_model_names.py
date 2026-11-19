@@ -72,14 +72,18 @@ def names(model: ModelName, function: FunctionName) -> ViewModelNames:
 
 
 def view_named(name: ViewName) -> View:
-    return View(name=name, source=Employee, step=steps.pipeline())
+    return View(
+        name=name,
+        query=steps.from_(Employee),
+    )
 
 
 def renaming_to(new: FieldName) -> View:
     return View(
         name=ViewName.fake(),
-        source=Employee,
-        step=steps.pipeline(steps.rename(FieldName("name"), new), steps.omit(new)),
+        query=steps.from_(
+            Employee, steps.rename(FieldName("name"), new), steps.omit(new)
+        ),
     )
 
 
@@ -111,8 +115,9 @@ def invalid_field(
         (
             View(
                 name=ViewName("EmployeeOverview"),
-                source=Employee,
-                step=steps.hydrate(steps.omit(FieldName("name"))),
+                query=steps.from_(
+                    Employee, steps.hydrate(steps.omit(FieldName("name")))
+                ),
             ),
             ViewModelNames(
                 model=ModelNames(
@@ -149,14 +154,18 @@ def invalid_field(
             ]
         ),
         (
-            View(name=ViewName.fake(), source=Keyworded, step=steps.hydrate()),
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(Keyworded, steps.hydrate()),
+            ),
             (invalid_field(Keyworded, FieldName("class")),),
         ),
         (
             View(
                 name=ViewName.fake(),
-                source=Hyphenated,
-                step=steps.hydrate(steps.omit(FieldName("name"))),
+                query=steps.from_(
+                    Hyphenated, steps.hydrate(steps.omit(FieldName("name")))
+                ),
             ),
             (
                 InvalidNestedModelName(
@@ -194,7 +203,10 @@ def test_the_names_a_view_gets_or_why_it_cannot_have_them(
 
 def test_a_compile_defect_and_an_invalid_view_name_are_reported_together() -> None:
     unknown = FieldName("nmae")
-    defective = View(name=ViewName.fake(), source=Employee, step=steps.omit(unknown))
+    defective = View(
+        name=ViewName.fake(),
+        query=steps.from_(Employee, steps.omit(unknown)),
+    )
     badly_named = view_named(ViewName("not-a-class"))
 
     match compiler.compile_views(graph(), [defective, badly_named]):
@@ -214,7 +226,10 @@ def test_a_compile_defect_and_an_invalid_view_name_are_reported_together() -> No
 
 def test_a_view_that_does_not_compile_still_reports_its_invalid_name() -> None:
     unknown = FieldName("nmae")
-    view = View(name=ViewName("None"), source=Employee, step=steps.omit(unknown))
+    view = View(
+        name=ViewName("None"),
+        query=steps.from_(Employee, steps.omit(unknown)),
+    )
 
     assert compiled_names(view) == (
         diagnostics.UnknownField(

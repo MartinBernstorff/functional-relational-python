@@ -29,9 +29,12 @@ from functional_relational_python.entity_graph.id import (
 )
 from functional_relational_python.pipeline import conditions, ir, steps, test_ir
 from functional_relational_python.pipeline.constraints import ConditionOwner
-from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
+from functional_relational_python.pipeline.write_models import (
+    WriteModel,
+    WriteModelName,
+)
 from functional_relational_python.support.diagnostic import DiagnosticsError
 
 
@@ -60,7 +63,13 @@ def names(*fields: Text) -> list[FieldName]:
 
 def compile_one(step: steps.Step) -> compiler.CompiledView:
     match compiler.compile_views(
-        empty_graph(), [View(name=ViewName.fake(), source=Company, step=step)]
+        empty_graph(),
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(Company, step),
+            )
+        ],
     ):
         case Ok(compiled):
             return compiled.views[0]
@@ -92,8 +101,7 @@ def test_each_unknown_projected_field_is_a_diagnostic() -> None:
     unknown = [FieldName("revnue"), FieldName("nme")]
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.project([FieldName("secret"), *unknown]),
+        query=steps.from_(Company, steps.project([FieldName("secret"), *unknown])),
     )
 
     assert diagnostics_of([view]) == tuple(
@@ -111,8 +119,8 @@ def test_steps_after_a_defective_project_are_checked_against_its_known_fields() 
     unknown = FieldName("revnue")
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.pipeline(
+        query=steps.from_(
+            Company,
             steps.project([FieldName("name"), unknown]),
             steps.omit(FieldName("secret")),
         ),
@@ -178,8 +186,9 @@ def test_an_unknown_field_names_the_source_the_field_and_the_valid_names() -> No
     unknown = FieldName("revnue")
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.pipeline(steps.omit(FieldName("secret")), steps.omit(unknown)),
+        query=steps.from_(
+            Company, steps.omit(FieldName("secret")), steps.omit(unknown)
+        ),
     )
 
     assert diagnostics_of([view]) == (
@@ -211,7 +220,13 @@ def test_compiled_views_keep_their_explicit_names_in_order() -> None:
 
     match compiler.compile_views(
         empty_graph(),
-        [View(name=name, source=Company, step=steps.pipeline()) for name in names],
+        [
+            View(
+                name=name,
+                query=steps.from_(Company),
+            )
+            for name in names
+        ],
     ):
         case Ok(compiled):
             assert [view.name for view in compiled.views] == names
@@ -248,8 +263,7 @@ def test_renaming_onto_an_existing_field_is_a_diagnostic() -> None:
     existing = FieldName("name")
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.rename(FieldName("secret"), existing),
+        query=steps.from_(Company, steps.rename(FieldName("secret"), existing)),
     )
 
     assert diagnostics_of([view]) == (
@@ -293,8 +307,7 @@ def test_renaming_an_unknown_field_is_one_diagnostic_even_if_later_steps_use_it(
     unknown = FieldName("secrt")
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.pipeline(steps.rename(unknown, FieldName("code")), later),
+        query=steps.from_(Company, steps.rename(unknown, FieldName("code")), later),
     )
 
     assert diagnostics_of([view]) == (
@@ -311,8 +324,7 @@ def test_renaming_an_unknown_field_onto_an_existing_one_reports_both() -> None:
     unknown = FieldName("secrt")
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.rename(unknown, FieldName("name")),
+        query=steps.from_(Company, steps.rename(unknown, FieldName("name"))),
     )
 
     assert diagnostics_of([view]) == (
@@ -396,8 +408,9 @@ def test_rename_with_a_select_onto_an_unselected_field_is_a_diagnostic() -> None
     existing = FieldName("name")
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.rename(named(FieldName("secret")), lambda _field: existing),
+        query=steps.from_(
+            Company, steps.rename(named(FieldName("secret")), lambda _field: existing)
+        ),
     )
 
     assert diagnostics_of([view]) == (
@@ -411,8 +424,9 @@ def test_a_selected_field_renamed_to_its_own_name_keeps_it() -> None:
     kept, renamed = FieldName("secret"), FieldName("name")
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.rename(named(renamed, kept), lambda _field: kept),
+        query=steps.from_(
+            Company, steps.rename(named(renamed, kept), lambda _field: kept)
+        ),
     )
 
     assert diagnostics_of([view]) == (
@@ -426,12 +440,11 @@ def test_renaming_two_selected_fields_onto_one_name_reports_the_second() -> None
     new = FieldName("code")
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.pipeline(
+        query=steps.from_(
+            Company,
             steps.rename(
                 named(FieldName("secret"), FieldName("revenue")), lambda _field: new
             ),
-            # The first renamed field keeps the name, so a later step finds it.
             steps.omit(new),
         ),
     )
@@ -448,8 +461,7 @@ def test_rename_with_a_select_reports_each_invalid_new_name() -> None:
     private = prefixed(Text("_"))
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.rename(named(*selected), private),
+        query=steps.from_(Company, steps.rename(named(*selected), private)),
     )
 
     assert diagnostics_of([view]) == tuple(
@@ -573,8 +585,7 @@ def test_a_default_that_is_not_a_literal_is_a_diagnostic(
 ) -> None:
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.default(FieldName("secret"), value),
+        query=steps.from_(Company, steps.default(FieldName("secret"), value)),
     )
 
     assert diagnostics_of([view]) == (
@@ -587,7 +598,8 @@ def test_a_default_that_is_not_a_literal_is_a_diagnostic(
 def test_a_default_for_an_unknown_field_that_is_not_a_literal_reports_both() -> None:
     unknown, value = FieldName("revnue"), object()
     view = View(
-        name=ViewName.fake(), source=Company, step=steps.default(unknown, value)
+        name=ViewName.fake(),
+        query=steps.from_(Company, steps.default(unknown, value)),
     )
 
     assert diagnostics_of([view]) == (
@@ -674,7 +686,8 @@ def test_a_later_default_replaces_an_added_fields_default() -> None:
 def test_a_view_that_adds_a_field_without_a_default_is_a_diagnostic() -> None:
     kind = FieldName("kind")
     view = View(
-        name=ViewName.fake(), source=Company, step=steps.add(kind, Literal["company"])
+        name=ViewName.fake(),
+        query=steps.from_(Company, steps.add(kind, Literal["company"])),
     )
 
     assert diagnostics_of([view]) == (
@@ -682,13 +695,14 @@ def test_a_view_that_adds_a_field_without_a_default_is_a_diagnostic() -> None:
     )
 
 
-def test_a_payload_may_add_a_field_without_a_default() -> None:
+def test_a_write_model_may_add_a_field_without_a_default() -> None:
     kind = FieldName("kind")
-    payload = Payload(
-        name=PayloadName.fake(), source=Company, step=steps.add(kind, Literal["a"])
+    write_model = WriteModel(
+        name=WriteModelName.fake(),
+        query=steps.from_(Company, steps.add(kind, Literal["a"])),
     )
 
-    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+    (compiled,) = compile_catalog([], [write_model]).unwrap().write_models
 
     assert AddedField.of(compiled.relation.fields[-1]) == AddedField(
         name=kind, annotation=Literal["a"], value=ir.Added(), default=ir.NoDefault()
@@ -698,7 +712,8 @@ def test_a_payload_may_add_a_field_without_a_default() -> None:
 def test_adding_a_field_the_relation_already_has_is_a_diagnostic() -> None:
     existing = FieldName("name")
     view = View(
-        name=ViewName.fake(), source=Company, step=steps.add(existing, str, default="")
+        name=ViewName.fake(),
+        query=steps.from_(Company, steps.add(existing, str, default="")),
     )
 
     assert diagnostics_of([view]) == (
@@ -710,9 +725,10 @@ def test_steps_after_a_defective_add_find_the_added_field() -> None:
     kind, value = FieldName("kind"), object()
     view = View(
         name=ViewName.fake(),
-        source=Company,
-        step=steps.pipeline(
-            steps.add(kind, str, default=value), steps.rename(kind, FieldName("tag"))
+        query=steps.from_(
+            Company,
+            steps.add(kind, str, default=value),
+            steps.rename(kind, FieldName("tag")),
         ),
     )
 
@@ -792,8 +808,9 @@ def views_with_defects(draw: st.DrawFn) -> ViewsWithDefects:
         views.append(
             View(
                 name=name,
-                source=source,
-                step=steps.pipeline(*(steps.omit(FieldName(f)) for f in omits)),
+                query=steps.from_(
+                    source, steps.pipeline(*(steps.omit(FieldName(f)) for f in omits))
+                ),
             )
         )
     return ViewsWithDefects(
@@ -823,7 +840,7 @@ def test_n_independent_defects_give_exactly_n_diagnostics(
 def owner_of(
     diagnostic: diagnostics.CompileDiagnostic,
 ) -> ConditionOwner | UnionName:
-    """The View or Payload a diagnostic names: a Condition's owner, or the
+    """The View or WriteModel a diagnostic names: a Condition's owner, or the
     View of any other step."""
     match diagnostic:
         case (
@@ -868,7 +885,10 @@ def projections(draw: st.DrawFn) -> Projection:
 @given(projections())
 def test_project_equals_omitting_every_other_field(case: Projection) -> None:
     def compile_relation(step: steps.Step) -> ir.Relation:
-        view = View(name=ViewName.fake(), source=case.source, step=step)
+        view = View(
+            name=ViewName.fake(),
+            query=steps.from_(case.source, step),
+        )
         match compiler.compile_views(empty_graph(), [view]):
             case Ok(compiled):
                 return compiled.views[0].relation
@@ -955,7 +975,13 @@ def compile_resolving(
     source: type[pydantic.BaseModel], step: steps.Step
 ) -> compiler.CompiledView:
     match compiler.compile_views(
-        hr_graph(), [View(name=ViewName.fake(), source=source, step=step)]
+        hr_graph(),
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(source, step),
+            )
+        ],
     ):
         case Ok(compiled):
             return compiled.views[0]
@@ -967,7 +993,13 @@ def resolve_diagnostics(
     source: type[pydantic.BaseModel], step: steps.Step
 ) -> tuple[diagnostics.CompileDiagnostic, ...]:
     match compiler.compile_views(
-        hr_graph(), [View(name=ViewName.fake(), source=source, step=step)]
+        hr_graph(),
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(source, step),
+            )
+        ],
     ):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
@@ -1023,7 +1055,13 @@ def test_hydrate_resolves_the_references_the_id_base_decides() -> None:
     ).unwrap()
 
     match compiler.compile_views(
-        graph, [View(name=ViewName.fake(), source=Member, step=steps.hydrate())]
+        graph,
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(Member, steps.hydrate()),
+            )
+        ],
     ):
         case Ok(compiled):
             pass
@@ -1186,9 +1224,8 @@ def test_a_reference_to_no_entity_is_a_diagnostic_and_others_still_resolve() -> 
         [
             View(
                 name=ViewName.fake(),
-                source=Memo,
-                step=steps.pipeline(
-                    steps.hydrate(), steps.omit(FieldName("department"))
+                query=steps.from_(
+                    Memo, steps.hydrate(), steps.omit(FieldName("department"))
                 ),
             )
         ],
@@ -1352,7 +1389,13 @@ def compile_reversing(
     source: type[pydantic.BaseModel], step: steps.Step
 ) -> compiler.CompiledView:
     match compiler.compile_views(
-        campaign_graph(), [View(name=ViewName.fake(), source=source, step=step)]
+        campaign_graph(),
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(source, step),
+            )
+        ],
     ):
         case Ok(compiled):
             return compiled.views[0]
@@ -1364,7 +1407,13 @@ def reverse_diagnostics(
     source: type[pydantic.BaseModel], step: steps.Step
 ) -> tuple[diagnostics.CompileDiagnostic, ...]:
     match compiler.compile_views(
-        campaign_graph(), [View(name=ViewName.fake(), source=source, step=step)]
+        campaign_graph(),
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(source, step),
+            )
+        ],
     ):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
@@ -2565,7 +2614,12 @@ def view_cases(draw: st.DrawFn) -> ViewCase:
             # A single step often has a single defect, which a longer pipeline
             # would rarely leave as the only one.
             step = draw(any_steps(pool, Depth(2)) | any_pipelines(pool, Depth(2)))
-        views.append(View(name=name, source=source, step=step))
+        views.append(
+            View(
+                name=name,
+                query=steps.from_(source, step),
+            )
+        )
     return ViewCase(models=drawn_models, views=tuple(views), valid=frozenset(valid))
 
 
@@ -2697,7 +2751,12 @@ def test_resolve_accepts_exactly_the_fields_references_selects(
     def compile_step(step: steps.Step) -> compiler.CompiledView | None:
         match compiler.compile_views(
             case.models.graph(),
-            [View(name=ViewName.fake(), source=case.source, step=step)],
+            [
+                View(
+                    name=ViewName.fake(),
+                    query=steps.from_(case.source, step),
+                )
+            ],
         ):
             case Ok(compiled):
                 return compiled.views[0]
@@ -2725,7 +2784,10 @@ def compiled_views(draw: st.DrawFn) -> compiler.CompiledView:
     graph = drawn.graph()
     source = draw(st.sampled_from(drawn.entities))
     step = draw(pipelines(graph, source, Depth(2)))
-    view = View(name=ViewName.fake(), source=source, step=step)
+    view = View(
+        name=ViewName.fake(),
+        query=steps.from_(source, step),
+    )
     return compiler.compile_views(graph, [view]).unwrap().views[0]
 
 
@@ -2799,95 +2861,105 @@ def test_lookups_name_each_looked_up_entity_once(
     )
 
 
-# Payloads.
+# WriteModels.
 
 
 def compile_catalog(
-    views: Sequence[View], payloads: Sequence[Payload]
+    views: Sequence[View], write_models: Sequence[WriteModel]
 ) -> Result[compiler.CompiledCatalog, DiagnosticsError[diagnostics.CompileDiagnostic]]:
-    return compiler.compile_catalog(empty_graph(), views, payloads, ())
+    return compiler.compile_catalog(empty_graph(), views, write_models, ())
 
 
-def test_a_payload_compiles_to_the_relation_its_pipeline_builds() -> None:
-    payload = Payload(
-        name=PayloadName.fake(),
-        source=Company,
-        step=steps.omit(FieldName("secret")),
+def test_a_write_model_compiles_to_the_relation_its_pipeline_builds() -> None:
+    write_model = WriteModel(
+        name=WriteModelName.fake(),
+        query=steps.from_(Company, steps.omit(FieldName("secret"))),
     )
 
-    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+    (compiled,) = compile_catalog([], [write_model]).unwrap().write_models
 
-    assert compiled.name == payload.name
+    assert compiled.name == write_model.name
     assert [field.name for field in compiled.relation.fields] == names(
         Text("name"), Text("revenue")
     )
 
 
-def test_a_payload_step_defect_is_reported_under_the_payload_name() -> None:
-    payload = Payload(
-        name=PayloadName.fake(),
-        source=Company,
-        step=steps.omit(FieldName("missing")),
+def test_a_write_model_step_defect_is_reported_under_the_write_model_name() -> None:
+    write_model = WriteModel(
+        name=WriteModelName.fake(),
+        query=steps.from_(Company, steps.omit(FieldName("missing"))),
     )
 
-    match compile_catalog([], [payload]):
+    match compile_catalog([], [write_model]):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
-            assert [owner_of(d) for d in error.diagnostics] == [payload.name]
+            assert [owner_of(d) for d in error.diagnostics] == [write_model.name]
 
 
-def test_a_name_shared_by_a_view_and_a_payload_is_one_diagnostic() -> None:
+def test_a_name_shared_by_a_view_and_a_write_model_is_one_diagnostic() -> None:
     name = Text("Company")
-    view = View(name=ViewName(name.root), source=Company, step=steps.pipeline())
-    payload = Payload(
-        name=PayloadName(name.root), source=Company, step=steps.pipeline()
+    view = View(
+        name=ViewName(name.root),
+        query=steps.from_(Company),
+    )
+    write_model = WriteModel(
+        name=WriteModelName(name.root),
+        query=steps.from_(Company),
     )
 
-    match compile_catalog([view, view], [payload]):
+    match compile_catalog([view, view], [write_model]):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
             assert error.diagnostics == (diagnostics.SharedModelName(view=view.name),)
 
 
-def test_an_update_payload_composes_the_create_pipeline_with_more_steps() -> None:
+def test_an_update_write_model_composes_the_create_pipeline_with_more_steps() -> None:
     create = steps.omit(FieldName("secret"))
-    update = Payload(
-        name=PayloadName.fake(),
-        source=Company,
-        step=steps.pipeline(create, steps.omit(FieldName("revenue"))),
+    update = WriteModel(
+        name=WriteModelName.fake(),
+        query=steps.from_(Company, create, steps.omit(FieldName("revenue"))),
     )
 
-    (compiled,) = compile_catalog([], [update]).unwrap().payloads
+    (compiled,) = compile_catalog([], [update]).unwrap().write_models
 
     assert [field.name for field in compiled.relation.fields] == names(Text("name"))
 
 
-def test_views_and_payloads_of_distinct_names_compile() -> None:
-    view = View(name=ViewName.fake(), source=Company, step=steps.pipeline())
-    payload = Payload(name=PayloadName.fake(), source=Company, step=steps.pipeline())
+def test_views_and_write_models_of_distinct_names_compile() -> None:
+    view = View(
+        name=ViewName.fake(),
+        query=steps.from_(Company),
+    )
+    write_model = WriteModel(
+        name=WriteModelName.fake(),
+        query=steps.from_(Company),
+    )
 
-    compiled = compile_catalog([view], [payload]).unwrap()
+    compiled = compile_catalog([view], [write_model]).unwrap()
 
     assert [v.name for v in compiled.views] == [view.name]
-    assert [p.name for p in compiled.payloads] == [payload.name]
+    assert [p.name for p in compiled.write_models] == [write_model.name]
 
 
 # retype.
 
 
-def compile_employee_payload(
+def compile_employee_write_model(
     step: steps.Step,
 ) -> Result[compiler.CompiledCatalog, DiagnosticsError[diagnostics.CompileDiagnostic]]:
-    payload = Payload(name=PayloadName.fake(), source=Employee, step=step)
-    return compiler.compile_catalog(hr_graph(), [], [payload], ())
+    write_model = WriteModel(
+        name=WriteModelName.fake(),
+        query=steps.from_(Employee, step),
+    )
+    return compiler.compile_catalog(hr_graph(), [], [write_model], ())
 
 
-def employee_payload_diagnostics(
+def employee_write_model_diagnostics(
     step: steps.Step,
 ) -> tuple[diagnostics.CompileDiagnostic, ...]:
-    match compile_employee_payload(step):
+    match compile_employee_write_model(step):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
@@ -2904,14 +2976,14 @@ def annotations(relation: ir.Relation) -> dict[FieldName, ir.RuntimeAnnotation]:
 
 def test_retype_maps_each_selected_fields_type_with_the_transform() -> None:
     (compiled,) = (
-        compile_employee_payload(
+        compile_employee_write_model(
             steps.retype(
                 named(FieldName("name"), FieldName("mentor_id")),
                 lambda annotation: annotation | MISSING,
             ),
         )
         .unwrap()
-        .payloads
+        .write_models
     )
 
     assert annotations(compiled.relation) == {
@@ -2924,9 +2996,9 @@ def test_retype_maps_each_selected_fields_type_with_the_transform() -> None:
 
 def test_retype_to_gives_the_named_field_one_type() -> None:
     (compiled,) = (
-        compile_employee_payload(steps.retype_to(FieldName("name"), int))
+        compile_employee_write_model(steps.retype_to(FieldName("name"), int))
         .unwrap()
-        .payloads
+        .write_models
     )
 
     assert annotations(compiled.relation)[FieldName("name")] is int
@@ -2937,13 +3009,12 @@ class Constrained(pydantic.BaseModel):
 
 
 def test_a_retyped_field_drops_the_old_types_constraints() -> None:
-    payload = Payload(
-        name=PayloadName.fake(),
-        source=Constrained,
-        step=steps.retype_to(FieldName("code"), int),
+    write_model = WriteModel(
+        name=WriteModelName.fake(),
+        query=steps.from_(Constrained, steps.retype_to(FieldName("code"), int)),
     )
 
-    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+    (compiled,) = compile_catalog([], [write_model]).unwrap().write_models
 
     match compiled.relation.fields:
         case (ir.Field(info=info),):
@@ -2955,9 +3026,9 @@ def test_a_retyped_field_drops_the_old_types_constraints() -> None:
 def test_retyping_an_unknown_field_is_a_diagnostic() -> None:
     unknown = FieldName("nme")
 
-    assert employee_payload_diagnostics(steps.retype_to(unknown, int)) == (
+    assert employee_write_model_diagnostics(steps.retype_to(unknown, int)) == (
         diagnostics.UnknownField(
-            owner=PayloadName.fake(),
+            owner=WriteModelName.fake(),
             source=ir.SourceName("Employee"),
             field=unknown,
             valid=tuple(map(FieldName, Employee.model_fields)),
@@ -2971,9 +3042,9 @@ def test_retyping_a_field_resolved_through_a_nested_pipeline_is_a_diagnostic() -
         steps.retype_to(FieldName("department"), int),
     )
 
-    assert employee_payload_diagnostics(step) == (
+    assert employee_write_model_diagnostics(step) == (
         diagnostics.RetypeNestedField(
-            view=PayloadName.fake(),
+            view=WriteModelName.fake(),
             source=ir.SourceName("Employee"),
             field=FieldName("department"),
         ),
@@ -3004,12 +3075,12 @@ def test_retype_in_a_view_is_a_diagnostic(step: steps.Step) -> None:
             diagnostics.RetypeInView(view=ViewName("CompanySummary")),
             (
                 "CompanySummary: a View cannot retype its fields, because its "
-                "mapping copies each value unchanged. Retype in a Payload instead."
+                "mapping copies each value unchanged. Retype in a WriteModel instead."
             ),
         ),
         (
             diagnostics.RetypeNestedField(
-                view=PayloadName("CompanyUpdate"),
+                view=WriteModelName("CompanyUpdate"),
                 source=ir.SourceName("Company"),
                 field=FieldName("parent"),
             ),
@@ -3046,11 +3117,11 @@ class DepartmentNamedBase(pydantic.BaseModel):
 def test_a_kept_field_the_base_declares_with_the_same_type_compiles(
     base: type[pydantic.BaseModel],
 ) -> None:
-    payload = Payload(
-        name=PayloadName.fake(), source=Company, step=steps.pipeline(), base=base
+    write_model = WriteModel(
+        name=WriteModelName.fake(), query=steps.from_(Company), base=base
     )
 
-    (compiled,) = compile_catalog([], [payload]).unwrap().payloads
+    (compiled,) = compile_catalog([], [write_model]).unwrap().write_models
 
     # The model inherits `name`; the relation still holds it for the mapping.
     assert compiled.base is base
@@ -3063,7 +3134,7 @@ def test_a_kept_field_the_base_declares_with_the_same_type_compiles(
 def test_a_kept_field_the_base_declares_with_another_type_is_a_diagnostic(
     base: type[pydantic.BaseModel],
 ) -> None:
-    view = View(name=ViewName.fake(), source=Company, step=steps.pipeline(), base=base)
+    view = View(name=ViewName.fake(), query=steps.from_(Company), base=base)
 
     match compile_catalog([view], []):
         case Ok(compiled):
@@ -3081,14 +3152,13 @@ def test_a_kept_field_the_base_declares_with_another_type_is_a_diagnostic(
 
 
 def test_a_field_the_base_declares_is_not_checked_once_omitted() -> None:
-    payload = Payload(
-        name=PayloadName.fake(),
-        source=Company,
-        step=steps.omit(FieldName("name")),
+    write_model = WriteModel(
+        name=WriteModelName.fake(),
+        query=steps.from_(Company, steps.omit(FieldName("name"))),
         base=DepartmentNamedBase,
     )
 
-    assert isinstance(compile_catalog([], [payload]), Ok)
+    assert isinstance(compile_catalog([], [write_model]), Ok)
 
 
 def test_the_base_field_type_mismatch_message_contains_the_offending_values() -> None:
@@ -3114,9 +3184,11 @@ class DepartmentBase(pydantic.BaseModel):
 def test_a_nested_field_the_base_declares_is_a_diagnostic() -> None:
     view = View(
         name=ViewName.fake(),
-        source=Employee,
-        step=steps.resolve(
-            named(FieldName("department_id")), steps.project([FieldName("name")])
+        query=steps.from_(
+            Employee,
+            steps.resolve(
+                named(FieldName("department_id")), steps.project([FieldName("name")])
+            ),
         ),
         base=DepartmentBase,
     )
@@ -3167,7 +3239,13 @@ class Deal(pydantic.BaseModel):
 
 def compile_deal(step: steps.Step) -> compiler.CompiledView:
     match compiler.compile_views(
-        empty_graph(), [View(name=ViewName.fake(), source=Deal, step=step)]
+        empty_graph(),
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(Deal, step),
+            )
+        ],
     ):
         case Ok(compiled):
             return compiled.views[0]
@@ -3176,7 +3254,14 @@ def compile_deal(step: steps.Step) -> compiler.CompiledView:
 
 
 def deal_diagnostics(step: steps.Step) -> tuple[diagnostics.CompileDiagnostic, ...]:
-    return diagnostics_of([View(name=ViewName.fake(), source=Deal, step=step)])
+    return diagnostics_of(
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(Deal, step),
+            )
+        ]
+    )
 
 
 def column(name: FieldName) -> ir.SourceField:
@@ -3500,19 +3585,20 @@ def test_steps_after_a_defective_where_are_still_checked() -> None:
     ]
 
 
-def test_each_where_in_a_payload_is_a_diagnostic() -> None:
+def test_each_where_in_a_write_model_is_a_diagnostic() -> None:
     where = steps.where(conditions.is_null(conditions.field(FieldName("nickname"))))
-    payload = Payload(
-        name=PayloadName.fake(), source=Deal, step=steps.pipeline(where, where)
+    write_model = WriteModel(
+        name=WriteModelName.fake(),
+        query=steps.from_(Deal, where, where),
     )
 
-    match compile_catalog([], [payload]):
+    match compile_catalog([], [write_model]):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
             assert (
                 error.diagnostics
-                == (diagnostics.WhereInPayload(view=payload.name),) * 2
+                == (diagnostics.WhereInWriteModel(view=write_model.name),) * 2
             )
 
 
@@ -3568,7 +3654,12 @@ def test_a_field_typed_by_an_optional_alias_is_optional(
 ) -> None:
     match compiler.compile_views(
         empty_graph(),
-        [View(name=ViewName.fake(), source=Rival, step=steps.where(condition))],
+        [
+            View(
+                name=ViewName.fake(),
+                query=steps.from_(Rival, steps.where(condition)),
+            )
+        ],
     ):
         case Ok(compiled):
             assert compiled.views[0].relation.filters == (outcome,)
@@ -3588,8 +3679,9 @@ class Measure(pydantic.BaseModel):
 def measure_view(field: FieldName, value: ir.UncheckedLiteral) -> View:
     return View(
         name=ViewName.fake(),
-        source=Measure,
-        step=steps.where(conditions.eq(conditions.field(field), value)),
+        query=steps.from_(
+            Measure, steps.where(conditions.eq(conditions.field(field), value))
+        ),
     )
 
 
@@ -3646,9 +3738,9 @@ def test_building_a_where_checks_nothing() -> None:
     ("diagnostic", "message"),
     [
         (
-            diagnostics.WhereInPayload(view=PayloadName("DealCreate")),
+            diagnostics.WhereInWriteModel(view=WriteModelName("DealCreate")),
             (
-                "DealCreate: a Payload cannot filter with `where`, because it is a "
+                "DealCreate: a WriteModel cannot filter with `where`, because it is a "
                 "write model with no rows to keep."
             ),
         ),
@@ -3733,7 +3825,7 @@ def test_building_a_where_checks_nothing() -> None:
         ),
     ],
     ids=[
-        "payload",
+        "write model",
         "nested",
         "not-a-column",
         "non-literal",
@@ -3813,12 +3905,14 @@ def kept_where(
     each of those fields is narrowed to its member's Tag."""
     return View(
         name=name,
-        source=source,
-        step=steps.pipeline(
-            *(
-                steps.where(conditions.eq(conditions.field(field), value))
-                for field, value in tests
-            )
+        query=steps.from_(
+            source,
+            steps.pipeline(
+                *(
+                    steps.where(conditions.eq(conditions.field(field), value))
+                    for field, value in tests
+                )
+            ),
         ),
     )
 
@@ -3828,7 +3922,7 @@ def subscriptions(name: ViewName, *tests: tuple[FieldName, enum.Enum]) -> View:
 
 
 def union_of(
-    name: UnionName, discriminator: FieldName, *variants: View | Payload | Union
+    name: UnionName, discriminator: FieldName, *variants: View | WriteModel | Union
 ) -> Union:
     return Union(
         name=name,
@@ -3924,8 +4018,8 @@ def test_an_added_field_tags_variants_of_a_source_with_no_tag_column() -> None:
     def added(name: ViewName, tag: Text) -> View:
         return View(
             name=name,
-            source=Company,
-            step=steps.pipeline(
+            query=steps.from_(
+                Company,
                 steps.where(conditions.eq(conditions.field(FieldName("name")), tag)),
                 added_tag(FieldName("kind"), Tag(tag.root)),
             ),
@@ -3948,8 +4042,7 @@ def test_a_variant_without_the_discriminator_is_a_diagnostic() -> None:
         subscriptions(ViewName("Free"), (FieldName("plan"), Plan.FREE)),
         View(
             name=ViewName("Unplanned"),
-            source=Subscription,
-            step=steps.omit(FieldName("plan")),
+            query=steps.from_(Subscription, steps.omit(FieldName("plan"))),
         ),
     )
 
@@ -3978,7 +4071,10 @@ class Tagged(pydantic.BaseModel):
 def test_a_variant_typing_the_discriminator_by_no_one_tag_is_a_diagnostic(
     field: FieldName,
 ) -> None:
-    untagged = View(name=ViewName("Untagged"), source=Tagged, step=steps.pipeline())
+    untagged = View(
+        name=ViewName("Untagged"),
+        query=steps.from_(Tagged),
+    )
     union = union_of(
         UnionName("Taggeds"),
         field,
@@ -4124,40 +4220,42 @@ def test_variants_of_different_sources_are_a_diagnostic() -> None:
     )
 
 
-def test_views_mixed_with_payloads_are_a_diagnostic() -> None:
+def test_views_mixed_with_write_models_are_a_diagnostic() -> None:
     free = subscriptions(ViewName("Free"), (FieldName("plan"), Plan.FREE))
-    payload = Payload(
-        name=PayloadName("SubscriptionCreate"),
-        source=Subscription,
-        step=steps.pipeline(),
+    write_model = WriteModel(
+        name=WriteModelName("SubscriptionCreate"),
+        query=steps.from_(Subscription),
     )
-    union = union_of(UnionName("Mixed"), FieldName("plan"), free, payload)
+    union = union_of(UnionName("Mixed"), FieldName("plan"), free, write_model)
 
     assert union_diagnostics(union) == (
-        diagnostics.ViewsMixedWithPayloads(
-            view=union.name, views=(free.name,), payloads=(payload.name,)
+        diagnostics.ViewsMixedWithWriteModels(
+            view=union.name, views=(free.name,), write_models=(write_model.name,)
         ),
     )
 
 
-def payload(name: PayloadName, *then: steps.Step) -> Payload:
-    return Payload(name=name, source=Subscription, step=steps.pipeline(*then))
+def write_model(name: WriteModelName, *then: steps.Step) -> WriteModel:
+    return WriteModel(
+        name=name,
+        query=steps.from_(Subscription, steps.pipeline(*then)),
+    )
 
 
-def paid_or_free(*more: Payload) -> Union:
-    """A Union of Payloads of different Sources, one tagged by `retype_to`, the
+def paid_or_free(*more: WriteModel) -> Union:
+    """A Union of WriteModels of different Sources, one tagged by `retype_to`, the
     other by `add`, then `more`."""
     return union_of(
         UnionName("Writes"),
         FieldName("plan"),
-        payload(
-            PayloadName("PaidPatch"),
+        write_model(
+            WriteModelName("PaidPatch"),
             steps.retype_to(FieldName("plan"), Literal[Plan.PAID]),
         ),
-        Payload(
-            name=PayloadName("FreeInvoicePatch"),
-            source=Invoice,
-            step=steps.pipeline(
+        WriteModel(
+            name=WriteModelName("FreeInvoicePatch"),
+            query=steps.from_(
+                Invoice,
                 steps.omit(FieldName("plan")),
                 steps.add(FieldName("plan"), Literal[Plan.FREE]),
             ),
@@ -4166,56 +4264,58 @@ def paid_or_free(*more: Payload) -> Union:
     )
 
 
-def compile_payload_unions(
+def compile_write_model_unions(
     *unions: Union,
 ) -> Result[compiler.CompiledCatalog, DiagnosticsError[diagnostics.CompileDiagnostic]]:
     return compiler.compile_catalog(empty_graph(), (), (), unions)
 
 
-def payload_union_diagnostics(
+def write_model_union_diagnostics(
     *unions: Union,
 ) -> tuple[diagnostics.CompileDiagnostic, ...]:
-    match compile_payload_unions(*unions):
+    match compile_write_model_unions(*unions):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
             return error.diagnostics
 
 
-def test_a_union_of_payloads_compiles_with_its_variants_as_payloads() -> None:
+def test_a_union_of_write_models_compiles_with_its_variants_as_write_models() -> None:
     union = paid_or_free()
 
-    compiled = compile_payload_unions(union).unwrap()
+    compiled = compile_write_model_unions(union).unwrap()
 
-    (compiled_union,) = compiled.payload_unions
+    (compiled_union,) = compiled.write_model_unions
     assert compiled_union.name == union.name
     assert compiled_union.discriminator == union.discriminator
     assert [leaf.name for leaf in compiled_union.leaves()] == [
-        variant.name for variant in union.payloads()
+        variant.name for variant in union.write_models()
     ]
-    assert [payload.name for payload in compiled.payloads] == [
-        variant.name for variant in union.payloads()
+    assert [write_model.name for write_model in compiled.write_models] == [
+        variant.name for variant in union.write_models()
     ]
     assert compiled.unions == ()
 
 
-def test_compiling_a_union_of_payloads_as_views_is_only_that_diagnostic() -> None:
+def test_compiling_a_union_of_write_models_as_views_is_only_that_diagnostic() -> None:
     union = paid_or_free(
-        payload(PayloadName("Defective"), steps.omit(FieldName("missing")))
+        write_model(WriteModelName("Defective"), steps.omit(FieldName("missing")))
     )
 
     assert union_diagnostics(union) == (
-        diagnostics.PayloadUnionInViews(view=union.name),
+        diagnostics.WriteModelUnionInViews(view=union.name),
     )
 
 
-def test_a_nested_union_of_payloads_compiles_before_the_union_it_is_nested_in() -> None:
+def test_a_nested_union_of_write_models_compiles_before_the_union_it_is_nested_in() -> (
+    None
+):
     paid = union_of(
         UnionName("PaidByStatus"),
         FieldName("status"),
         *(
-            payload(
-                PayloadName(f"Paid{status.name.title()}"),
+            write_model(
+                WriteModelName(f"Paid{status.name.title()}"),
                 steps.retype_to(FieldName("plan"), Literal[Plan.PAID]),
                 steps.retype_to(
                     FieldName("status"), typing.cast("_LiteralForm", Literal)[status]
@@ -4224,40 +4324,40 @@ def test_a_nested_union_of_payloads_compiles_before_the_union_it_is_nested_in() 
             for status in Status
         ),
     )
-    free = payload(
-        PayloadName("Free"), steps.retype_to(FieldName("plan"), Literal[Plan.FREE])
+    free = write_model(
+        WriteModelName("Free"), steps.retype_to(FieldName("plan"), Literal[Plan.FREE])
     )
     outer = union_of(UnionName("Writes"), FieldName("plan"), paid, free)
 
-    compiled = compile_payload_unions(outer).unwrap()
+    compiled = compile_write_model_unions(outer).unwrap()
 
-    assert [union.name for union in compiled.payload_unions] == [
+    assert [union.name for union in compiled.write_model_unions] == [
         paid.name,
         outer.name,
     ]
-    (_, compiled_outer) = compiled.payload_unions
+    (_, compiled_outer) = compiled.write_model_unions
     assert [leaf.name for leaf in compiled_outer.leaves()] == [
-        *(variant.name for variant in paid.payloads()),
+        *(variant.name for variant in paid.write_models()),
         free.name,
     ]
 
 
-def test_a_payload_without_the_discriminator_is_a_diagnostic() -> None:
-    unplanned = payload(PayloadName("Unplanned"), steps.omit(FieldName("plan")))
+def test_a_write_model_without_the_discriminator_is_a_diagnostic() -> None:
+    unplanned = write_model(WriteModelName("Unplanned"), steps.omit(FieldName("plan")))
     union = paid_or_free(unplanned)
 
-    assert payload_union_diagnostics(union) == (
+    assert write_model_union_diagnostics(union) == (
         diagnostics.VariantWithoutDiscriminator(
             view=union.name, variant=unplanned.name, discriminator=union.discriminator
         ),
     )
 
 
-def test_a_payload_typing_the_discriminator_by_no_one_tag_is_a_diagnostic() -> None:
-    untagged = payload(PayloadName("Untagged"))
+def test_a_write_model_typing_the_discriminator_by_no_one_tag_is_a_diagnostic() -> None:
+    untagged = write_model(WriteModelName("Untagged"))
     union = paid_or_free(untagged)
 
-    assert payload_union_diagnostics(union) == (
+    assert write_model_union_diagnostics(union) == (
         diagnostics.UntaggedVariant(
             view=union.name,
             variant=untagged.name,
@@ -4268,8 +4368,8 @@ def test_a_payload_typing_the_discriminator_by_no_one_tag_is_a_diagnostic() -> N
 
 
 def test_a_discriminator_defaulting_to_other_than_its_tag_is_a_diagnostic() -> None:
-    defaulted = payload(
-        PayloadName("Defaulted"),
+    defaulted = write_model(
+        WriteModelName("Defaulted"),
         steps.retype_to(FieldName("plan"), Literal[Plan.PAID]),
         steps.default(FieldName("plan"), MISSING),
     )
@@ -4277,12 +4377,13 @@ def test_a_discriminator_defaulting_to_other_than_its_tag_is_a_diagnostic() -> N
         UnionName("Writes"),
         FieldName("plan"),
         defaulted,
-        payload(
-            PayloadName("Free"), steps.retype_to(FieldName("plan"), Literal[Plan.FREE])
+        write_model(
+            WriteModelName("Free"),
+            steps.retype_to(FieldName("plan"), Literal[Plan.FREE]),
         ),
     )
 
-    assert payload_union_diagnostics(union) == (
+    assert write_model_union_diagnostics(union) == (
         diagnostics.DiscriminatorDefaultNotTag(
             view=union.name,
             variant=defaulted.name,
@@ -4293,14 +4394,14 @@ def test_a_discriminator_defaulting_to_other_than_its_tag_is_a_diagnostic() -> N
     )
 
 
-def test_payloads_sharing_a_tag_are_one_diagnostic() -> None:
+def test_write_models_sharing_a_tag_are_one_diagnostic() -> None:
     sharing = tuple(
-        payload(name, steps.retype_to(FieldName("plan"), Literal[Plan.PAID]))
-        for name in (PayloadName("Paid"), PayloadName("AlsoPaid"))
+        write_model(name, steps.retype_to(FieldName("plan"), Literal[Plan.PAID]))
+        for name in (WriteModelName("Paid"), WriteModelName("AlsoPaid"))
     )
     union = union_of(UnionName("Writes"), FieldName("plan"), *sharing)
 
-    assert payload_union_diagnostics(union) == (
+    assert write_model_union_diagnostics(union) == (
         diagnostics.SharedTag(
             view=union.name,
             discriminator=union.discriminator,
@@ -4310,13 +4411,13 @@ def test_payloads_sharing_a_tag_are_one_diagnostic() -> None:
     )
 
 
-def test_a_nested_union_whose_payloads_have_several_tags_is_a_diagnostic() -> None:
+def test_a_nested_union_whose_write_models_have_several_tags_is_a_diagnostic() -> None:
     nested = union_of(
         UnionName("ByStatus"),
         FieldName("status"),
         *(
-            payload(
-                PayloadName(status.name.title()),
+            write_model(
+                WriteModelName(status.name.title()),
                 steps.retype_to(
                     FieldName("status"), typing.cast("_LiteralForm", Literal)[status]
                 ),
@@ -4331,7 +4432,7 @@ def test_a_nested_union_whose_payloads_have_several_tags_is_a_diagnostic() -> No
         UnionName("Writes"), FieldName("plan"), nested, *paid_or_free().variants
     )
 
-    assert payload_union_diagnostics(union) == (
+    assert write_model_union_diagnostics(union) == (
         diagnostics.NestedUnionTagsDiffer(
             view=union.name,
             nested=nested.name,
@@ -4341,25 +4442,29 @@ def test_a_nested_union_whose_payloads_have_several_tags_is_a_diagnostic() -> No
     )
 
 
-def test_a_view_mixed_with_a_nested_union_of_payloads_is_a_diagnostic() -> None:
+def test_a_view_mixed_with_a_nested_union_of_write_models_is_a_diagnostic() -> None:
     free = subscriptions(ViewName("Free"), (FieldName("plan"), Plan.FREE))
     writes = paid_or_free()
     union = union_of(UnionName("Mixed"), FieldName("plan"), free, writes)
 
     assert union_diagnostics(union) == (
-        diagnostics.ViewsMixedWithPayloads(
-            view=union.name, views=(free.name,), payloads=(writes.name,)
+        diagnostics.ViewsMixedWithWriteModels(
+            view=union.name, views=(free.name,), write_models=(writes.name,)
         ),
     )
 
 
-def test_a_union_of_a_defective_payload_reports_only_the_payloads_diagnostics() -> None:
-    defective = payload(PayloadName("Defective"), steps.omit(FieldName("missing")))
+def test_a_union_of_a_defective_write_model_reports_only_the_write_models_diagnostics() -> (
+    None
+):
+    defective = write_model(
+        WriteModelName("Defective"), steps.omit(FieldName("missing"))
+    )
     union = paid_or_free(defective)
 
-    assert [type(diagnostic) for diagnostic in payload_union_diagnostics(union)] == [
-        diagnostics.UnknownField
-    ]
+    assert [
+        type(diagnostic) for diagnostic in write_model_union_diagnostics(union)
+    ] == [diagnostics.UnknownField]
 
 
 def test_a_union_named_like_no_class_is_a_diagnostic() -> None:
@@ -4371,8 +4476,7 @@ def test_a_union_named_like_no_class_is_a_diagnostic() -> None:
 def test_a_union_of_a_defective_view_reports_only_the_views_diagnostics() -> None:
     defective = View(
         name=ViewName("Defective"),
-        source=Subscription,
-        step=steps.omit(FieldName("missing")),
+        query=steps.from_(Subscription, steps.omit(FieldName("missing"))),
     )
     union = union_of(
         UnionName("Subscriptions"),
@@ -4421,8 +4525,8 @@ def test_a_last_variant_keeping_every_row_is_no_diagnostic() -> None:
         subscriptions(ViewName("Active"), (FieldName("status"), Status.ACTIVE)),
         View(
             name=ViewName("Rest"),
-            source=Subscription,
-            step=steps.pipeline(
+            query=steps.from_(
+                Subscription,
                 steps.omit(FieldName("status")),
                 added_tag(FieldName("status"), Tag("rest")),
             ),
@@ -4441,8 +4545,8 @@ def test_a_variant_after_a_union_with_a_view_keeping_every_row_is_a_diagnostic()
         subscriptions(ViewName("FreeActive"), (FieldName("status"), Status.ACTIVE)),
         View(
             name=ViewName("FreeRest"),
-            source=Subscription,
-            step=steps.pipeline(
+            query=steps.from_(
+                Subscription,
                 steps.omit(FieldName("status")),
                 added_tag(FieldName("status"), Tag("rest")),
             ),
@@ -4460,12 +4564,12 @@ def test_a_variant_after_a_union_with_a_view_keeping_every_row_is_a_diagnostic()
     "taken_by",
     [
         View(
-            name=ViewName("Subscriptions"), source=Subscription, step=steps.pipeline()
+            name=ViewName("Subscriptions"),
+            query=steps.from_(Subscription),
         ),
-        Payload(
-            name=PayloadName("Subscriptions"),
-            source=Subscription,
-            step=steps.pipeline(),
+        WriteModel(
+            name=WriteModelName("Subscriptions"),
+            query=steps.from_(Subscription),
         ),
         Union(
             name=UnionName("Subscriptions"),
@@ -4476,17 +4580,17 @@ def test_a_variant_after_a_union_with_a_view_keeping_every_row_is_a_diagnostic()
             ),
         ),
     ],
-    ids=["view", "payload", "union"],
+    ids=["view", "write model", "union"],
 )
 def test_a_union_named_like_another_definition_is_one_diagnostic(
-    taken_by: View | Payload | Union,
+    taken_by: View | WriteModel | Union,
 ) -> None:
     union = free_or_paid()
     views = [taken_by] if isinstance(taken_by, View) else []
-    payloads = [taken_by] if isinstance(taken_by, Payload) else []
+    write_models = [taken_by] if isinstance(taken_by, WriteModel) else []
     unions = [union, taken_by] if isinstance(taken_by, Union) else [union]
 
-    match compiler.compile_catalog(empty_graph(), views, payloads, unions):
+    match compiler.compile_catalog(empty_graph(), views, write_models, unions):
         case Ok(compiled):
             pytest.fail(f"expected diagnostics, got {compiled}")
         case Err(error):
@@ -4569,13 +4673,13 @@ def test_a_union_needs_two_variants() -> None:
             ),
         ),
         (
-            diagnostics.ViewsMixedWithPayloads(
+            diagnostics.ViewsMixedWithWriteModels(
                 view=UnionName("Mixed"),
                 views=(ViewName("Free"),),
-                payloads=(PayloadName("SubscriptionCreate"),),
+                write_models=(WriteModelName("SubscriptionCreate"),),
             ),
             (
-                "Mixed: its Variants mix Views (Free) with Payloads "
+                "Mixed: its Variants mix Views (Free) with WriteModels "
                 "(SubscriptionCreate). A Union's Variants are all read models or all "
                 "write models."
             ),
@@ -4583,7 +4687,7 @@ def test_a_union_needs_two_variants() -> None:
         (
             diagnostics.UntaggedVariant(
                 view=UnionName("Writes"),
-                variant=PayloadName("Patch"),
+                variant=WriteModelName("Patch"),
                 discriminator=FieldName("plan"),
                 annotation=Plan,
             ),
@@ -4612,14 +4716,14 @@ def test_a_union_needs_two_variants() -> None:
             diagnostics.SharedUnionName(view=UnionName("Subscriptions")),
             (
                 "Subscriptions: a Union shares the name 'Subscriptions' with a View, a "
-                "Payload or another Union. Model names must be unique across Views, "
-                "Payloads and Unions."
+                "WriteModel or another Union. Model names must be unique across Views, "
+                "WriteModels and Unions."
             ),
         ),
         (
             diagnostics.DiscriminatorDefaultNotTag(
                 view=UnionName("Writes"),
-                variant=PayloadName("Defaulted"),
+                variant=WriteModelName("Defaulted"),
                 discriminator=FieldName("plan"),
                 tag=diagnostics.TagText.of(Plan.PAID),
                 default=diagnostics.FieldDefaultText("MISSING"),
@@ -4630,9 +4734,9 @@ def test_a_union_needs_two_variants() -> None:
             ),
         ),
         (
-            diagnostics.PayloadUnionInViews(view=UnionName("Writes")),
+            diagnostics.WriteModelUnionInViews(view=UnionName("Writes")),
             (
-                "Writes: a Union of Payloads is a write model, but `compile_views` "
+                "Writes: a Union of WriteModels is a WriteModel, but `compile_views` "
                 "compiles read models only. Compile it with `compile_catalog`."
             ),
         ),
@@ -4643,13 +4747,13 @@ def test_a_union_needs_two_variants() -> None:
         "shared-tag",
         "nested-tags-differ",
         "sources-differ",
-        "views-and-payloads",
-        "untagged-payload",
+        "views-and-write-models",
+        "untagged-write-model",
         "invalid-name",
         "unreachable",
         "shared-name",
         "discriminator-default",
-        "payload-union-in-views",
+        "write-model-union-in-views",
     ],
 )
 def test_a_union_diagnostic_message_names_the_offending_values(

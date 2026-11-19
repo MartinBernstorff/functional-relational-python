@@ -67,7 +67,7 @@ def retype(fields: FieldName | ir.Select, transform: ir.TypeTransform) -> Step:
     """Gives the field named `fields`, or every field `fields` selects, the type
     `transform` maps its type to.
 
-    Only a Payload may retype. E.g. an update payload widens its fields with
+    Only a WriteModel may retype. E.g. an update write model widens its fields with
     `retype(select(...), lambda annotation: annotation | MISSING)`, then defaults
     them to `MISSING`.
     """
@@ -123,7 +123,7 @@ def add(
 
     `default` is a literal, as for `default`. A View's added field needs one: its
     mapping leaves the field out, so the model fills it with its default. In a
-    Payload it is optional.
+    WriteModel it is optional.
     """
     # The class stands for "no default given", which the overloads spell out;
     # unlike an instance, it calls nothing in the signature.
@@ -154,7 +154,7 @@ def where(condition: ir.Condition) -> Step:
     """Keeps only the Source rows for which `condition` is true; see `conditions`.
 
     Each kept row still gives one View result. Only a View's own pipeline may
-    filter, not a nested `resolve` pipeline or a Payload.
+    filter, not a nested `resolve` pipeline or a WriteModel.
     """
 
     def step(node: ir.Node) -> ir.Node:
@@ -170,7 +170,7 @@ def require(fields: FieldName | ir.Select) -> Step:
     A required Reference, resolved or reversed, holds its Entity rather than
     `None`. Requiring drops no row: a View result whose field is `None` is an
     unmet requirement, which the InMemoryViewEngine reports and a mapping function
-    raises. Requiring a field that is not optional, or in a Payload, is a
+    raises. Requiring a field that is not optional, or in a WriteModel, is a
     diagnostic.
     """
 
@@ -289,3 +289,35 @@ def pipeline(*steps: Step) -> Step:
         return functools.reduce(lambda acc, next_step: next_step(acc), steps, node)
 
     return step
+
+
+class Query(pydantic.BaseModel, frozen=True):
+    """A model and the steps applied to it: what a View or WriteModel reads.
+
+    Only a Query has a starting model. A nested pipeline, e.g. in `resolve`, starts
+    from the Entity it is given, so it takes Steps.
+    """
+
+    from_: type[pydantic.BaseModel]
+    step: Step
+
+    def then(self, *steps: Step) -> Query:
+        """This query followed by `steps`, e.g. a shared filter extended by one View.
+
+        >>> active = from_(Company, where(...))
+        >>> active.then(omit(FieldName("secret")))
+        """
+        return Query(from_=self.from_, step=pipeline(self.step, *steps))
+
+    def node(self) -> ir.Node:
+        """The node tree the steps build over every field of `from_`."""
+        return self.step(ir.FromSource(source=self.from_))
+
+
+def from_(model: type[pydantic.BaseModel], *steps: Step) -> Query:
+    """A query over every field of `model`, followed by `steps` left to right.
+
+    `model` is any Pydantic model, often an Entity. A View over a model that is not
+    an Entity cannot be run by the InMemoryViewEngine.
+    """
+    return Query(from_=model, step=pipeline(*steps))

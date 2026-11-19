@@ -54,9 +54,12 @@ from functional_relational_python.outputs.python.symbols import (
     ValueExpression,
 )
 from functional_relational_python.pipeline import conditions, ir, steps
-from functional_relational_python.pipeline.payloads import Payload, PayloadName
 from functional_relational_python.pipeline.unions import Union, UnionName
 from functional_relational_python.pipeline.views import View, ViewName
+from functional_relational_python.pipeline.write_models import (
+    WriteModel,
+    WriteModelName,
+)
 from functional_relational_python.support.diagnostic import DiagnosticsError
 from functional_relational_python.support.filesystem import (
     Directory,
@@ -176,42 +179,47 @@ def compile_all(
 
 def golden_views() -> list[View]:
     return [
-        View(name=ViewName("CompanyFull"), source=Company, step=steps.pipeline()),
+        View(
+            name=ViewName("CompanyFull"),
+            query=steps.from_(Company),
+        ),
         View(
             name=ViewName("CompanyPublic"),
-            source=Company,
-            step=steps.omit(FieldName("secret")),
+            query=steps.from_(Company, steps.omit(FieldName("secret"))),
         ),
         View(
             name=ViewName("CompanyName"),
-            source=Company,
-            step=steps.pipeline(
-                steps.omit(FieldName("secret")), steps.omit(FieldName("id"))
+            query=steps.from_(
+                Company, steps.omit(FieldName("secret")), steps.omit(FieldName("id"))
             ),
         ),
         View(
             name=ViewName("CompanyTitle"),
-            source=Company,
-            step=steps.pipeline(
+            query=steps.from_(
+                Company,
                 steps.omit(FieldName("secret")),
                 steps.rename(FieldName("name"), FieldName("title")),
             ),
         ),
         View(
             name=ViewName("CompanySecret"),
-            source=Company,
-            step=steps.project([FieldName("secret")]),
+            query=steps.from_(Company, steps.project([FieldName("secret")])),
         ),
-        View(name=ViewName("EmployeeHydrated"), source=Employee, step=steps.hydrate()),
+        View(
+            name=ViewName("EmployeeHydrated"),
+            query=steps.from_(Employee, steps.hydrate()),
+        ),
         View(
             name=ViewName("EmployeeOverview"),
-            source=Employee,
-            step=steps.resolve(named(FieldName("department_id")), steps.hydrate()),
+            query=steps.from_(
+                Employee,
+                steps.resolve(named(FieldName("department_id")), steps.hydrate()),
+            ),
         ),
         View(
             name=ViewName("EmployeeMentor"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.resolve(
                     named(FieldName("mentor_id")),
                     steps.project([FieldName("name")]),
@@ -231,9 +239,9 @@ def plan_of(compiled: compiler.CompiledViews, layout: PythonLayout) -> PythonPla
     match PythonPlan.of(
         compiler.CompiledCatalog(
             views=compiled.views,
-            payloads=(),
+            write_models=(),
             unions=compiled.unions,
-            payload_unions=(),
+            write_model_unions=(),
             one_to_one_marker=OneToOneMarker.fake(),
         ),
         layout,
@@ -401,8 +409,8 @@ def employee_mentor(
 def test_golden_mapping_function_for_steps_on_a_select() -> None:
     view = View(
         name=ViewName("CompanyPrefixed"),
-        source=Company,
-        step=steps.pipeline(
+        query=steps.from_(
+            Company,
             steps.omit(steps.select(steps.is_primary_key)),
             steps.rename(
                 named(FieldName("name"), FieldName("secret")),
@@ -439,15 +447,14 @@ def reversing_views() -> list[View]:
     return [
         View(
             name=ViewName("EmployeeProfile"),
-            source=Employee,
-            step=steps.pipeline(
-                steps.project([FieldName("id")]), steps.reverse(Profile)
+            query=steps.from_(
+                Employee, steps.project([FieldName("id")]), steps.reverse(Profile)
             ),
         ),
         View(
             name=ViewName("EmployeeBio"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.project([FieldName("id")]),
                 steps.reverse(Profile, steps.project([FieldName("bio")])),
             ),
@@ -459,8 +466,8 @@ def flattened_profile() -> View:
     """The fields of a reversed Entity, lifted to the top level."""
     return View(
         name=ViewName("EmployeeWithBio"),
-        source=Employee,
-        step=steps.pipeline(
+        query=steps.from_(
+            Employee,
             steps.project([FieldName("id")]),
             steps.reverse(Profile, steps.project([FieldName("bio")])),
             steps.flatten(FieldName("profile")),
@@ -561,8 +568,7 @@ def employee_bio(
 def test_a_mapping_function_fills_a_defaulted_field_from_the_source() -> None:
     view = View(
         name=ViewName("CompanyDefaulted"),
-        source=Company,
-        step=steps.default(FieldName("secret"), None),
+        query=steps.from_(Company, steps.default(FieldName("secret"), None)),
     )
     plan = plan_of(compile_all([view]), Generated.layout())
 
@@ -594,8 +600,9 @@ def tagged_company() -> View:
     """A View with an added literal tag, as for a tagged union."""
     return View(
         name=ViewName("CompanyTagged"),
-        source=Company,
-        step=steps.add(FieldName("type"), Literal["company"], default="company"),
+        query=steps.from_(
+            Company, steps.add(FieldName("type"), Literal["company"], default="company")
+        ),
     )
 
 
@@ -632,13 +639,12 @@ def filtered_views() -> list[View]:
     return [
         View(
             name=ViewName("EmployeeUnmentored"),
-            source=Employee,
-            step=steps.where(conditions.is_null(mentor)),
+            query=steps.from_(Employee, steps.where(conditions.is_null(mentor))),
         ),
         View(
             name=ViewName("EmployeeAnnMentored"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.rename(FieldName("name"), FieldName("title")),
                 steps.where(
                     conditions.and_(
@@ -719,8 +725,8 @@ def flattened_employee() -> View:
     """A View that lifts fields out of a required and an optional Reference."""
     return View(
         name=ViewName("EmployeeFlat"),
-        source=Employee,
-        step=steps.pipeline(
+        query=steps.from_(
+            Employee,
             steps.resolve(
                 named(FieldName("department_id")),
                 steps.omit(FieldName("id")),
@@ -791,8 +797,8 @@ def test_mapping_functions_with_chained_conditionals_are_ruff_formatted() -> Non
     )
     view = View(
         name=ViewName("EmployeeGrandMentor"),
-        source=Employee,
-        step=steps.pipeline(
+        query=steps.from_(
+            Employee,
             steps.resolve(
                 named(FieldName("mentor_id")),
                 steps.resolve(
@@ -884,23 +890,23 @@ def test_models_and_mappings_both_count_as_generated() -> None:
 
 
 def patch_union() -> Union:
-    """A Union of Payloads of two Sources, each tagged by an added `kind`."""
+    """A Union of WriteModels of two Sources, each tagged by an added `kind`."""
     return Union(
         name=UnionName("Patch"),
         discriminator=FieldName("kind"),
         variants=(
-            Payload(
-                name=PayloadName("CompanyPatch"),
-                source=Company,
-                step=steps.pipeline(
-                    steps.project([FieldName("name")]), tagged(Text("company"))
+            WriteModel(
+                name=WriteModelName("CompanyPatch"),
+                query=steps.from_(
+                    Company, steps.project([FieldName("name")]), tagged(Text("company"))
                 ),
             ),
-            Payload(
-                name=PayloadName("EmployeePatch"),
-                source=Employee,
-                step=steps.pipeline(
-                    steps.project([FieldName("name")]), tagged(Text("employee"))
+            WriteModel(
+                name=WriteModelName("EmployeePatch"),
+                query=steps.from_(
+                    Employee,
+                    steps.project([FieldName("name")]),
+                    tagged(Text("employee")),
                 ),
             ),
         ),
@@ -909,7 +915,7 @@ def patch_union() -> Union:
 
 def type_checked_plan() -> PythonPlan:
     """Models and mapping functions with every kind of field and Union, and a
-    Union of Payloads, which has no mapping function."""
+    Union of WriteModels, which has no mapping function."""
     match compiler.compile_catalog(
         entity_graph(),
         [
@@ -935,7 +941,7 @@ def type_checked_plan() -> PythonPlan:
             pytest.fail(f"expected a plan, got {error}")
 
 
-def test_a_union_of_payloads_has_a_model_but_no_mapping_function() -> None:
+def test_a_union_of_write_models_has_a_model_but_no_mapping_function() -> None:
     plan = type_checked_plan()
     patch = patch_union().name
 
@@ -1180,10 +1186,12 @@ def differential_cases(draw: st.DrawFn) -> DifferentialCase:
         views.append(
             View(
                 name=ViewName(f"View{index}"),
-                source=source,
-                step=steps.pipeline(
-                    *map(steps.where, filters),
-                    draw(pipelines(entity_graph(), source, Depth(2))),
+                query=steps.from_(
+                    source,
+                    steps.pipeline(
+                        *map(steps.where, filters),
+                        draw(pipelines(entity_graph(), source, Depth(2))),
+                    ),
                 ),
             )
         )
@@ -1251,8 +1259,7 @@ class NamedBase(pydantic.BaseModel, frozen=True):
 def test_a_mapping_function_fills_the_fields_its_model_inherits() -> None:
     view = View(
         name=ViewName("CompanyNamed"),
-        source=Company,
-        step=steps.omit(FieldName("secret")),
+        query=steps.from_(Company, steps.omit(FieldName("secret"))),
         base=NamedBase,
     )
     company = Company(id=CompanyId(1), name=Text("Acme"), secret=Text("hidden"))
@@ -1326,7 +1333,10 @@ def filtered_views_over_entities(draw: st.DrawFn) -> View:
     """A View of Wide or Employee that filters with a random Condition."""
     source = draw(st.sampled_from([Wide, Employee]))
     condition = draw(where_conditions(source, draw(entities()), Depth(3)))
-    return View(name=ViewName.fake(), source=source, step=steps.where(condition))
+    return View(
+        name=ViewName.fake(),
+        query=steps.from_(source, steps.where(condition)),
+    )
 
 
 def ruff_format_diff(text: FileText) -> FileText:
@@ -1404,7 +1414,12 @@ def test_a_filtered_mapping_function_writes_literals_as_ruff_does(
     name: ViewName, condition: ir.Condition, written: ValueExpression
 ) -> None:
     text = generated_mappings(
-        [View(name=name, source=Feeling, step=steps.where(condition))]
+        [
+            View(
+                name=name,
+                query=steps.from_(Feeling, steps.where(condition)),
+            )
+        ]
     )
 
     assert written.root in text.root
@@ -1448,23 +1463,24 @@ def required_views() -> list[View]:
     return [
         View(
             name=ViewName("WideWon"),
-            source=Wide,
-            step=steps.where(
-                conditions.and_(
-                    conditions.eq(conditions.field(FieldName("stage")), Stage.WON),
-                    conditions.is_null(conditions.field(FieldName("beta"))),
-                )
+            query=steps.from_(
+                Wide,
+                steps.where(
+                    conditions.and_(
+                        conditions.eq(conditions.field(FieldName("stage")), Stage.WON),
+                        conditions.is_null(conditions.field(FieldName("beta"))),
+                    )
+                ),
             ),
         ),
         View(
             name=ViewName("EmployeeMentored"),
-            source=Employee,
-            step=steps.require(mentor),
+            query=steps.from_(Employee, steps.require(mentor)),
         ),
         View(
             name=ViewName("EmployeeRequiredMentor"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.resolve(named(mentor)),
                 steps.require(FieldName("mentor")),
                 steps.project([FieldName("id"), FieldName("mentor")]),
@@ -1472,8 +1488,8 @@ def required_views() -> list[View]:
         ),
         View(
             name=ViewName("EmployeeUnreadMentor"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.resolve(named(mentor), steps.project([])),
                 steps.require(FieldName("mentor")),
                 steps.project([FieldName("mentor")]),
@@ -1481,8 +1497,8 @@ def required_views() -> list[View]:
         ),
         View(
             name=ViewName("EmployeeProfiled"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.project([FieldName("id")]),
                 steps.reverse(Profile),
                 steps.require(FieldName("profile")),
@@ -1490,8 +1506,8 @@ def required_views() -> list[View]:
         ),
         View(
             name=ViewName("EmployeeMentorsMentor"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.project([FieldName("id"), mentor]),
                 steps.resolve(
                     named(mentor), steps.project([mentor]), steps.require(mentor)
@@ -1500,8 +1516,8 @@ def required_views() -> list[View]:
         ),
         View(
             name=ViewName("EmployeeUnreadMentorsMentor"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.project([FieldName("id"), mentor]),
                 steps.resolve(
                     named(mentor),
@@ -1513,8 +1529,8 @@ def required_views() -> list[View]:
         ),
         View(
             name=ViewName("EmployeeRequiredBio"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.project([FieldName("id")]),
                 steps.reverse(Profile, steps.project([FieldName("bio")])),
                 steps.flatten(FieldName("profile")),
@@ -1523,8 +1539,8 @@ def required_views() -> list[View]:
         ),
         View(
             name=ViewName("EmployeeLiftedMentor"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.project([FieldName("id"), mentor]),
                 steps.resolve(
                     named(mentor),
@@ -1898,11 +1914,13 @@ def required_differential_cases(draw: st.DrawFn) -> DifferentialCase:
         views.append(
             View(
                 name=ViewName(f"View{index}"),
-                source=source,
-                step=steps.pipeline(
-                    *map(steps.where, filters),
-                    draw(pipelines(entity_graph(), source, Depth(2))),
-                    steps.require(steps.select(selected)),
+                query=steps.from_(
+                    source,
+                    steps.pipeline(
+                        *map(steps.where, filters),
+                        draw(pipelines(entity_graph(), source, Depth(2))),
+                        steps.require(steps.select(selected)),
+                    ),
                 ),
             )
         )
@@ -2022,8 +2040,8 @@ def employee_union() -> Union:
         variants=(
             View(
                 name=ViewName("MentoredEmployee"),
-                source=Employee,
-                step=steps.pipeline(
+                query=steps.from_(
+                    Employee,
                     steps.where(conditions.not_(conditions.is_null(mentor))),
                     steps.project([FieldName("id"), FieldName("mentor_id")]),
                     steps.hydrate(steps.project([FieldName("name")])),
@@ -2036,8 +2054,8 @@ def employee_union() -> Union:
                 variants=(
                     View(
                         name=ViewName("UnmentoredAnn"),
-                        source=Employee,
-                        step=steps.pipeline(
+                        query=steps.from_(
+                            Employee,
                             steps.where(ann),
                             unmentored,
                             steps.add(FieldName("named"), Literal["ann"], "ann"),
@@ -2045,8 +2063,8 @@ def employee_union() -> Union:
                     ),
                     View(
                         name=ViewName("UnmentoredOther"),
-                        source=Employee,
-                        step=steps.pipeline(
+                        query=steps.from_(
+                            Employee,
                             unmentored,
                             steps.add(FieldName("named"), Literal["other"], "other"),
                         ),
@@ -2112,13 +2130,13 @@ def test_a_union_function_calls_variant_functions_in_another_module_by_module() 
 
     def mappings(
         compiled: compiler.CompiledView
-        | compiler.CompiledPayload
+        | compiler.CompiledWriteModel
         | compiler.CompiledUnion,
     ) -> ModulePath:
         match compiled:
             case compiler.CompiledUnion():
                 return unions
-            case compiler.CompiledView() | compiler.CompiledPayload():
+            case compiler.CompiledView() | compiler.CompiledWriteModel():
                 return Generated.mappings
 
     plan = plan_of(
@@ -2150,8 +2168,8 @@ def test_a_union_function_returns_nothing_for_a_row_no_variant_keeps() -> None:
         variants=tuple(
             View(
                 name=ViewName(f"{name}Employee"),
-                source=Employee,
-                step=steps.pipeline(
+                query=steps.from_(
+                    Employee,
                     steps.where(
                         conditions.eq(conditions.field(FieldName("name")), Text(name))
                     ),
@@ -2196,11 +2214,13 @@ def union_cases(draw: st.DrawFn) -> DifferentialCase:
         variants.append(
             View(
                 name=ViewName(f"Variant{index}"),
-                source=source,
-                step=steps.pipeline(
-                    *map(steps.where, filters),
-                    draw(pipelines(entity_graph(), source, Depth(1))),
-                    steps.add(FieldName("variant_tag"), tags[index], f"v{index}"),
+                query=steps.from_(
+                    source,
+                    steps.pipeline(
+                        *map(steps.where, filters),
+                        draw(pipelines(entity_graph(), source, Depth(1))),
+                        steps.add(FieldName("variant_tag"), tags[index], f"v{index}"),
+                    ),
                 ),
             )
         )

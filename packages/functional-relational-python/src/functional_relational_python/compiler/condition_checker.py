@@ -73,7 +73,7 @@ class ConditionChecker(pydantic.BaseModel, frozen=True):
     """Checks a Condition against `relation`, the relation at its `where`.
 
     Every defective term is reported, not only the first. `owner` is what the
-    Condition belongs to: a View's or Payload's `where`, or a constraint, whose
+    Condition belongs to: a View's or WriteModel's `where`, or a constraint, whose
     relation is its Entity's.
     """
 

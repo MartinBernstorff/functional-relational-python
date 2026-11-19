@@ -19,7 +19,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     SplitAnnotation,
 )
 from functional_relational_python.pipeline import ir
-from functional_relational_python.pipeline.payloads import DefinitionName
+from functional_relational_python.pipeline.write_models import DefinitionName
 
 
 def split(annotation: RuntimeAnnotation) -> SplitAnnotation:

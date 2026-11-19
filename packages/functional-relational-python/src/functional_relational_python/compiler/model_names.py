@@ -18,9 +18,9 @@ from safe_result import Err, Ok, Result
 
 from functional_relational_python.entity_graph.entity_graph import FieldName
 from functional_relational_python.pipeline import ir
-from functional_relational_python.pipeline.payloads import DefinitionName
 from functional_relational_python.pipeline.unions import UnionName
 from functional_relational_python.pipeline.views import ViewName
+from functional_relational_python.pipeline.write_models import DefinitionName
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,
@@ -30,7 +30,7 @@ from functional_relational_python.support.identifier import Identifier
 
 
 class InvalidModelName(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View's or Payload's name cannot be used as a class name."""
+    """A View's or WriteModel's name cannot be used as a class name."""
 
     view: DefinitionName
 
@@ -193,7 +193,7 @@ class ModelNames(pydantic.BaseModel, frozen=True):
         definition: DefinitionName, relation: ir.Relation
     ) -> Result[ModelNames, DiagnosticsError[ModelNameDiagnostic]]:
         """The names of the models generated for `definition`, a View or a
-        Payload whose Relation is `relation`, or every reason they cannot be
+        WriteModel whose Relation is `relation`, or every reason they cannot be
         used."""
         match ModelNames.model_name(definition):
             case Err(error):
@@ -210,7 +210,7 @@ class ModelNames(pydantic.BaseModel, frozen=True):
     def name_diagnostics(definition: DefinitionName) -> tuple[InvalidModelName, ...]:
         """What is wrong with the names taken from the definition's name alone.
 
-        For a View or Payload that did not compile, whose nested models are
+        For a View or WriteModel that did not compile, whose nested models are
         unknown.
         """
         match ModelNames.model_name(definition):
@@ -223,7 +223,7 @@ class ModelNames(pydantic.BaseModel, frozen=True):
     def model_name(
         definition: DefinitionName,
     ) -> Result[ModelName, DiagnosticsError[InvalidModelName]]:
-        """The name of a View's or Payload's model: its own name. Every rule that
+        """The name of a View's or WriteModel's model: its own name. Every rule that
         name must follow is checked here."""
         reported: list[InvalidModelName] = []
         if isinstance(Identifier.of(definition), Err):

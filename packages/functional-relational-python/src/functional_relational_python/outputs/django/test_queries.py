@@ -382,12 +382,18 @@ def named(*names: FieldName) -> ir.Select:
 
 def golden_views() -> list[View]:
     return [
-        View(name=ViewName("CompanyFull"), source=Company, step=steps.pipeline()),
-        View(name=ViewName("EmployeeHydrated"), source=Employee, step=steps.hydrate()),
+        View(
+            name=ViewName("CompanyFull"),
+            query=steps.from_(Company),
+        ),
+        View(
+            name=ViewName("EmployeeHydrated"),
+            query=steps.from_(Employee, steps.hydrate()),
+        ),
         View(
             name=ViewName("EmployeeOverview"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.resolve(
                     named(FieldName("department_id")),
                     steps.resolve(
@@ -402,13 +408,16 @@ def golden_views() -> list[View]:
         ),
         View(
             name=ViewName("EmployeeTagged"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.project([FieldName("id")]),
                 steps.add(FieldName("kind"), str, default="employee"),
             ),
         ),
-        View(name=ViewName("NoteFull"), source=Note, step=steps.pipeline()),
+        View(
+            name=ViewName("NoteFull"),
+            query=steps.from_(Note),
+        ),
     ]
 
 
@@ -417,8 +426,8 @@ def flattened_employee() -> View:
     optional ones, whose conditionals chain; one of them an Entity."""
     return View(
         name=ViewName("EmployeeFlat"),
-        source=Employee,
-        step=steps.pipeline(
+        query=steps.from_(
+            Employee,
             steps.resolve(
                 named(FieldName("department_id")),
                 steps.omit(FieldName("id")),
@@ -994,7 +1003,10 @@ def test_golden_literal_enum_field_is_read_through_its_enum() -> None:
 
 
 def test_a_view_named_like_a_query_set_method_is_a_diagnostic() -> None:
-    view = View(name=ViewName("Manager"), source=Company, step=steps.pipeline())
+    view = View(
+        name=ViewName("Manager"),
+        query=steps.from_(Company),
+    )
     compiled = compile_all([view])
 
     match DjangoQueriesRenderer.render(
@@ -1126,9 +1138,9 @@ class Database:
         plan = PythonPlan.of(
             compiler.CompiledCatalog(
                 views=compiled.views,
-                payloads=(),
+                write_models=(),
                 unions=compiled.unions,
-                payload_unions=(),
+                write_model_unions=(),
                 one_to_one_marker=OneToOneMarker.fake(),
             ),
             PythonLayout.models_only(into(Generated.models)),
@@ -1405,86 +1417,100 @@ def read_views() -> list[View]:
     """Views of every kind a query reads: resolving, reversing, flattening,
     filtering and requiring."""
     return [
-        View(name=ViewName("Plain"), source=Employee, step=steps.pipeline()),
+        View(
+            name=ViewName("Plain"),
+            query=steps.from_(Employee),
+        ),
         View(
             name=ViewName("RequiredEntity"),
-            source=Employee,
-            step=steps.resolve(named(FieldName("department_id"))),
+            query=steps.from_(
+                Employee, steps.resolve(named(FieldName("department_id")))
+            ),
         ),
         View(
             name=ViewName("OptionalEntity"),
-            source=Employee,
-            step=steps.resolve(named(FieldName("mentor_id"))),
+            query=steps.from_(Employee, steps.resolve(named(FieldName("mentor_id")))),
         ),
         View(
             name=ViewName("ReferenceWithoutIdSuffix"),
-            source=Company,
-            step=steps.hydrate(),
+            query=steps.from_(Company, steps.hydrate()),
         ),
         View(
             name=ViewName("Chain"),
-            source=Employee,
-            step=steps.resolve(
-                named(FieldName("department_id")),
+            query=steps.from_(
+                Employee,
                 steps.resolve(
-                    named(FieldName("company_id")),
-                    steps.resolve(named(FieldName("parent"))),
+                    named(FieldName("department_id")),
+                    steps.resolve(
+                        named(FieldName("company_id")),
+                        steps.resolve(named(FieldName("parent"))),
+                    ),
                 ),
             ),
         ),
         View(
             name=ViewName("SelfReference"),
-            source=Employee,
-            step=steps.hydrate(steps.hydrate(steps.omit(FieldName("name")))),
+            query=steps.from_(
+                Employee, steps.hydrate(steps.hydrate(steps.omit(FieldName("name"))))
+            ),
         ),
         flattened_employee(),
         View(
             name=ViewName("OnlyAdded"),
-            source=Employee,
-            step=steps.pipeline(
-                steps.project([]), steps.add(FieldName("kind"), str, default="x")
+            query=steps.from_(
+                Employee,
+                steps.project([]),
+                steps.add(FieldName("kind"), str, default="x"),
             ),
         ),
         View(
             name=ViewName("Reversed"),
-            source=Employee,
-            step=steps.reverse(Badge),
+            query=steps.from_(Employee, steps.reverse(Badge)),
         ),
         View(
             name=ViewName("ReversedNested"),
-            source=Employee,
-            step=steps.reverse(Badge, steps.project([FieldName("label")])),
+            query=steps.from_(
+                Employee, steps.reverse(Badge, steps.project([FieldName("label")]))
+            ),
         ),
         View(
             name=ViewName("ReverseInNested"),
-            source=Badge,
-            step=steps.resolve(named(FieldName("employee_id")), steps.reverse(Badge)),
+            query=steps.from_(
+                Badge,
+                steps.resolve(named(FieldName("employee_id")), steps.reverse(Badge)),
+            ),
         ),
         # Django fills in a way back over a one-to-one Reference with the row it
         # came from, dropping what it selected related past it.
         View(
             name=ViewName("ReversedAndBack"),
-            source=Employee,
-            step=steps.reverse(
-                Badge,
-                steps.resolve(
-                    named(FieldName("employee_id")),
-                    steps.resolve(named(FieldName("department_id"))),
+            query=steps.from_(
+                Employee,
+                steps.reverse(
+                    Badge,
+                    steps.resolve(
+                        named(FieldName("employee_id")),
+                        steps.resolve(named(FieldName("department_id"))),
+                    ),
                 ),
             ),
         ),
         View(
             name=ViewName("ResolvedAndBack"),
-            source=Badge,
-            step=steps.resolve(
-                named(FieldName("employee_id")),
-                steps.reverse(Badge, steps.resolve(named(FieldName("employee_id")))),
+            query=steps.from_(
+                Badge,
+                steps.resolve(
+                    named(FieldName("employee_id")),
+                    steps.reverse(
+                        Badge, steps.resolve(named(FieldName("employee_id")))
+                    ),
+                ),
             ),
         ),
         View(
             name=ViewName("ReversedFlattened"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.reverse(Badge, steps.project([FieldName("level")])),
                 steps.flatten(FieldName("badge")),
             ),
@@ -1493,8 +1519,8 @@ def read_views() -> list[View]:
         # Likewise for stars, wrapping a Rank.
         View(
             name=ViewName("FlattenedRank"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.reverse(
                     Badge, steps.project([FieldName("rank"), FieldName("stars")])
                 ),
@@ -1503,79 +1529,95 @@ def read_views() -> list[View]:
         ),
         View(
             name=ViewName("Lead"),
-            source=Employee,
-            step=steps.where(field_is(FieldName("role"), Role.LEAD)),
+            query=steps.from_(
+                Employee, steps.where(field_is(FieldName("role"), Role.LEAD))
+            ),
         ),
         View(
             name=ViewName("Gold"),
-            source=Badge,
-            step=steps.where(field_is(FieldName("level"), Level.GOLD)),
+            query=steps.from_(
+                Badge, steps.where(field_is(FieldName("level"), Level.GOLD))
+            ),
         ),
         View(
             name=ViewName("NotNicknamed"),
-            source=Employee,
-            step=steps.where(
-                conditions.ne(conditions.field(FieldName("nickname")), Text("nick 2"))
+            query=steps.from_(
+                Employee,
+                steps.where(
+                    conditions.ne(
+                        conditions.field(FieldName("nickname")), Text("nick 2")
+                    )
+                ),
             ),
         ),
         View(
             name=ViewName("LabelIsCaption"),
-            source=Badge,
-            step=steps.where(
-                conditions.eq(
-                    conditions.field(FieldName("label")),
-                    conditions.field(FieldName("caption")),
-                )
-            ),
-        ),
-        View(
-            name=ViewName("LabelIsNotCaption"),
-            source=Badge,
-            step=steps.where(
-                conditions.not_(
+            query=steps.from_(
+                Badge,
+                steps.where(
                     conditions.eq(
                         conditions.field(FieldName("label")),
                         conditions.field(FieldName("caption")),
                     )
-                )
+                ),
+            ),
+        ),
+        View(
+            name=ViewName("LabelIsNotCaption"),
+            query=steps.from_(
+                Badge,
+                steps.where(
+                    conditions.not_(
+                        conditions.eq(
+                            conditions.field(FieldName("label")),
+                            conditions.field(FieldName("caption")),
+                        )
+                    )
+                ),
             ),
         ),
         View(
             name=ViewName("NicknameIsNotItself"),
-            source=Employee,
-            step=steps.where(
-                conditions.ne(
-                    conditions.field(FieldName("nickname")),
-                    conditions.field(FieldName("nickname")),
-                )
+            query=steps.from_(
+                Employee,
+                steps.where(
+                    conditions.ne(
+                        conditions.field(FieldName("nickname")),
+                        conditions.field(FieldName("nickname")),
+                    )
+                ),
             ),
         ),
         # Some ranks are NULL: no ordering keeps them, and so its negation does.
         View(
             name=ViewName("NotOutranked"),
-            source=Badge,
-            step=steps.where(
-                conditions.not_(
-                    conditions.lt(conditions.field(FieldName("rank")), Rank(2))
-                )
+            query=steps.from_(
+                Badge,
+                steps.where(
+                    conditions.not_(
+                        conditions.lt(conditions.field(FieldName("rank")), Rank(2))
+                    )
+                ),
             ),
         ),
         View(
             name=ViewName("LeadOrNicknamed"),
-            source=Employee,
-            step=steps.where(
-                conditions.or_(
-                    conditions.lt(conditions.field(FieldName("role")), Role.STAFF),
-                    conditions.not_(
-                        conditions.is_null(conditions.field(FieldName("nickname")))
-                    ),
-                )
+            query=steps.from_(
+                Employee,
+                steps.where(
+                    conditions.or_(
+                        conditions.lt(conditions.field(FieldName("role")), Role.STAFF),
+                        conditions.not_(
+                            conditions.is_null(conditions.field(FieldName("nickname")))
+                        ),
+                    )
+                ),
             ),
         ),
         View(
             name=ViewName("RequiredBadge"),
-            source=Employee,
-            step=steps.pipeline(
+            query=steps.from_(
+                Employee,
                 steps.where(
                     conditions.not_(
                         conditions.eq(conditions.field(FieldName("id")), EmployeeId(6))
@@ -1602,7 +1644,7 @@ def test_a_view_reads_in_one_query_like_the_engine(view: View) -> None:
 
 @pytest.mark.parametrize(
     "view",
-    [view for view in read_views() if view.source is not Company],
+    [view for view in read_views() if view.query.from_ is not Company],
     ids=lambda view: view.name.root,
 )
 def test_a_view_reads_through_an_existing_model_like_the_engine(view: View) -> None:
@@ -1622,7 +1664,10 @@ def test_a_view_reads_through_an_existing_model_like_the_engine(view: View) -> N
 def test_a_view_over_an_existing_model_reads_through_its_functions() -> None:
     """The existing model has no QuerySet with a method per View, so the
     application calls the View's functions."""
-    view = View(name=ViewName("Hydrated"), source=Company, step=steps.hydrate())
+    view = View(
+        name=ViewName("Hydrated"),
+        query=steps.from_(Company, steps.hydrate()),
+    )
     entities = organisation()
     config = ExistingCompany.config()
     (compiled,) = compile_all([view]).views
@@ -1693,7 +1738,10 @@ def test_a_query_follows_the_reverse_accessor_an_existing_model_declares() -> No
             )
         },
     )
-    view = View(name=ViewName("Decorated"), source=Employee, step=steps.reverse(Badge))
+    view = View(
+        name=ViewName("Decorated"),
+        query=steps.from_(Employee, steps.reverse(Badge)),
+    )
     compiled = compile_all([view])
 
     (file,) = (
@@ -1747,11 +1795,13 @@ def entity_model_name(_: type[pydantic.BaseModel]) -> DefaultDjangoModelName:
         *read_views(),
         View(
             name=ViewName("NotTheFirstBadge"),
-            source=Badge,
-            step=steps.where(
-                conditions.not_(
-                    conditions.eq(conditions.field(FieldName("id")), BadgeId(1))
-                )
+            query=steps.from_(
+                Badge,
+                steps.where(
+                    conditions.not_(
+                        conditions.eq(conditions.field(FieldName("id")), BadgeId(1))
+                    )
+                ),
             ),
         ),
     ],
@@ -1802,7 +1852,10 @@ def test_a_view_reads_a_model_keyed_by_its_reference_like_the_engine(
 
 
 def test_a_view_reads_the_rows_the_manager_base_keeps() -> None:
-    view = View(name=ViewName("Hydrated"), source=Employee, step=steps.hydrate())
+    view = View(
+        name=ViewName("Hydrated"),
+        query=steps.from_(Employee, steps.hydrate()),
+    )
     entities = organisation()
     (compiled,) = compile_all([view]).views
     config = Modules.with_bases()
@@ -1820,7 +1873,10 @@ def with_mentor_from_last(queryset: QuerySet[Model]) -> QuerySet[Model]:
 
 
 def test_a_view_reads_the_filtered_ordered_and_sliced_query_set() -> None:
-    view = View(name=ViewName("Hydrated"), source=Employee, step=steps.hydrate())
+    view = View(
+        name=ViewName("Hydrated"),
+        query=steps.from_(Employee, steps.hydrate()),
+    )
     entities = organisation()
     (compiled,) = compile_all([view]).views
     with_mentor = [
@@ -1843,8 +1899,9 @@ def last_two(queryset: QuerySet[Model]) -> QuerySet[Model]:
 def lead() -> View:
     return View(
         name=ViewName("Lead"),
-        source=Employee,
-        step=steps.where(field_is(FieldName("role"), Role.LEAD)),
+        query=steps.from_(
+            Employee, steps.where(field_is(FieldName("role"), Role.LEAD))
+        ),
     )
 
 
@@ -1899,8 +1956,10 @@ def test_the_method_of_a_filtered_view_says_its_filters_apply_before_a_slice() -
 def tagged(name: ViewName, tag: test_compiler.Tag, *pipeline: steps.Step) -> View:
     return View(
         name=name,
-        source=Employee,
-        step=steps.pipeline(*pipeline, test_compiler.added_tag(FieldName("kind"), tag)),
+        query=steps.from_(
+            Employee,
+            steps.pipeline(*pipeline, test_compiler.added_tag(FieldName("kind"), tag)),
+        ),
     )
 
 
@@ -1987,7 +2046,10 @@ def test_each_variant_of_the_union_keeps_rows() -> None:
 
 
 def hydrated() -> View:
-    return View(name=ViewName("Hydrated"), source=Employee, step=steps.hydrate())
+    return View(
+        name=ViewName("Hydrated"),
+        query=steps.from_(Employee, steps.hydrate()),
+    )
 
 
 def only_the_name(queryset: QuerySet[Model]) -> QuerySet[Model]:
@@ -2043,8 +2105,7 @@ class StrictBase(pydantic.BaseModel, strict=True, frozen=True):
 def test_a_view_with_a_strict_base_reads_an_enum_field() -> None:
     view = View(
         name=ViewName("StrictEmployee"),
-        source=Employee,
-        step=steps.hydrate(),
+        query=steps.from_(Employee, steps.hydrate()),
         base=StrictBase,
     )
     entities = organisation()
@@ -2246,7 +2307,10 @@ def test_generated_queries_are_ruff_formatted_and_sorted(
 def render_diagnostics(
     config: DjangoModels, views: ModulePath
 ) -> tuple[DjangoQueriesDiagnostic, ...]:
-    view = View(name=ViewName("CompanyFull"), source=Company, step=steps.pipeline())
+    view = View(
+        name=ViewName("CompanyFull"),
+        query=steps.from_(Company),
+    )
     compiled = compile_all([view])
     match DjangoQueriesRenderer.render(
         entity_graph(),
@@ -2338,8 +2402,8 @@ def test_an_unimportable_class_a_field_is_read_through_names_the_field() -> None
     ).unwrap()
     view = View(
         name=ViewName("CompanyScore"),
-        source=Company,
-        step=steps.pipeline(
+        query=steps.from_(
+            Company,
             steps.reverse(plaque_entity, steps.project([FieldName("score")])),
             steps.flatten(FieldName("plaque")),
         ),
@@ -2547,14 +2611,16 @@ def differential_cases(draw: st.DrawFn) -> DifferentialCase:
         views.append(
             View(
                 name=ViewName(f"View{index}"),
-                source=source,
-                step=draw(
-                    filtered_pipelines(
-                        source,
-                        st.lists(
-                            field_conditions(source, stored, Depth(2)), max_size=1
-                        ),
-                    )
+                query=steps.from_(
+                    source,
+                    draw(
+                        filtered_pipelines(
+                            source,
+                            st.lists(
+                                field_conditions(source, stored, Depth(2)), max_size=1
+                            ),
+                        )
+                    ),
                 ),
             )
         )
@@ -2566,8 +2632,8 @@ def differential_cases(draw: st.DrawFn) -> DifferentialCase:
         variants = tuple(
             View(
                 name=ViewName(f"Variant{index}"),
-                source=source,
-                step=steps.pipeline(
+                query=steps.from_(
+                    source,
                     draw(
                         filtered_pipelines(
                             source,
@@ -2916,7 +2982,10 @@ def test_generated_queries_pass_the_type_checker(
 def test_an_unmet_required_field_fails_the_view_models_validation(
     step: steps.Step,
 ) -> None:
-    view = View(name=ViewName("RequiringEmployee"), source=Employee, step=step)
+    view = View(
+        name=ViewName("RequiringEmployee"),
+        query=steps.from_(Employee, step),
+    )
     (compiled,) = compile_all([view]).views
 
     with Database.of([view]) as django_models:
@@ -2958,7 +3027,10 @@ def test_an_unmet_required_field_fails_the_view_models_validation(
 )
 def test_an_unmet_required_entity_raises(step: steps.Step, message: str) -> None:
     """As the mapping functions do, through the module's `_required`."""
-    view = View(name=ViewName("RequiringEmployee"), source=Employee, step=step)
+    view = View(
+        name=ViewName("RequiringEmployee"),
+        query=steps.from_(Employee, step),
+    )
     (compiled,) = compile_all([view]).views
 
     with Database.of([view]) as django_models:
@@ -2970,8 +3042,7 @@ def test_an_unmet_required_entity_raises(step: steps.Step, message: str) -> None
 def test_a_met_requirement_reads_like_the_engine() -> None:
     view = View(
         name=ViewName("NicknamedEmployee"),
-        source=Employee,
-        step=steps.require(FieldName("nickname")),
+        query=steps.from_(Employee, steps.require(FieldName("nickname"))),
     )
     entities = tuple(
         entity.model_copy(update={"nickname": Text("nick")})
@@ -3015,7 +3086,8 @@ def test_the_database_refuses_exactly_the_rows_a_check_is_false_for(
     """Differential: a row violates a Check exactly where `where` of its
     Condition does not keep it in the InMemoryViewEngine."""
     view = View(
-        name=ViewName("Kept"), source=case.source, step=steps.where(case.condition)
+        name=ViewName("Kept"),
+        query=steps.from_(case.source, steps.where(case.condition)),
     )
     compiled = compile_all([view])
     kept = {
@@ -3058,7 +3130,10 @@ def test_the_database_refuses_a_second_row_a_unique_keeps() -> None:
     )
 
     # A View, so that there is a module of View models.
-    view = View(name=ViewName("Departments"), source=Department, step=steps.pipeline())
+    view = View(
+        name=ViewName("Departments"),
+        query=steps.from_(Department),
+    )
 
     with Database.of([view], (), config):
         refused = Database.rejected([company, *named], Department, config)

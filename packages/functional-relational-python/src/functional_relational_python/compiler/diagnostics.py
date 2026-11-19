@@ -8,9 +8,12 @@ from functional_relational_python.entity_graph.entity_graph import (
 from functional_relational_python.entity_graph.id import IdType, OneToOneMarker
 from functional_relational_python.pipeline import ir
 from functional_relational_python.pipeline.constraints import ConditionOwner
-from functional_relational_python.pipeline.payloads import DefinitionName, PayloadName
 from functional_relational_python.pipeline.unions import UnionName
 from functional_relational_python.pipeline.views import ViewName
+from functional_relational_python.pipeline.write_models import (
+    DefinitionName,
+    WriteModelName,
+)
 from functional_relational_python.support.diagnostic import (
     Diagnostic,
     DiagnosticMessage,
@@ -236,18 +239,18 @@ class FlattenOntoExistingField(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class SharedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A View and a Payload have the same name, so their models would too.
+    """A View and a WriteModel have the same name, so their models would too.
 
-    Reported once per name, however many Views and Payloads share it.
+    Reported once per name, however many Views and WriteModels share it.
     """
 
     view: DefinitionName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: a View and a Payload are both named "
+            f"{self.view.root}: a View and a WriteModel are both named "
             f"'{self.view.root}'. Model names must be unique across Views and "
-            "Payloads."
+            "WriteModels."
         )
 
 
@@ -260,7 +263,7 @@ class RetypeInView(pydantic.BaseModel, Diagnostic, frozen=True):
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
             f"{self.view.root}: a View cannot retype its fields, because its "
-            "mapping copies each value unchanged. Retype in a Payload instead."
+            "mapping copies each value unchanged. Retype in a WriteModel instead."
         )
 
 
@@ -364,15 +367,14 @@ class AddWithoutDefault(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class WhereInPayload(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Payload's pipeline filters. A Payload is a write model, so it has no rows
-    to keep."""
+class WhereInWriteModel(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A WriteModel's pipeline filters. A WriteModel has no rows to keep."""
 
-    view: PayloadName
+    view: WriteModelName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: a Payload cannot filter with `where`, because it is "
+            f"{self.view.root}: a WriteModel cannot filter with `where`, because it is "
             "a write model with no rows to keep."
         )
 
@@ -498,15 +500,15 @@ class UnorderedFieldType(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class RequireInPayload(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Payload's pipeline requires a field. A Payload is a write model, so it
-    has no values to require."""
+class RequireInWriteModel(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A WriteModel's pipeline requires a field. A WriteModel has no values to
+    require."""
 
-    view: PayloadName
+    view: WriteModelName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: a Payload cannot `require` a field, because it is "
+            f"{self.view.root}: a WriteModel cannot `require` a field, because it is "
             "a write model with no values to require."
         )
 
@@ -558,11 +560,11 @@ class RequireAddedField(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class VariantWithoutDiscriminator(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Union's Variant, or a View or Payload of a Union nested in it, has no
+    """A Union's Variant, or a View or WriteModel of a Union nested in it, has no
     field named like the Union's Discriminator."""
 
     view: UnionName
-    variant: ViewName | PayloadName
+    variant: ViewName | WriteModelName
     discriminator: FieldName
 
     def describe(self) -> DiagnosticMessage:
@@ -573,22 +575,22 @@ class VariantWithoutDiscriminator(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class UntaggedVariant(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Union's Variant, or a View or Payload of a Union nested in it, types the
+    """A Union's Variant, or a View or WriteModel of a Union nested in it, types the
     Discriminator by something other than one Tag: a `Literal` of one enum
     member, string or integer."""
 
     view: UnionName
-    variant: ViewName | PayloadName
+    variant: ViewName | WriteModelName
     discriminator: FieldName
     annotation: RuntimeAnnotation
 
     def describe(self) -> DiagnosticMessage:
-        # A View narrows a Source column to its Tag, a Payload, with no Filters,
+        # A View narrows a Source column to its Tag, a WriteModel, with no Filters,
         # retypes it.
         match self.variant:
             case ViewName():
                 fix = "Narrow it to one value with `where`"
-            case PayloadName():
+            case WriteModelName():
                 fix = "Type it with `retype_to`"
         return DiagnosticMessage(
             f"{self.view.root}: the Variant {self.variant.root} types "
@@ -628,12 +630,12 @@ class FieldDefaultText(pydantic.RootModel[str], frozen=True):
 
 
 class DiscriminatorDefaultNotTag(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Union's Variant, or a View or Payload of a Union nested in it, gives the
+    """A Union's Variant, or a View or WriteModel of a Union nested in it, gives the
     Discriminator a default other than its Tag, such as `MISSING`, so its model
     can be built without its Tag."""
 
     view: UnionName
-    variant: ViewName | PayloadName
+    variant: ViewName | WriteModelName
     discriminator: FieldName
     tag: TagText
     default: FieldDefaultText
@@ -653,7 +655,7 @@ class SharedTag(pydantic.BaseModel, Diagnostic, frozen=True):
     view: UnionName
     discriminator: FieldName
     tag: TagText
-    variants: tuple[ViewName | PayloadName | UnionName, ...]
+    variants: tuple[ViewName | WriteModelName | UnionName, ...]
 
     def describe(self) -> DiagnosticMessage:
         variants = ", ".join(variant.root for variant in self.variants)
@@ -665,7 +667,7 @@ class SharedTag(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class NestedUnionTagsDiffer(pydantic.BaseModel, Diagnostic, frozen=True):
-    """The Views or Payloads of a Union nested in another have different Tags for
+    """The Views or WriteModels of a Union nested in another have different Tags for
     the outer Union's Discriminator, so the nested Union has no one Tag there."""
 
     view: UnionName
@@ -702,20 +704,20 @@ class VariantSourcesDiffer(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class ViewsMixedWithPayloads(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Union has both Views (or Unions of them) and Payloads (or Unions of
+class ViewsMixedWithWriteModels(pydantic.BaseModel, Diagnostic, frozen=True):
+    """A Union has both Views (or Unions of them) and WriteModels (or Unions of
     them) as Variants."""
 
     view: UnionName
     views: tuple[ViewName | UnionName, ...]
-    payloads: tuple[PayloadName | UnionName, ...]
+    write_models: tuple[WriteModelName | UnionName, ...]
 
     def describe(self) -> DiagnosticMessage:
         views = ", ".join(view.root for view in self.views)
-        payloads = ", ".join(payload.root for payload in self.payloads)
+        write_models = ", ".join(write_model.root for write_model in self.write_models)
         return DiagnosticMessage(
-            f"{self.view.root}: its Variants mix Views ({views}) with Payloads "
-            f"({payloads}). A Union's Variants are all read models or all write "
+            f"{self.view.root}: its Variants mix Views ({views}) with WriteModels "
+            f"({write_models}). A Union's Variants are all read models or all write "
             "models."
         )
 
@@ -736,22 +738,22 @@ class UnreachableVariant(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class PayloadUnionInViews(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`compile_views` was given a Union of Payloads. It compiles read models
+class WriteModelUnionInViews(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`compile_views` was given a Union of WriteModels. It compiles read models
     only, so it would leave the Union out."""
 
     view: UnionName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: a Union of Payloads is a write model, but "
+            f"{self.view.root}: a Union of WriteModels is a WriteModel, but "
             "`compile_views` compiles read models only. Compile it with "
             "`compile_catalog`."
         )
 
 
 class SharedUnionName(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A Union has the name of a View, a Payload or another Union, so their
+    """A Union has the name of a View, a WriteModel or another Union, so their
     models would too. Reported once per name."""
 
     view: UnionName
@@ -759,8 +761,8 @@ class SharedUnionName(pydantic.BaseModel, Diagnostic, frozen=True):
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
             f"{self.view.root}: a Union shares the name '{self.view.root}' with a "
-            "View, a Payload or another Union. Model names must be unique across "
-            "Views, Payloads and Unions."
+            "View, a WriteModel or another Union. Model names must be unique across "
+            "Views, WriteModels and Unions."
         )
 
 
@@ -789,7 +791,7 @@ type CompileDiagnostic = (
     | RetypeNestedField
     | BaseFieldTypeMismatch
     | BaseFieldIsNestedModel
-    | WhereInPayload
+    | WhereInWriteModel
     | WhereInNestedPipeline
     | NotASourceColumn
     | NonLiteralConditionValue
@@ -797,7 +799,7 @@ type CompileDiagnostic = (
     | ComparedTypesDiffer
     | OrderingOnOptionalField
     | UnorderedFieldType
-    | RequireInPayload
+    | RequireInWriteModel
     | RequireOnRequiredField
     | RequireOnAlwaysNoneField
     | RequireAddedField
@@ -808,8 +810,8 @@ type CompileDiagnostic = (
     | SharedTag
     | NestedUnionTagsDiffer
     | VariantSourcesDiffer
-    | ViewsMixedWithPayloads
+    | ViewsMixedWithWriteModels
     | UnreachableVariant
     | SharedUnionName
-    | PayloadUnionInViews
+    | WriteModelUnionInViews
 )
