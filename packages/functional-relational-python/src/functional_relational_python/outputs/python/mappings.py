@@ -129,12 +129,14 @@ class Indent(pydantic.RootModel[int], frozen=True):
     def assigned(self, target: Expression, value: Expression) -> Expression:
         """`<target> = <value>` on a line at this indentation, split as ruff
         format splits it: as `fitted` splits it, unless the line up to the
-        value's last opening bracket does not fit, and `<target> = (` does. Then
-        the value is parenthesized on lines of its own, split as `fitted` splits
-        it. When not even `<target> = (` fits, a bracketed target, e.g. the
-        annotation of `x: ClassVar[T] = T()`, is split as `fitted` splits it."""
+        value's last opening bracket does not fit, and `<target> = (` does, and
+        so does the value on a line of its own one level deeper. Then the value
+        is parenthesized on that line. When not even `<target> = (` fits, a
+        bracketed target, e.g. the annotation of `x: ClassVar[T] = T()`, is
+        split as `fitted` splits it."""
         line = Expression(f"{target.root} = {value.root}")
         pad = self.pad().root
+        inner = self.deeper().pad().root
         assigning = Expression(f" = {value.root}")
         if (
             len(f"{pad}{line.root}") > LineLength.default().root
@@ -148,13 +150,9 @@ class Indent(pydantic.RootModel[int], frozen=True):
                 len(f"{pad}{line.root}") > LineLength.default().root
                 and len(f"{pad}{target.root} = {head.root}") > LineLength.default().root
                 and len(f"{pad}{target.root} = (") <= LineLength.default().root
+                and len(f"{inner}{value.root}") <= LineLength.default().root
             ):
-                inner = self.deeper()
-                written = inner.fitted(value, Expression("")).root
-                return Expression(
-                    f"{target.root} = (\n{inner.pad().root}{written}\n"
-                    f"{self.pad().root})"
-                )
+                return Expression(f"{target.root} = (\n{inner}{value.root}\n{pad})")
             case _Bracketed() | _Unbracketed():
                 return self.fitted(line, Expression(""))
 

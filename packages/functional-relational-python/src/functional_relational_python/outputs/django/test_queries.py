@@ -304,7 +304,7 @@ class ExistingCompany:
         "    id = models.BigIntegerField(primary_key=True)\n"
         "    name = models.TextField()\n"
         "    parent = models.ForeignKey(\n"
-        '        "self", on_delete=models.PROTECT, related_name="+", null=True\n'
+        '        "self", on_delete=models.PROTECT, related_name="subsidiaries", null=True\n'
         "    )\n"
         "\n"
         "    class Meta:\n"
@@ -327,7 +327,7 @@ class ExistingCompany:
                 Company: ExistingDjangoModel(
                     module=ExistingCompany.module,
                     name=Identifier("Firm"),
-                    reverse_accessors={},
+                    reverse_accessors={FieldName("parent"): FieldName("subsidiaries")},
                 )
             },
         )
