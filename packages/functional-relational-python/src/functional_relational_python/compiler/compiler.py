@@ -6,7 +6,7 @@ WriteModels are still checked and independent defects are all reported, once eac
 """
 
 import typing
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import Annotated
 
 import pydantic
@@ -33,6 +33,7 @@ from functional_relational_python.entity_graph.entity_graph import (
     NoEntityError,
     NotAReferenceError,
     Optionality,
+    Reference,
 )
 from functional_relational_python.entity_graph.id import OneToOneMarker
 from functional_relational_python.pipeline import ir
@@ -996,102 +997,95 @@ def _check_reverse(
     node: ir.Reverse,
     relation: ir.Relation,
 ) -> ir.Relation | Poisoned:
-    """Appends the field holding the Entity whose one-to-one Reference points to
-    the subject, named after that Entity.
+    """Appends the field holding what references the subject by the Entity's
+    chosen Reference: by a one-to-one Reference the Entity, by a many-to-one
+    Reference every such Entity. It is named `node.name`, else after the Entity,
+    in the plural for a many-to-one Reference.
 
     A name the relation already has recovers with the relation unchanged, so the
     existing field keeps it, as for `add`. A Reference that cannot be followed
-    backwards recovers with a field of unknown type, so later steps still find it.
+    backwards recovers with a field of unknown type, named as for a one-to-one
+    Reference, so later steps still find it.
     """
     from_model = relation.from_model
-    name = FieldName(PascalCase(node.entity.__name__).snake_case().root)
-    reported: list[diagnostics.CompileDiagnostic] = []
-    collides = name in relation.field_names()
-    if collides:
-        reported.append(
-            diagnostics.ReverseOntoExistingField(
-                view=view, from_model=from_model, entity=node.entity, field=name
-            )
-        )
-    reported.extend(ViewModelNames.check_field(view, from_model, name))
     subject = _subject(node)
-    non_entities: list[diagnostics.CompileDiagnostic] = []
+    reported: list[diagnostics.CompileDiagnostic] = []
     if subject.from_model not in entity_graph.entities:
-        non_entities.append(
+        reported.append(
             diagnostics.ReverseFromNonEntity(
                 view=view, from_model=from_model, entity=node.entity
             )
         )
     if node.entity not in entity_graph.entities:
-        non_entities.append(
+        reported.append(
             diagnostics.ReverseOfNonEntity(
                 view=view, from_model=from_model, entity=node.entity
             )
         )
-    reported.extend(non_entities)
     field: ir.RelationField = ir.Field(
-        name=name, info=FieldInfo(), value=ir.Added(), default=ir.NoDefault()
+        name=_reversed_name(node, Cardinality.ONE_TO_ONE),
+        info=FieldInfo(),
+        value=ir.Added(),
+        default=ir.NoDefault(),
     )
-    if not non_entities:
+    if not reported:
+        # The Reference of the Entity to the subject that `node.via` chooses, of
+        # either Cardinality, or why there is not exactly one.
         to_subject = tuple(
             reference
             for reference in entity_graph.entities[node.entity].references
             if reference.target is subject.from_model
         )
-        one_to_one = tuple(
-            reference
-            for reference in to_subject
-            if reference.cardinality == Cardinality.ONE_TO_ONE
+        chosen: (
+            Reference
+            | diagnostics.NoReferenceToSubject
+            | diagnostics.AmbiguousReverse
+            | diagnostics.NotAReferenceToSubject
         )
-        # What is reported unless exactly one Reference is chosen.
-        unchosen: diagnostics.CompileDiagnostic
         match node.via:
             case ir.SoleReference():
-                chosen = one_to_one
-                unchosen = (
-                    diagnostics.AmbiguousReverse(
-                        view=view,
-                        from_model=from_model,
-                        entity=node.entity,
-                        references=tuple(reference.field for reference in chosen),
-                    )
-                    if chosen
-                    else diagnostics.NoOneToOneReference(
-                        view=view,
-                        from_model=from_model,
-                        entity=node.entity,
-                        many_to_one=tuple(
-                            reference.field
-                            for reference in to_subject
-                            if reference.cardinality == Cardinality.MANY_TO_ONE
-                        ),
-                        one_to_one_marker=entity_graph.one_to_one_marker,
-                    )
-                )
+                match to_subject:
+                    case (reference,):
+                        chosen = reference
+                    case ():
+                        chosen = diagnostics.NoReferenceToSubject(
+                            view=view, from_model=from_model, entity=node.entity
+                        )
+                    case _:
+                        chosen = diagnostics.AmbiguousReverse(
+                            view=view,
+                            from_model=from_model,
+                            entity=node.entity,
+                            references=tuple(
+                                reference.field for reference in to_subject
+                            ),
+                        )
             case FieldName() as via:
-                chosen = tuple(
-                    reference for reference in one_to_one if reference.field == via
+                chosen = next(
+                    (reference for reference in to_subject if reference.field == via),
+                    diagnostics.NotAReferenceToSubject(
+                        view=view,
+                        from_model=from_model,
+                        entity=node.entity,
+                        field=via,
+                        valid=tuple(reference.field for reference in to_subject),
+                    ),
                 )
-                unchosen = diagnostics.NotAOneToOneReference(
-                    view=view,
-                    from_model=from_model,
-                    entity=node.entity,
-                    field=via,
-                    valid=tuple(reference.field for reference in one_to_one),
-                )
-        if len(chosen) == 1:
-            (reference,) = chosen
-            lookup = ir.ReverseLookup(
-                optionality=Optionality.OPTIONAL,
-                target=node.entity,
-                via=reference.field,
-                id_type=reference.id_type,
+        match chosen:
+            case Reference() as reference:
+                checked = _reversed(entity_graph, view, node, reference)
+                field = checked.field
+                reported.extend(checked.diagnostics)
+            case unchosen:
+                reported.append(unchosen)
+    collides = field.name in relation.field_names()
+    if collides:
+        reported.append(
+            diagnostics.ReverseOntoExistingField(
+                view=view, from_model=from_model, entity=node.entity, field=field.name
             )
-            checked = _resolved(entity_graph, view, node.then, name, lookup)
-            field = checked.field
-            reported.extend(checked.diagnostics)
-        else:
-            reported.append(unchosen)
+        )
+    reported.extend(ViewModelNames.check_field(view, from_model, field.name))
     reversed_relation = (
         relation if collides else relation.with_fields((*relation.fields, field))
     )
@@ -1100,21 +1094,77 @@ def _check_reverse(
     return Poisoned(recovered=reversed_relation, diagnostics=tuple(reported))
 
 
+def _reversed_name(node: ir.Reverse, cardinality: Cardinality) -> FieldName:
+    """`node.name`, or else the Entity's name in snake_case, plural for a
+    many-to-one Reference."""
+    match node.name:
+        case FieldName() as name:
+            return name
+        case ir.DefaultName():
+            pass
+    singular = PascalCase(node.entity.__name__).snake_case()
+    match cardinality:
+        case Cardinality.ONE_TO_ONE:
+            return FieldName(singular.root)
+        case Cardinality.MANY_TO_ONE:
+            return FieldName(singular.plural().root)
+
+
+def _reversed(
+    entity_graph: EntityGraph,
+    view: DefinitionName,
+    node: ir.Reverse,
+    reference: Reference,
+) -> _CheckedField:
+    """The field holding what references the subject by `reference`: by a
+    one-to-one Reference the Entity, by a many-to-one Reference every such
+    Entity; after `node.then` if it does anything.
+
+    Unless `node.via_field` keeps it, `reference` is omitted before `node.then`,
+    so the field holds a nested model even when `node.then` does nothing."""
+    name = _reversed_name(node, reference.cardinality)
+    then: Callable[[ir.Node], ir.Node]
+    match node.via_field:
+        case ir.ViaField.OMIT:
+
+            def omitting(entity: ir.Node) -> ir.Node:
+                return node.then(ir.Omit(input=entity, fields=reference.field))
+
+            then = omitting
+        case ir.ViaField.KEEP:
+            then = node.then
+    found: ir.FoundValue
+    match reference.cardinality:
+        case Cardinality.ONE_TO_ONE:
+            found = ir.ReverseLookup(
+                optionality=Optionality.OPTIONAL,
+                target=node.entity,
+                via=reference.field,
+                id_type=reference.id_type,
+            )
+        case Cardinality.MANY_TO_ONE:
+            found = ir.CollectionLookup(
+                target=node.entity, via=reference.field, id_type=reference.id_type
+            )
+    return _resolved(entity_graph, view, then, name, found)
+
+
 def _resolved(
     entity_graph: EntityGraph,
     view: DefinitionName,
     then: Callable[[ir.Node], ir.Node],
     name: FieldName,
-    found: ir.EntityValue,
+    found: ir.FoundValue,
 ) -> _CheckedField:
-    """The field holding the looked-up Entity, after `then` if it does anything.
+    """The field holding the looked-up Entity, or each of the Entities a
+    CollectionLookup finds, after `then` if it does anything.
 
     Without a nested pipeline the field is typed by the Entity class itself. The
     field is new, so it has no default: a resolved Reference's default was for an
     ID, and need not fit the Entity.
     """
     default = ir.NoDefault()
-    root = ir.FromModel(from_model=found.lookups()[-1].target)
+    root = ir.FromModel(from_model=found.entity())
     nested = then(root)
     if nested == root:
         return _CheckedField(
@@ -1138,6 +1188,11 @@ def _resolved(
     )
 
 
+class _Unliftable(pydantic.BaseModel, frozen=True):
+    """A field `flatten` cannot lift out of the Entity holding it: one holding a
+    SortedSequence of Entities."""
+
+
 class _HeldEntity(pydantic.BaseModel, frozen=True):
     """The Entity a resolved field holds: the Lookups that find it from the
     subject, in turn, and its fields."""
@@ -1146,8 +1201,9 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
     relation: ir.Relation
 
     @staticmethod
-    def of(field: ir.RelationField) -> _HeldEntity | ir.Field:
-        """The Entity `field` holds, or `field` itself when it is not resolved."""
+    def of(field: ir.RelationField) -> _HeldEntity | ir.RelationField:
+        """The Entity `field` holds, or `field` itself when it holds no one
+        Entity: it is not resolved, or holds a SortedSequence of Entities."""
         match field:
             case ir.Field(
                 value=ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() as found
@@ -1157,30 +1213,39 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
                     chain=chain,
                     relation=ir.Relation.of(ir.FromModel(from_model=chain[-1].target)),
                 )
-            case ir.NestedField(value=found, relation=relation):
+            case ir.NestedField(
+                value=ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() as found,
+                relation=relation,
+            ):
                 return _HeldEntity(chain=found.lookups(), relation=relation)
-            case ir.Field():
+            case ir.Field() | ir.NestedField():
                 return field
 
-    def lifted(self, field: ir.RelationField) -> ir.RelationField:
+    def lifted(self, field: ir.RelationField) -> ir.RelationField | _Unliftable:
         """`field` of the Entity, computed from the subject through `chain`.
 
         Lifted out of an optional Reference, a field is optional too. An added
-        field has no value from the Entity, so it is lifted as it is.
+        field has no value from the Entity, so it is lifted as it is. A field
+        holding a SortedSequence of Entities cannot be lifted.
         """
         match field:
             case ir.NestedField(value=found):
-                return field.model_copy(
-                    update={
-                        "value": ir.ChainedLookup(chain=(*self.chain, *found.lookups()))
-                    }
-                )
+                nested: ir.RelationField | _Unliftable
+                match found:
+                    case ir.CollectionLookup():
+                        nested = _Unliftable()
+                    case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
+                        chain = ir.ChainedLookup(chain=(*self.chain, *found.lookups()))
+                        nested = field.model_copy(update={"value": chain})
+                return nested
             case ir.Field(value=value):
                 pass
         lifted_value: ir.Value
         match value:
             case ir.Added():
                 return field
+            case ir.CollectionLookup():
+                return _Unliftable()
             case ir.SubjectField() | ir.RequiredField():
                 lifted_value = ir.Lifted(through=self.chain, field=value)
             case ir.Lifted(through=through, field=read):
@@ -1213,7 +1278,7 @@ def _check_flatten(
         match _HeldEntity.of(field):
             case _HeldEntity() as entity:
                 held[field.name] = entity
-            case ir.Field():
+            case ir.Field() | ir.NestedField():
                 pass
     match node.fields:
         case ir.Select() as selected:
@@ -1222,18 +1287,7 @@ def _check_flatten(
             flattened = {name}
         case FieldName() as name:
             flattened = set[FieldName]()
-            reported.append(
-                diagnostics.NotAResolvedField(
-                    view=view, from_model=relation.from_model, field=name
-                )
-                if name in relation.field_names()
-                else diagnostics.UnknownField(
-                    owner=view,
-                    from_model=relation.from_model,
-                    field=name,
-                    valid=relation.field_names(),
-                )
-            )
+            reported.append(_unflattenable(view, relation, name))
     # The fields that stay, so their names are taken before any field is lifted.
     taken = {field.name for field in relation.fields if field.name not in flattened}
     fields: list[ir.RelationField] = []
@@ -1243,19 +1297,71 @@ def _check_flatten(
             continue
         entity = held[field.name]
         for inner in entity.relation.fields:
-            if inner.name in taken:
-                reported.append(
-                    diagnostics.FlattenOntoExistingField(
-                        view=view, flattened=field.name, field=inner.name
-                    )
-                )
-                continue
-            taken.add(inner.name)
-            fields.append(entity.lifted(inner))
+            match _lift(view, field.name, entity, inner, taken):
+                case ir.Field() | ir.NestedField() as lifted:
+                    taken.add(lifted.name)
+                    fields.append(lifted)
+                case unlifted:
+                    reported.append(unlifted)
     flattened_relation = relation.with_fields(tuple(fields))
     if not reported:
         return flattened_relation
     return Poisoned(recovered=flattened_relation, diagnostics=tuple(reported))
+
+
+def _lift(
+    view: DefinitionName,
+    flattened: FieldName,
+    entity: _HeldEntity,
+    inner: ir.RelationField,
+    taken: Collection[FieldName],
+) -> (
+    ir.RelationField
+    | diagnostics.FlattenOntoExistingField
+    | diagnostics.LiftedCollection
+):
+    """`inner`, a field of the Entity the field `flattened` holds, lifted out of
+    it; or why it cannot be: its name is `taken`, or it holds a SortedSequence."""
+    if inner.name in taken:
+        return diagnostics.FlattenOntoExistingField(
+            view=view, flattened=flattened, field=inner.name
+        )
+    match entity.lifted(inner):
+        case _Unliftable():
+            return diagnostics.LiftedCollection(
+                view=view, flattened=flattened, field=inner.name
+            )
+        case lifted:
+            return lifted
+
+
+def _unflattenable(
+    view: DefinitionName, relation: ir.Relation, name: FieldName
+) -> diagnostics.CompileDiagnostic:
+    """Why `flatten` cannot flatten the field named `name`, which holds no one
+    Entity: it holds a SortedSequence of Entities, or none, or there is no such
+    field."""
+    named = [field for field in relation.fields if field.name == name]
+    match named:
+        case [
+            ir.Field(value=ir.CollectionLookup())
+            | ir.NestedField(value=ir.CollectionLookup()),
+            *_,
+        ]:
+            return diagnostics.FlattenCollection(
+                view=view, from_model=relation.from_model, field=name
+            )
+        case [_, *_]:
+            return diagnostics.NotAResolvedField(
+                view=view, from_model=relation.from_model, field=name
+            )
+        case _:
+            return diagnostics.UnknownField(
+                owner=view,
+                from_model=relation.from_model,
+                field=name,
+                valid=relation.field_names(),
+            )
 
 
 def _poison(

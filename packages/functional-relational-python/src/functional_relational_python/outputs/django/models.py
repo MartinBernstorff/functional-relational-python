@@ -3,11 +3,11 @@
 Each model's manager `objects` is its Entity's Manager, which `queries`
 generates with a method per View over the Entity.
 
-A one-to-one Reference is a `OneToOneField` with a reverse accessor on the
-referenced Entity's model, `<model>_by_<foreign key>`, e.g.
-`company_profile_by_company` for `CompanyProfile.company_id`, so that a query can
-follow it backwards. A many-to-one Reference has no reverse accessor, so several
-never clash. A related name in the Entity's `EntityModelOptions` names either's.
+A one-to-one Reference is a `OneToOneField`, a many-to-one one a `ForeignKey`.
+Either has a reverse accessor on the referenced Entity's model,
+`<model>_by_<foreign key>`, e.g. `company_profile_by_company` for
+`CompanyProfile.company_id`, so that a query can follow it backwards. A related
+name in the Entity's `EntityModelOptions` names it instead.
 
 `CatalogModelOptions`, and an Entity's `EntityModelOptions` over them, also
 give a model its base classes, class decorators, `Meta` options, field
@@ -573,9 +573,8 @@ class EntityModelOptions(pydantic.BaseModel, frozen=True):
     `defaults`, `related_names` and the fields of `indexes` are by the Entity's
     field, a Reference by its own name, e.g. `company_id`. A Reference with a
     related name gets a reverse accessor of that name on the referenced Entity's
-    model. A one-to-one Reference has one anyway, see
-    `DjangoModels.reverse_accessor_of`. `primary_key` is the model's primary key,
-    see `ReferencePrimaryKey`.
+    model, and one frp names otherwise, see `DjangoModels.reverse_accessor_of`.
+    `primary_key` is the model's primary key, see `ReferencePrimaryKey`.
 
     `model_name` is the model's class name, see `DjangoModels.model_name_of`. Its
     QuerySet and Manager are named after the Entity regardless.
@@ -694,9 +693,10 @@ class ExistingDjangoModel(pydantic.BaseModel, frozen=True):
     The model holds each field of the Entity under the attribute a generated
     model would, so that a query reads it: a field under its name, and a
     Reference `x_id` as the foreign key `x`. Its manager is its own.
-    `reverse_accessors` is the `related_name` its model gives each one-to-one
-    Reference of the Entity, e.g. `meta_detail` for `channel_campaign_id`, which a
-    query follows backwards. frp checks none of this against the model.
+    `reverse_accessors` is the `related_name` its model gives each Reference of
+    the Entity, e.g. `meta_detail` for `channel_campaign_id`, which a query
+    follows backwards: every one-to-one Reference, and each many-to-one one a
+    View reverses. frp checks none of this against the model.
     """
 
     module: ModulePath
@@ -813,11 +813,12 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
         self, entity: type[pydantic.BaseModel], reference: FieldName
     ) -> FieldName:
         """The attribute of the referenced Entity's Django model holding the
-        `entity` whose one-to-one Reference `reference` points to it: the one an
+        `entity` whose Reference `reference` points to it: the one an
         existing model declares, else the related name a generated model's
         options give it, else the one frp generates, see
         `DjangoModelsRenderer.reverse_accessor`. An existing model declaring none
-        is a diagnostic of the Django models."""
+        is a diagnostic: of the Django models for a one-to-one Reference, of the
+        Django queries for a many-to-one one a View reverses."""
         match self.existing.get(entity):
             case ExistingDjangoModel(reverse_accessors=declared) if (
                 reference in declared
@@ -1130,9 +1131,9 @@ class UndeclaredReverseAccessor(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class ReverseAccessorOfNonOneToOne(pydantic.BaseModel, Diagnostic, frozen=True):
+class ReverseAccessorOfNonReference(pydantic.BaseModel, Diagnostic, frozen=True):
     """`ExistingDjangoModel.reverse_accessors` names a field that is not a
-    one-to-one Reference of its Entity."""
+    Reference of its Entity."""
 
     entity: type[pydantic.BaseModel]
     field: FieldName
@@ -1140,8 +1141,7 @@ class ReverseAccessorOfNonOneToOne(pydantic.BaseModel, Diagnostic, frozen=True):
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
             f"{self.entity.__qualname__}.{self.field.root}: its existing Django "
-            "model's reverse_accessors names it, but it is not a one-to-one "
-            "Reference."
+            "model's reverse_accessors names it, but it is not a Reference."
         )
 
 
@@ -1252,10 +1252,9 @@ class InvalidDjangoFieldName(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class ReverseAccessorClash(pydantic.BaseModel, Diagnostic, frozen=True):
-    """The reverse accessor of a Reference, one-to-one or with a related name,
-    would have a name the referenced Entity's Django model binds otherwise: a
-    field, an ID attribute, a name the model reserves, or the reverse accessor
-    of another Reference.
+    """The reverse accessor of a Reference would have a name the referenced
+    Entity's Django model binds otherwise: a field, an ID attribute, a name the
+    model reserves, or the reverse accessor of another Reference.
 
     `references` are the References whose reverse accessor it is.
     """
@@ -1276,7 +1275,7 @@ class ReverseAccessorClash(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class InvalidReverseAccessorName(pydantic.BaseModel, Diagnostic, frozen=True):
-    """The reverse accessor of a one-to-one Reference would have a name Django
+    """The reverse accessor frp names for a Reference would have a name Django
     rejects as a related name: one ending in `_` or holding `__`, e.g. for an
     Entity named with `__`."""
 
@@ -1393,7 +1392,7 @@ type DjangoDiagnostic = (
     | ExistingModelOfNonEntity
     | ExistingModelInGeneratedModule
     | UndeclaredReverseAccessor
-    | ReverseAccessorOfNonOneToOne
+    | ReverseAccessorOfNonReference
     | DjangoFieldNameClash
     | DjangoModelNameClash
     | DjangoModelNameCaseClash
@@ -1825,11 +1824,6 @@ class _Declaration(pydantic.BaseModel, frozen=True):
             Expression(self.field.to_expression(self.positional).root),
         )
         return FileText(f"    {written.root}\n")
-
-
-class _NoReverseAccessor(pydantic.BaseModel, frozen=True):
-    """A Reference whose referenced Entity's model has no attribute for it:
-    `related_name="+"`."""
 
 
 class _CheckedCheck(pydantic.BaseModel, frozen=True):
@@ -2418,8 +2412,8 @@ class DjangoModelsRenderer:
 
     @staticmethod
     def reverse_accessor(model: Identifier, reference: FieldName) -> FieldName:
-        """The reverse accessor frp generates for the one-to-one Reference
-        `reference` of the Entity whose Django model is named `model`, e.g.
+        """The reverse accessor frp generates for the Reference `reference` of
+        the Entity whose Django model is named `model`, e.g.
         `company_profile_by_company` for `CompanyProfile.company_id`."""
         snake = model_names.PascalCase(model.root).snake_case().root
         foreign_key = DjangoModelsRenderer.foreign_key_name(reference)
@@ -2800,11 +2794,13 @@ class DjangoModelsRenderer:
         ExistingModelOfNonEntity
         | ExistingModelInGeneratedModule
         | UndeclaredReverseAccessor
-        | ReverseAccessorOfNonOneToOne
+        | ReverseAccessorOfNonReference
     ]:
         """Existing Django models named for a non-Entity, or in a generated
-        module, or declaring other reverse accessors than their Entity's
-        one-to-one References have."""
+        module, or declaring a reverse accessor for a field that is no
+        Reference, or none for a one-to-one Reference. One for a many-to-one
+        Reference is needed only by a View reversing it, which the Django
+        queries report."""
         for entity, existing in config.existing.items():
             if existing.module in (config.module, config.queries):
                 yield ExistingModelInGeneratedModule(
@@ -2816,20 +2812,17 @@ class DjangoModelsRenderer:
                     continue
                 case EntityNode() as node:
                     pass
-            one_to_one = [
-                reference.field
+            references = [reference.field for reference in node.references]
+            yield from (
+                UndeclaredReverseAccessor(entity=entity, field=reference.field)
                 for reference in node.references
                 if reference.cardinality == Cardinality.ONE_TO_ONE
-            ]
-            yield from (
-                UndeclaredReverseAccessor(entity=entity, field=field)
-                for field in one_to_one
-                if field not in existing.reverse_accessors
+                and reference.field not in existing.reverse_accessors
             )
             yield from (
-                ReverseAccessorOfNonOneToOne(entity=entity, field=field)
+                ReverseAccessorOfNonReference(entity=entity, field=field)
                 for field in existing.reverse_accessors
-                if field not in one_to_one
+                if field not in references
             )
 
     @staticmethod
@@ -2855,8 +2848,14 @@ class DjangoModelsRenderer:
         for entity, node in sorted(
             graph.entities.items(), key=lambda item: item[0].__name__
         ):
+            declared = config.existing.get(entity)
             for reference in node.references:
-                if reference.target is not model:
+                # frp does not know the name of a reverse accessor an existing
+                # model does not declare.
+                if reference.target is not model or (
+                    declared is not None
+                    and reference.field not in declared.reverse_accessors
+                ):
                     continue
                 key = ReferenceKey(entity=entity, field=reference.field)
                 match DjangoModelsRenderer._related_name(config, entity, reference):
@@ -2870,8 +2869,6 @@ class DjangoModelsRenderer:
                             name.root.endswith("_") or "__" in name.root
                         ):
                             yield InvalidReverseAccessorName(name=name, reference=key)
-                    case _NoReverseAccessor():
-                        continue
                 by_name.setdefault(name, []).append(key)
         for name, references in by_name.items():
             if len(references) > 1 or name in bound:
@@ -2882,20 +2879,15 @@ class DjangoModelsRenderer:
     @staticmethod
     def _related_name(
         config: DjangoModels, model: type[pydantic.BaseModel], reference: Reference
-    ) -> RelatedName | FieldName | _NoReverseAccessor:
+    ) -> RelatedName | FieldName:
         """The reverse accessor of `model`'s `reference`: the related name the
-        model's options give it, else a one-to-one Reference's, see
+        model's options give it, else the one frp names, see
         `DjangoModels.reverse_accessor_of`."""
         match config.options_of(model).related_names.get(reference.field):
             case RelatedName() as related_name:
                 return related_name
             case None:
-                pass
-        match reference.cardinality:
-            case Cardinality.ONE_TO_ONE:
                 return config.reverse_accessor_of(model, reference.field)
-            case Cardinality.MANY_TO_ONE:
-                return _NoReverseAccessor()
 
     @staticmethod
     def _foreign_key(
@@ -2904,8 +2896,8 @@ class DjangoModelsRenderer:
         config: DjangoModels,
     ) -> _Declaration:
         """A foreign key to the referenced Entity's model, named without `_id`: a
-        `OneToOneField` for a one-to-one Reference, else a `ForeignKey`. Without a
-        reverse accessor, its related name is `"+"`. A generated model is named
+        `OneToOneField` for a one-to-one Reference, else a `ForeignKey`, with its
+        reverse accessor as related name. A generated model is named
         by a string, since it may be defined further down, an existing one by
         its imported class."""
         bound = config.model_of(reference.target).bound_name().root
@@ -2925,8 +2917,6 @@ class DjangoModelsRenderer:
         match DjangoModelsRenderer._related_name(config, model, reference):
             case RelatedName(root=related_name) | FieldName(root=related_name):
                 pass
-            case _NoReverseAccessor():
-                related_name = "+"
         arguments = {
             Identifier("on_delete"): ValueExpression(f"models.{deleted.value}"),
             Identifier("related_name"): PythonString(related_name).literal(),

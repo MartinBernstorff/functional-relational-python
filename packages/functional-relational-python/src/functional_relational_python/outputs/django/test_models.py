@@ -87,7 +87,7 @@ from functional_relational_python.outputs.django.models import (
     RelatedName,
     RelatedNameForNonReference,
     ReverseAccessorClash,
-    ReverseAccessorOfNonOneToOne,
+    ReverseAccessorOfNonReference,
     SetNullOnRequiredReference,
     SharedDbTable,
     SharedIndexName,
@@ -235,9 +235,18 @@ def config(
     )
 
 
+def existing_company_model() -> ExistingDjangoModel:
+    """`Company` of `crm.models`, declaring the reverse accessor of `parent`."""
+    return ExistingDjangoModel(
+        module=ModulePath("crm.models"),
+        name=Identifier("Company"),
+        reverse_accessors={FieldName("parent"): FieldName("subsidiaries")},
+    )
+
+
 def existing_company(on_delete: Mapping[ReferenceKey, OnDelete]) -> DjangoModels:
-    """`Company` has an existing Django model, `Company` of `crm.models`."""
-    return config({}, on_delete, {Company: ExistingDjangoModel.fake()})
+    """`Company` has an existing Django model, see `existing_company_model`."""
+    return config({}, on_delete, {Company: existing_company_model()})
 
 
 def generated_by(models: DjangoModels) -> FirstParty:
@@ -697,14 +706,14 @@ def test_a_django_choices_enum_that_cannot_be_imported_is_a_diagnostic() -> None
 @pytest.mark.parametrize(
     ("on_delete", "expected"),
     [
-        ({}, 'company = models.ForeignKey("Company", on_delete=models.PROTECT, related_name="+")'),
+        ({}, 'company = models.ForeignKey(\n        "Company", on_delete=models.PROTECT, related_name="department_by_company"\n    )'),
         (
             {ReferenceKey(entity=Department, field=FieldName("company_id")): OnDelete.CASCADE},
-            'company = models.ForeignKey("Company", on_delete=models.CASCADE, related_name="+")',
+            'company = models.ForeignKey(\n        "Company", on_delete=models.CASCADE, related_name="department_by_company"\n    )',
         ),
     ],
 )  # fmt: skip
-def test_a_reference_is_a_foreign_key(
+def test_a_reference_is_a_foreign_key_with_a_reverse_accessor(
     on_delete: Mapping[ReferenceKey, OnDelete], expected: str
 ) -> None:
     text = render([Company, Department], config({}, on_delete)).root
@@ -717,9 +726,36 @@ def test_an_optional_reference_is_a_nullable_foreign_key() -> None:
 
     assert (
         "    parent = models.ForeignKey(\n"
-        '        "Company", on_delete=models.PROTECT, related_name="+", null=True\n'
+        '        "Company", on_delete=models.PROTECT, related_name="company_by_parent", null=True\n'
         "    )\n"
     ) in text
+
+
+@pytest.mark.parametrize(
+    ("related_names", "expected"),
+    [
+        ({}, FieldName("department_by_company")),
+        (
+            {FieldName("company_id"): RelatedName("departments")},
+            FieldName("departments"),
+        ),
+    ],
+    ids=["generated", "related-name"],
+)
+def test_a_many_to_one_reference_has_a_reverse_accessor(
+    related_names: Mapping[FieldName, RelatedName], expected: FieldName
+) -> None:
+    options = EntityModelOptions.inherited().model_copy(
+        update={"related_names": related_names}
+    )
+    models = config({}, {}).model_copy(
+        update={"entity_model_options": {Department: options}}
+    )
+
+    text = render([Company, Department], models).root
+
+    assert f'related_name="{expected.root}"' in text
+    assert models.reverse_accessor_of(Department, FieldName("company_id")) == expected
 
 
 class CompanyDetailsId(Id[int]):
@@ -1132,7 +1168,10 @@ def test_golden_django_models() -> None:
             id = models.BigAutoField(primary_key=True)
             name = models.TextField()
             parent = models.ForeignKey(
-                "Company", on_delete=models.SET_NULL, related_name="+", null=True
+                "Company",
+                on_delete=models.SET_NULL,
+                related_name="company_by_parent",
+                null=True,
             )
 
             class Meta:
@@ -1142,7 +1181,9 @@ def test_golden_django_models() -> None:
         class Department(models.Model):
             objects: ClassVar[DepartmentManager] = DepartmentManager()
             id = models.UUIDField(primary_key=True)
-            company = models.ForeignKey("Company", on_delete=models.PROTECT, related_name="+")
+            company = models.ForeignKey(
+                "Company", on_delete=models.PROTECT, related_name="department_by_company"
+            )
             founded = models.DateField()
 
             class Meta:
@@ -1268,7 +1309,9 @@ def test_an_entity_with_an_existing_model_gets_none_and_is_imported() -> None:
         class Department(models.Model):
             objects: ClassVar[DepartmentManager] = DepartmentManager()
             id = models.UUIDField(primary_key=True)
-            company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="+")
+            company = models.ForeignKey(
+                Company, on_delete=models.PROTECT, related_name="department_by_company"
+            )
             founded = models.DateField()
 
             class Meta:
@@ -1286,8 +1329,8 @@ def test_an_existing_model_of_a_non_entity_is_a_diagnostic() -> None:
 
 @pytest.mark.parametrize("module", ["app.models", "app.queries"])
 def test_an_existing_model_in_a_generated_module_is_a_diagnostic(module: str) -> None:
-    existing = ExistingDjangoModel(
-        module=ModulePath(module), name=Identifier("Firm"), reverse_accessors={}
+    existing = existing_company_model().model_copy(
+        update={"module": ModulePath(module)}
     )
 
     assert diagnostics([Company], config({}, {}, {Company: existing})) == (
@@ -1317,7 +1360,7 @@ def test_reverse_accessors_an_existing_model_declares_amiss_are_diagnostics() ->
     )
 
     assert diagnostics([Company, CompanyDetails], models) == (
-        ReverseAccessorOfNonOneToOne(entity=CompanyDetails, field=FieldName("id")),
+        ReverseAccessorOfNonReference(entity=CompanyDetails, field=FieldName("id")),
         UndeclaredReverseAccessor(
             entity=CompanyDetails, field=FieldName("successor_id")
         ),
@@ -1369,6 +1412,15 @@ def test_reverse_accessors_of_an_existing_model_are_checked_as_declared(
         case Err(error):
             reported = error.diagnostics
     assert reported == expected
+
+
+def test_an_existing_model_may_declare_no_many_to_one_reverse_accessor() -> None:
+    """Only a View reversing it needs it, which the Django queries report."""
+    models = config({}, {}, {Company: ExistingDjangoModel.fake()})
+
+    text = render([Company, Department], models).root
+
+    assert 'related_name="department_by_company"' in text
 
 
 def test_on_delete_for_a_reference_of_an_existing_model_is_a_diagnostic() -> None:
@@ -1469,7 +1521,10 @@ def test_generated_models_referencing_an_existing_model_make_migrations(
                 id = models.BigIntegerField(primary_key=True)
                 name = models.TextField()
                 parent = models.ForeignKey(
-                    "self", on_delete=models.PROTECT, related_name="+", null=True
+                    "self",
+                    on_delete=models.PROTECT,
+                    related_name="subsidiaries",
+                    null=True,
                 )
             """
         ),
@@ -1500,7 +1555,7 @@ def test_generated_models_referencing_an_existing_model_make_migrations(
                                 models.ForeignKey(
                                     null=True,
                                     on_delete=models.PROTECT,
-                                    related_name="+",
+                                    related_name="subsidiaries",
                                     to="crm.company",
                                 ),
                             ),
@@ -1802,19 +1857,26 @@ class BadNames(pydantic.BaseModel):
 
 
 def test_a_field_name_django_cannot_use_is_a_diagnostic() -> None:
+    """`owner__id`'s reverse accessor ends in `_` too."""
     assert set(diagnostics([Parent, BadNames], config({}, {}))) == {
-        InvalidDjangoFieldName(
-            entity=BadNames, field=FieldName(field), name=FieldName(name)
-        )
-        for field, name in (
-            ("pk", "pk"),
-            ("name_", "name_"),
-            ("first__name", "first__name"),
-            ("Meta", "Meta"),
-            ("models", "models"),
-            ("from_id", "from"),
-            ("owner__id", "owner_"),
-        )
+        *(
+            InvalidDjangoFieldName(
+                entity=BadNames, field=FieldName(field), name=FieldName(name)
+            )
+            for field, name in (
+                ("pk", "pk"),
+                ("name_", "name_"),
+                ("first__name", "first__name"),
+                ("Meta", "Meta"),
+                ("models", "models"),
+                ("from_id", "from"),
+                ("owner__id", "owner_"),
+            )
+        ),
+        InvalidReverseAccessorName(
+            name=FieldName("bad_names_by_owner_"),
+            reference=ReferenceKey(entity=BadNames, field=FieldName("owner__id")),
+        ),
     }
 
 
@@ -1937,7 +1999,7 @@ def test_golden_django_model_with_options() -> None:
             id = models.BigIntegerField(primary_key=True)
             name = models.TextField()
             parent = models.ForeignKey(
-                "Company", on_delete=models.PROTECT, related_name="+", null=True
+                "Company", on_delete=models.PROTECT, related_name="company_by_parent", null=True
             )
 
             class Meta:
@@ -1947,7 +2009,9 @@ def test_golden_django_model_with_options() -> None:
         class Department(models.Model):
             objects: ClassVar[DepartmentManager] = DepartmentManager()
             id = models.UUIDField(primary_key=True)
-            company = models.ForeignKey("Company", on_delete=models.PROTECT, related_name="+")
+            company = models.ForeignKey(
+                "Company", on_delete=models.PROTECT, related_name="department_by_company"
+            )
             founded = models.DateField()
 
             class Meta:
@@ -1970,12 +2034,15 @@ def test_golden_django_model_with_options() -> None:
             previous_employer = models.ForeignKey(
                 "Company",
                 on_delete=models.PROTECT,
-                related_name="+",
+                related_name="person_by_previous_employer",
                 null=True,
                 db_constraint=False,
             )
             department = models.ForeignKey(
-                "Department", on_delete=models.PROTECT, related_name="+", db_constraint=False
+                "Department",
+                on_delete=models.PROTECT,
+                related_name="person_by_department",
+                db_constraint=False,
             )
             heads = models.OneToOneField(
                 "Department",
@@ -2239,7 +2306,7 @@ def test_options_naming_what_is_not_there_are_diagnostics() -> None:
             "related_names": {FieldName("founded"): RelatedName.fake()},
         }
     )
-    models = config({}, {}, {Company: ExistingDjangoModel.fake()}).model_copy(
+    models = config({}, {}, {Company: existing_company_model()}).model_copy(
         update={
             "entity_model_options": {
                 Department: misplaced,
