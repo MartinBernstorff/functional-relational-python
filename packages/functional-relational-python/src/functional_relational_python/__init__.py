@@ -21,6 +21,7 @@ from functional_relational_python.entity_graph.id import (
     OneToOne,
     OneToOneMarker,
 )
+from functional_relational_python.entity_graph.sorted_sequence import SortedSequence
 from functional_relational_python.outputs.python.plan import WithoutMappings
 from functional_relational_python.outputs.python.symbols import ModulePath
 from functional_relational_python.pipeline.steps import Query, from_
@@ -45,6 +46,7 @@ __all__ = [
     "OneToOne",
     "OneToOneMarker",
     "Query",
+    "SortedSequence",
     "Union",
     "UnionName",
     "View",

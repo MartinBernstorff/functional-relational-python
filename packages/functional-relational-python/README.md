@@ -197,8 +197,8 @@ All in `functional_relational_python.steps`. A field is named with
 | `require(fields)` | Narrows `X \| None` to `X`. A row whose field is `None` is an error, not dropped. |
 | `resolve(fields, *then)` | Replaces each Reference with the Entity it points to, `department_id` becoming `department`. `then` is a pipeline applied to that Entity. `fields` is a `select` or `references()`. |
 | `flatten(fields)` | Replaces a resolved field with the fields of its Entity. |
-| `reverse(entity, *then)` | Adds a field holding the `entity` whose one-to-one Reference points to this row, or `None`. |
-| `reverse_via(entity, via, *then)` | `reverse`, for an `entity` with several one-to-one References to this row. |
+| `reverse(entity, *then, name=None, via_field=ViaField.OMIT)` | Adds a field holding what references this row by `entity`'s one Reference to it: for a one-to-one Reference the `entity` or `None`, for a many-to-one Reference every such `entity`, in a `SortedSequence` by `id`. The Reference back to this row is dropped unless `via_field=ViaField.KEEP`. |
+| `reverse_via(entity, via, *then, ...)` | `reverse`, for an `entity` with several References to this row. |
 | `add(name, annotation, default)` | Declares a field with no value from the from_model, e.g. a union tag. A View's added field needs a default. |
 | `default(fields, value)` | Sets the default of fields in the generated model. |
 | `retype(fields, transform)` / `retype_to(fields, annotation)` | Changes field types. WriteModels only. |

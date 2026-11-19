@@ -54,6 +54,16 @@ class InvalidUnionName(pydantic.BaseModel, Diagnostic, frozen=True):
 class CandidateName(pydantic.RootModel[str], frozen=True):
     """A name that was derived for something, before it is known to be valid."""
 
+    def plural(self) -> CandidateName:
+        """This name, in snake_case, in the plural: `category` is `categories`,
+        `box` is `boxes`, `ad` is `ads`, and `day` is `days`."""
+        name = self.root
+        if re.search(r"[^aeiou_]y$", name):
+            return CandidateName(f"{name[:-1]}ies")
+        if re.search(r"(s|x|z|ch|sh)$", name):
+            return CandidateName(f"{name}es")
+        return CandidateName(f"{name}s")
+
 
 class InvalidNestedModelName(pydantic.BaseModel, Diagnostic, frozen=True):
     """The model of a resolved field with a nested pipeline would get a name that

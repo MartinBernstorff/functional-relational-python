@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 import types
-from collections.abc import Generator, Iterable, Sequence
+from collections.abc import Generator, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Annotated, ClassVar, Literal
 
@@ -17,9 +17,11 @@ from safe_result import Err, Ok
 
 from functional_relational_python.compiler import compiler, test_compiler
 from functional_relational_python.compiler.test_compiler import (
+    Collections,
     Depth,
     Score,
     Stage,
+    Start,
     pipelines,
 )
 from functional_relational_python.entity_graph.entity_graph import (
@@ -31,19 +33,24 @@ from functional_relational_python.entity_graph.entity_graph import (
 from functional_relational_python.entity_graph.id import (
     Id,
     IdBase,
+    IdValue,
     OneToOne,
     OneToOneMarker,
 )
+from functional_relational_python.entity_graph.sorted_sequence import SortedSequence
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.python import test_symbols
 from functional_relational_python.outputs.python.mappings import (
+    ComprehensionVariables,
     Expression,
     Indent,
     MappingsRenderer,
 )
 from functional_relational_python.outputs.python.models import ModelsRenderer
 from functional_relational_python.outputs.python.plan import (
+    LookupParameter,
     ModuleLayout,
+    ParameterValues,
     PythonLayout,
     PythonPlan,
 )
@@ -71,6 +78,7 @@ from functional_relational_python.support.generated_files import (
     GeneratedFile,
     GeneratedFiles,
 )
+from functional_relational_python.support.identifier import Identifier
 
 
 class Text(pydantic.RootModel[str], frozen=True):
@@ -450,7 +458,9 @@ def reversing_views() -> list[View]:
         View(
             name=ViewName("EmployeeProfile"),
             query=steps.from_(
-                Employee, steps.pick([FieldName("id")]), steps.reverse(Profile)
+                Employee,
+                steps.pick([FieldName("id")]),
+                steps.reverse(Profile, via_field=ir.ViaField.KEEP),
             ),
         ),
         View(
@@ -565,6 +575,467 @@ def employee_bio(
     )
 """
     )
+
+
+def nesting_collection_views() -> list[View]:
+    """Views with a nested pipeline on a reversed many-to-one Reference: a
+    collection in a collection, a resolve in a collection, and an Entity the
+    elements require but read nothing from."""
+    return [
+        View(
+            name=ViewName("CompanyOrganisation"),
+            query=steps.from_(
+                Company,
+                steps.pick([FieldName("id")]),
+                steps.reverse(
+                    Department,
+                    steps.pick([FieldName("name"), FieldName("id")]),
+                    steps.reverse(Employee, steps.pick([FieldName("name")])),
+                ),
+            ),
+        ),
+        View(
+            name=ViewName("DepartmentMentors"),
+            query=steps.from_(
+                Department,
+                steps.pick([FieldName("id")]),
+                steps.reverse(
+                    Employee,
+                    steps.pick([FieldName("mentor_id")]),
+                    steps.resolve(
+                        named(FieldName("mentor_id")),
+                        steps.pick([FieldName("name")]),
+                    ),
+                ),
+            ),
+        ),
+        View(
+            name=ViewName("DepartmentMentored"),
+            query=steps.from_(
+                Department,
+                steps.pick([FieldName("id")]),
+                steps.reverse(
+                    Employee,
+                    steps.pick([FieldName("mentor_id")]),
+                    steps.resolve(named(FieldName("mentor_id")), steps.pick([])),
+                    steps.require(FieldName("mentor")),
+                ),
+            ),
+        ),
+    ]
+
+
+def collecting_views() -> list[View]:
+    """Views reversing many-to-one References into SortedSequences: at the top
+    level, and inside a resolve's nested pipeline."""
+    return [
+        View(
+            name=ViewName("DepartmentStaff"),
+            query=steps.from_(
+                Department,
+                steps.pick([FieldName("id")]),
+                steps.reverse(Employee, via_field=ir.ViaField.KEEP),
+            ),
+        ),
+        View(
+            name=ViewName("EmployeeColleagues"),
+            query=steps.from_(
+                Employee,
+                steps.pick([FieldName("department_id")]),
+                steps.resolve(
+                    named(FieldName("department_id")),
+                    steps.pick([FieldName("id")]),
+                    steps.reverse(Employee, name=FieldName("colleagues")),
+                ),
+            ),
+        ),
+    ]
+
+
+def test_golden_mapping_functions_for_reversed_many_to_one_references() -> None:
+    plan = plan_of(compile_all(collecting_views()), Generated.layout())
+
+    assert Generated.text(
+        MappingsRenderer.files(plan, first_party=Generated.first_party())
+    ) == FileText(
+        """\
+# Generated by functional-relational-python. Do not edit.
+# Regenerate with `frp generate`; `frp check` fails when this is stale.
+# Maps each View's from_model to its View model.
+
+import collections.abc
+import typing
+
+import frp_generated_models
+import functional_relational_python.entity_graph.sorted_sequence
+import functional_relational_python.outputs.python.test_mappings
+
+
+def department_staff(
+    source: functional_relational_python.outputs.python.test_mappings.Department,
+    *,
+    employee_by_department_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.DepartmentId,
+        functional_relational_python.entity_graph.sorted_sequence.SortedSequence[
+            functional_relational_python.outputs.python.test_mappings.Employee,
+            typing.Literal["id"],
+        ],
+    ],
+) -> frp_generated_models.DepartmentStaff:
+    return frp_generated_models.DepartmentStaff(
+        id=source.id,
+        employees=employee_by_department_id.get(
+            source.id,
+            functional_relational_python.entity_graph.sorted_sequence.SortedSequence[
+                functional_relational_python.outputs.python.test_mappings.Employee,
+                typing.Literal["id"],
+            ](),
+        ),
+    )
+
+
+def employee_colleagues(
+    source: functional_relational_python.outputs.python.test_mappings.Employee,
+    *,
+    department_by_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.DepartmentId,
+        functional_relational_python.outputs.python.test_mappings.Department,
+    ],
+    employee_by_department_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.DepartmentId,
+        functional_relational_python.entity_graph.sorted_sequence.SortedSequence[
+            functional_relational_python.outputs.python.test_mappings.Employee,
+            typing.Literal["id"],
+        ],
+    ],
+) -> frp_generated_models.EmployeeColleagues:
+    return frp_generated_models.EmployeeColleagues(
+        department=frp_generated_models.EmployeeColleaguesDepartment(
+            id=department_by_id[source.department_id].id,
+            colleagues=functional_relational_python.entity_graph.sorted_sequence.SortedSequence(
+                frp_generated_models.EmployeeColleaguesDepartmentColleagues(
+                    id=_employee.id,
+                    name=_employee.name,
+                    mentor_id=_employee.mentor_id,
+                )
+                for _employee in employee_by_department_id.get(
+                    department_by_id[source.department_id].id, ()
+                )
+            ),
+        ),
+    )
+"""
+    )
+
+
+def test_golden_models_of_reversed_many_to_one_references() -> None:
+    plan = plan_of(compile_all(collecting_views()), Generated.layout())
+
+    assert Generated.text(
+        ModelsRenderer.files(plan, first_party=FirstParty.fake())
+    ) == FileText(
+        """\
+# Generated by functional-relational-python. Do not edit.
+# Regenerate with `frp generate`; `frp check` fails when this is stale.
+
+from typing import Literal
+
+from pydantic import BaseModel
+
+from functional_relational_python.entity_graph.sorted_sequence import SortedSequence
+from functional_relational_python.outputs.python.test_mappings import (
+    DepartmentId,
+    Employee,
+    EmployeeId,
+    Text,
+)
+
+
+class DepartmentStaff(BaseModel, frozen=True):
+    id: DepartmentId
+    employees: SortedSequence[Employee, Literal["id"]]
+
+
+class EmployeeColleaguesDepartmentColleagues(BaseModel, frozen=True):
+    id: EmployeeId
+    name: Text
+    mentor_id: EmployeeId | None
+
+
+class EmployeeColleaguesDepartment(BaseModel, frozen=True):
+    id: DepartmentId
+    colleagues: SortedSequence[EmployeeColleaguesDepartmentColleagues, Literal["id"]]
+
+
+class EmployeeColleagues(BaseModel, frozen=True):
+    department: EmployeeColleaguesDepartment
+"""
+    )
+
+
+def test_golden_mapping_functions_for_nested_pipelines_on_collections() -> None:
+    plan = plan_of(compile_all(nesting_collection_views()), Generated.layout())
+
+    assert Generated.text(
+        MappingsRenderer.files(plan, first_party=Generated.first_party())
+    ) == FileText(
+        '''\
+# Generated by functional-relational-python. Do not edit.
+# Regenerate with `frp generate`; `frp check` fails when this is stale.
+# Maps each View's from_model to its View model.
+
+import collections.abc
+import typing
+
+import frp_generated_models
+import functional_relational_python.entity_graph.sorted_sequence
+import functional_relational_python.outputs.python.test_mappings
+
+
+def _required[T](value: T | None, of: object, what: str) -> T:
+    """`value`, which a View requires: `what` of `of`."""
+    if value is None:
+        key = getattr(of, "id", of)
+        msg = f"{what} is required, but there is none for {type(of).__name__} {key!r}"
+        raise ValueError(msg)
+    return value
+
+
+def company_organisation(
+    source: functional_relational_python.outputs.python.test_mappings.Company,
+    *,
+    department_by_company_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.CompanyId,
+        functional_relational_python.entity_graph.sorted_sequence.SortedSequence[
+            functional_relational_python.outputs.python.test_mappings.Department,
+            typing.Literal["id"],
+        ],
+    ],
+    employee_by_department_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.DepartmentId,
+        functional_relational_python.entity_graph.sorted_sequence.SortedSequence[
+            functional_relational_python.outputs.python.test_mappings.Employee,
+            typing.Literal["id"],
+        ],
+    ],
+) -> frp_generated_models.CompanyOrganisation:
+    return frp_generated_models.CompanyOrganisation(
+        id=source.id,
+        departments=functional_relational_python.entity_graph.sorted_sequence.SortedSequence(
+            frp_generated_models.CompanyOrganisationDepartments(
+                id=_department.id,
+                name=_department.name,
+                employees=functional_relational_python.entity_graph.sorted_sequence.SortedSequence(
+                    frp_generated_models.CompanyOrganisationDepartmentsEmployees(
+                        name=_employee.name,
+                    )
+                    for _employee in employee_by_department_id.get(_department.id, ())
+                ),
+            )
+            for _department in department_by_company_id.get(source.id, ())
+        ),
+    )
+
+
+def department_mentors(
+    source: functional_relational_python.outputs.python.test_mappings.Department,
+    *,
+    employee_by_department_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.DepartmentId,
+        functional_relational_python.entity_graph.sorted_sequence.SortedSequence[
+            functional_relational_python.outputs.python.test_mappings.Employee,
+            typing.Literal["id"],
+        ],
+    ],
+    employee_by_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.EmployeeId,
+        functional_relational_python.outputs.python.test_mappings.Employee,
+    ],
+) -> frp_generated_models.DepartmentMentors:
+    return frp_generated_models.DepartmentMentors(
+        id=source.id,
+        employees=functional_relational_python.entity_graph.sorted_sequence.SortedSequence(
+            frp_generated_models.DepartmentMentorsEmployees(
+                mentor=(
+                    None
+                    if _employee.mentor_id is None
+                    else frp_generated_models.DepartmentMentorsEmployeesMentor(
+                        name=employee_by_id[_employee.mentor_id].name,
+                    )
+                ),
+            )
+            for _employee in employee_by_department_id.get(source.id, ())
+        ),
+    )
+
+
+def department_mentored(
+    source: functional_relational_python.outputs.python.test_mappings.Department,
+    *,
+    employee_by_department_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.DepartmentId,
+        functional_relational_python.entity_graph.sorted_sequence.SortedSequence[
+            functional_relational_python.outputs.python.test_mappings.Employee,
+            typing.Literal["id"],
+        ],
+    ],
+    employee_by_id: collections.abc.Mapping[
+        functional_relational_python.outputs.python.test_mappings.EmployeeId,
+        functional_relational_python.outputs.python.test_mappings.Employee,
+    ],
+) -> frp_generated_models.DepartmentMentored:
+    for _employee in employee_by_department_id.get(source.id, ()):
+        _ = employee_by_id[_required(_employee.mentor_id, _employee, "mentor_id")]
+    return frp_generated_models.DepartmentMentored(
+        id=source.id,
+        employees=functional_relational_python.entity_graph.sorted_sequence.SortedSequence(
+            frp_generated_models.DepartmentMentoredEmployees(
+                mentor=frp_generated_models.DepartmentMentoredEmployeesMentor(),
+            )
+            for _employee in employee_by_department_id.get(source.id, ())
+        ),
+    )
+'''
+    )
+
+
+def test_golden_models_of_nested_pipelines_on_collections() -> None:
+    plan = plan_of(compile_all(nesting_collection_views()), Generated.layout())
+
+    assert Generated.text(
+        ModelsRenderer.files(plan, first_party=FirstParty.fake())
+    ) == FileText(
+        """\
+# Generated by functional-relational-python. Do not edit.
+# Regenerate with `frp generate`; `frp check` fails when this is stale.
+
+from typing import Literal
+
+from pydantic import BaseModel
+
+from functional_relational_python.entity_graph.sorted_sequence import SortedSequence
+from functional_relational_python.outputs.python.test_mappings import (
+    CompanyId,
+    DepartmentId,
+    Text,
+)
+
+
+class CompanyOrganisationDepartmentsEmployees(BaseModel, frozen=True):
+    name: Text
+
+
+class CompanyOrganisationDepartments(BaseModel, frozen=True):
+    id: DepartmentId
+    name: Text
+    employees: SortedSequence[CompanyOrganisationDepartmentsEmployees, Literal["id"]]
+
+
+class CompanyOrganisation(BaseModel, frozen=True):
+    id: CompanyId
+    departments: SortedSequence[CompanyOrganisationDepartments, Literal["id"]]
+
+
+class DepartmentMentorsEmployeesMentor(BaseModel, frozen=True):
+    name: Text
+
+
+class DepartmentMentorsEmployees(BaseModel, frozen=True):
+    mentor: DepartmentMentorsEmployeesMentor | None
+
+
+class DepartmentMentors(BaseModel, frozen=True):
+    id: DepartmentId
+    employees: SortedSequence[DepartmentMentorsEmployees, Literal["id"]]
+
+
+class DepartmentMentoredEmployeesMentor(BaseModel, frozen=True):
+    pass
+
+
+class DepartmentMentoredEmployees(BaseModel, frozen=True):
+    mentor: DepartmentMentoredEmployeesMentor
+
+
+class DepartmentMentored(BaseModel, frozen=True):
+    id: DepartmentId
+    employees: SortedSequence[DepartmentMentoredEmployees, Literal["id"]]
+"""
+    )
+
+
+def test_a_mapping_function_raises_for_an_entity_an_element_requires() -> None:
+    department = Department(
+        id=DepartmentId(1), name=Text("Sales"), company_id=CompanyId(1)
+    )
+    unmentored = Employee(
+        id=EmployeeId(1), name=Text("Ann"), department_id=department.id, mentor_id=None
+    )
+    plan = plan_of(compile_all(nesting_collection_views()), Generated.layout())
+    message = "mentor_id is required, but there is none for Employee EmployeeId(root=1)"
+
+    with (
+        mapping_functions(plan) as module,
+        pytest.raises(ValueError, match=f"^{re.escape(message)}$"),
+    ):
+        module.department_mentored(
+            department,
+            employee_by_department_id={department.id: SortedSequence((unmentored,))},
+            employee_by_id={},
+        )
+
+
+@pytest.mark.parametrize(
+    ("bound", "variable"),
+    [
+        ((), "_employee"),
+        (("_required",), "_employee"),
+        (("_employee",), "_employee_2"),
+        (("_employee", "_employee_2"), "_employee_3"),
+    ],
+    ids=["free", "other-bound", "bound", "numbered-bound"],
+)
+def test_a_comprehension_variable_shadows_no_bound_name(
+    bound: tuple[str, ...], variable: str
+) -> None:
+    variables = ComprehensionVariables(bound=tuple(map(Identifier, bound)))
+
+    assert variables.variable(Employee) == Identifier(variable)
+
+
+def test_a_mapping_function_gives_an_empty_sorted_sequence_for_a_missing_id() -> None:
+    department = Department(
+        id=DepartmentId(1), name=Text("Sales"), company_id=CompanyId(1)
+    )
+    plan = plan_of(compile_all(collecting_views()), Generated.layout())
+
+    with mapping_functions(plan) as module:
+        mapped = module.department_staff(department, employee_by_department_id={})
+
+    assert mapped.employees == SortedSequence[Employee, Literal["id"]]()
+
+
+def test_a_mapping_function_keeps_the_order_its_caller_gives() -> None:
+    department = Department(
+        id=DepartmentId(1), name=Text("Sales"), company_id=CompanyId(1)
+    )
+    staff = tuple(
+        Employee(
+            id=EmployeeId(index),
+            name=Text("Ann"),
+            department_id=department.id,
+            mentor_id=None,
+        )
+        for index in (2, 1)
+    )
+    plan = plan_of(compile_all(collecting_views()), Generated.layout())
+
+    with mapping_functions(plan) as module:
+        mapped = module.department_staff(
+            department, employee_by_department_id={department.id: SortedSequence(staff)}
+        )
+
+    assert mapped.employees == staff
 
 
 def test_a_mapping_function_fills_a_defaulted_field_from_the_from_model() -> None:
@@ -923,6 +1394,8 @@ def type_checked_plan() -> PythonPlan:
         [
             *golden_views(),
             *reversing_views(),
+            *collecting_views(),
+            *nesting_collection_views(),
             tagged_company(),
             *filtered_views(),
             *required_views(),
@@ -1194,7 +1667,14 @@ def differential_cases(draw: st.DrawFn) -> DifferentialCase:
                     from_model,
                     steps.pipeline(
                         *map(steps.where, filters),
-                        draw(pipelines(entity_graph(), from_model, Depth(2))),
+                        draw(
+                            pipelines(
+                                entity_graph(),
+                                Start.whole(from_model),
+                                Depth(2),
+                                Collections.DRAWN,
+                            )
+                        ),
                     ),
                 ),
             )
@@ -1206,17 +1686,58 @@ class Executed:
     """Generated models and mapping functions, run as modules."""
 
     @staticmethod
+    def argument(
+        parameter: LookupParameter, stored: Iterable[pydantic.BaseModel]
+    ) -> Mapping[
+        IdValue, pydantic.BaseModel | SortedSequence[pydantic.BaseModel, Literal["id"]]
+    ]:
+        """What a caller passes `parameter`, from the `stored` Entities: per ID
+        the Entity holding it, or every Entity holding it, sorted by the root of
+        its `id`, as the function trusts its caller to."""
+        holding = [entity for entity in stored if isinstance(entity, parameter.entity)]
+        match parameter.values:
+            case ParameterValues.ENTITY:
+                return {
+                    getattr(entity, parameter.keyed_by.root): entity
+                    for entity in holding
+                }
+            case ParameterValues.SORTED_SEQUENCE:
+                grouped: dict[IdValue, list[pydantic.BaseModel]] = {}
+                for entity in sorted(
+                    holding, key=lambda entity: vars(entity)["id"].root
+                ):
+                    grouped.setdefault(
+                        getattr(entity, parameter.keyed_by.root), []
+                    ).append(entity)
+                return {
+                    key: SortedSequence[pydantic.BaseModel, Literal["id"]](entities)
+                    for key, entities in grouped.items()
+                }
+
+    @staticmethod
     def row_of(model: pydantic.BaseModel) -> engine.ViewRow:
-        """A View model as a ViewRow, nested View models included."""
+        """A View model as a ViewRow, nested View models included, also those in
+        a SortedSequence."""
         return engine.ViewRow(
             {
-                FieldName(name): Executed.row_of(value)
-                if isinstance(value, pydantic.BaseModel)
-                and type(value).__module__ == Generated.models.root
-                else value
+                FieldName(name): Executed.value_of(value)
                 for name, value in vars(model).items()
             }
         )
+
+    @staticmethod
+    def value_of(value: engine.FieldValue) -> engine.FieldValue:
+        """A View model's field value as a ViewRow's: a nested View model as a
+        ViewRow, and a SortedSequence of them as a SortedSequence of ViewRows."""
+        match value:
+            case pydantic.BaseModel() if (
+                type(value).__module__ == Generated.models.root
+            ):
+                return Executed.row_of(value)
+            case SortedSequence():
+                return SortedSequence(map(Executed.value_of, value))
+            case _:
+                return value
 
     @staticmethod
     def models(text: FileText) -> types.ModuleType:
@@ -1297,11 +1818,7 @@ def test_mapping_functions_give_the_same_view_results_as_the_engine(
     with mapping_functions(plan) as module:
         for function in plan.functions[Generated.mappings]:
             lookups = {
-                parameter.name.root: {
-                    getattr(entity, parameter.keyed_by.root): entity
-                    for entity in case.entities
-                    if isinstance(entity, parameter.entity)
-                }
+                parameter.name.root: Executed.argument(parameter, case.entities)
                 for parameter in function.lookups
             }
             from_model = view_from_model(compiled, function.view)
@@ -1327,6 +1844,11 @@ def test_mapping_functions_give_the_same_view_results_as_the_engine(
                 for parameter in function.lookups
             )
             event(f"reversing view has rows: {reversing and bool(mapped_rows)}")
+            collecting = any(
+                parameter.values is ParameterValues.SORTED_SEQUENCE
+                for parameter in function.lookups
+            )
+            event(f"collecting view has rows: {collecting and bool(mapped_rows)}")
             # Catches a strategy whose filters keep every row, or none.
             event(f"filter keeps some rows: {0 < len(mapped_rows) < len(mapped)}")
             assert mapped_rows == engine_rows
@@ -1699,10 +2221,17 @@ def employee_profiled(
 ) -> frp_generated_models.EmployeeProfiled:
     return frp_generated_models.EmployeeProfiled(
         id=source.id,
-        profile=_required(
-            profile_by_employee_id.get(source.id),
-            source,
-            "a Profile by employee_id",
+        profile=frp_generated_models.EmployeeProfiledProfile(
+            id=_required(
+                profile_by_employee_id.get(source.id),
+                source,
+                "a Profile by employee_id",
+            ).id,
+            bio=_required(
+                profile_by_employee_id.get(source.id),
+                source,
+                "a Profile by employee_id",
+            ).bio,
         ),
     )
 
@@ -1924,7 +2453,14 @@ def required_differential_cases(draw: st.DrawFn) -> DifferentialCase:
                     from_model,
                     steps.pipeline(
                         *map(steps.where, filters),
-                        draw(pipelines(entity_graph(), from_model, Depth(2))),
+                        draw(
+                            pipelines(
+                                entity_graph(),
+                                Start.whole(from_model),
+                                Depth(2),
+                                Collections.DRAWN,
+                            )
+                        ),
                         steps.require(steps.select(selected)),
                     ),
                 ),
@@ -1973,11 +2509,7 @@ def test_mapping_functions_raise_where_the_engine_reports_an_unmet_requirement(
     with mapping_functions(plan) as module:
         for function in plan.functions[Generated.mappings]:
             lookups = {
-                parameter.name.root: {
-                    getattr(entity, parameter.keyed_by.root): entity
-                    for entity in case.entities
-                    if isinstance(entity, parameter.entity)
-                }
+                parameter.name.root: Executed.argument(parameter, case.entities)
                 for parameter in function.lookups
             }
             from_model = view_from_model(compiled, function.view)
@@ -2224,7 +2756,14 @@ def union_cases(draw: st.DrawFn) -> DifferentialCase:
                     from_model,
                     steps.pipeline(
                         *map(steps.where, filters),
-                        draw(pipelines(entity_graph(), from_model, Depth(1))),
+                        draw(
+                            pipelines(
+                                entity_graph(),
+                                Start.whole(from_model),
+                                Depth(1),
+                                Collections.DRAWN,
+                            )
+                        ),
                         steps.add(FieldName("variant_tag"), tags[index], f"v{index}"),
                     ),
                 ),
@@ -2250,11 +2789,7 @@ def test_union_mapping_functions_give_the_same_results_as_the_engine(
     (function,) = plan.union_functions[Generated.mappings]
     (compiled_union,) = compiled.unions
     lookups = {
-        parameter.name.root: {
-            getattr(entity, parameter.keyed_by.root): entity
-            for entity in case.entities
-            if isinstance(entity, parameter.entity)
-        }
+        parameter.name.root: Executed.argument(parameter, case.entities)
         for parameter in function.lookups
     }
 

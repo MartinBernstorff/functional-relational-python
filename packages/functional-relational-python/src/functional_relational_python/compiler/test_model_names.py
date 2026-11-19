@@ -281,3 +281,21 @@ def test_a_name_diagnostic_message_names_the_offending_values(
     diagnostic: diagnostics.CompileDiagnostic, message: str
 ) -> None:
     assert diagnostic.describe() == DiagnosticMessage(message)
+
+
+@pytest.mark.parametrize(
+    ("singular", "plural"),
+    [
+        ("ad", "ads"),
+        ("category", "categories"),
+        ("day", "days"),
+        ("box", "boxes"),
+        ("status", "statuses"),
+        ("quiz", "quizes"),
+        ("batch", "batches"),
+        ("wish", "wishes"),
+        ("ad_category", "ad_categories"),
+    ],
+)
+def test_the_plural_of_a_name(singular: str, plural: str) -> None:
+    assert CandidateName(singular).plural() == CandidateName(plural)

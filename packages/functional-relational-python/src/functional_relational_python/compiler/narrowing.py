@@ -148,8 +148,8 @@ def required(
         case Optionality.OPTIONAL:
             pass
     match field:
-        case ir.NestedField(value=lookup):
-            return field.model_copy(update={"value": lookup.required()})
+        case ir.NestedField():
+            return field.required()
         case ir.Field(value=value):
             pass
     value_required: ir.Value
@@ -165,4 +165,13 @@ def required(
             narrowed = field.narrowed(value_required.annotation())
         case ir.Added():
             return diagnostics.RequireAddedField(view=view, field=field.name)
+        case ir.CollectionLookup():
+            # A SortedSequence of Entities is never `None`, so its type is
+            # required, which is reported above.
+            return diagnostics.RequireOnRequiredField(
+                view=view,
+                from_model=from_model,
+                field=field.name,
+                annotation=annotation,
+            )
     return narrowed.model_copy(update={"value": value_required})

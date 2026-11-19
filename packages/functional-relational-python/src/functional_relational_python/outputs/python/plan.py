@@ -27,13 +27,16 @@ from functional_relational_python.compiler import compiler, narrowing
 from functional_relational_python.compiler.model_names import ModelNames, PascalCase
 from functional_relational_python.entity_graph.entity_graph import (
     AnnotationMetadata,
+    EntityNode,
     FieldName,
     Optionality,
 )
 from functional_relational_python.entity_graph.id import OneToOneMarker
+from functional_relational_python.entity_graph.sorted_sequence import SortedSequence
 from functional_relational_python.outputs.python.symbols import (
     AnnotationText,
     ModulePath,
+    PythonString,
     Symbol,
     TypeExpression,
     ValueExpression,
@@ -431,10 +434,11 @@ class ModelPlan(pydantic.BaseModel, frozen=True):
                 pass
             case ir.NestedField(value=found):
                 value = found
-        required = any(ModelPlan.required_lookup(lookup) for lookup in value.lookups())
         match value:
             case ir.RequiredField() | ir.Lifted(field=ir.RequiredField()):
                 return True
+            case ir.CollectionLookup():
+                return False
             case (
                 ir.SubjectField()
                 | ir.Added()
@@ -443,7 +447,9 @@ class ModelPlan(pydantic.BaseModel, frozen=True):
                 | ir.ReverseLookup()
                 | ir.ChainedLookup()
             ):
-                return required
+                return any(
+                    ModelPlan.required_lookup(lookup) for lookup in value.lookups()
+                )
 
     @staticmethod
     def required_lookup(lookup: ir.EntityLookup) -> bool:
@@ -509,16 +515,85 @@ class UnionPlan(pydantic.BaseModel, frozen=True):
         )
 
 
+class ParameterValues(enum.Enum):
+    """What a lookup parameter maps each ID to."""
+
+    ENTITY = "entity"
+    """The one Entity holding the ID."""
+    SORTED_SEQUENCE = "sorted sequence"
+    """Every Entity holding the ID, in a SortedSequence ascending by `id`."""
+
+    @staticmethod
+    def of(lookup: ir.Finder) -> ParameterValues:
+        """What the parameter of `lookup` maps each ID to."""
+        match lookup:
+            case ir.Lookup() | ir.ReverseLookup():
+                return ParameterValues.ENTITY
+            case ir.CollectionLookup():
+                return ParameterValues.SORTED_SEQUENCE
+
+
+class SortedSequenceAnnotation:
+    """Writes `SortedSequence[<element>, Literal["id"]]`: a SortedSequence of
+    `element`, ascending by the `id` of the Entity each is built from."""
+
+    sequence: typing.ClassVar[Symbol] = Symbol(
+        module=ModulePath(SortedSequence.__module__),
+        qualname=(Identifier(SortedSequence.__qualname__),),
+    )
+    literal: typing.ClassVar[Symbol] = Symbol(
+        module=ModulePath("typing"), qualname=(Identifier("Literal"),)
+    )
+    symbols: typing.ClassVar[frozenset[Symbol]] = frozenset({sequence, literal})
+    """Every Symbol the annotation refers to."""
+
+    @staticmethod
+    def of(
+        element: TypeExpression, written: Callable[[Symbol], TypeExpression]
+    ) -> TypeExpression:
+        """The annotation of a SortedSequence of `element`, each Symbol in it
+        as `written` writes it."""
+        sequence = written(SortedSequenceAnnotation.sequence).root
+        literal = written(SortedSequenceAnnotation.literal).root
+        key = PythonString(EntityNode.primary_key.root).literal().root
+        return TypeExpression(f"{sequence}[{element.root}, {literal}[{key}]]")
+
+
 class LookupParameter(pydantic.BaseModel, frozen=True):
     """A mapping function's keyword parameter, mapping each value of the field
-    `keyed_by` of the Entity `entity` to the Entity: its primary key for a
-    resolved Reference, its one-to-one Reference for a reversed one."""
+    `keyed_by` of the Entity `entity` to what holds it, as `values` says: its
+    primary key for a resolved Reference, its one-to-one Reference for a reversed
+    one, each to the Entity; its many-to-one Reference for a reversed one, to a
+    SortedSequence of the Entities."""
 
     name: Identifier
     entity: type[pydantic.BaseModel]
     keyed_by: FieldName
     id_type: Symbol
     target: Symbol
+    values: ParameterValues
+
+    def value_annotation(self) -> TypeExpression:
+        """The type each ID is mapped to, every module in it qualified."""
+        target = self.target.qualified().root
+        match self.values:
+            case ParameterValues.ENTITY:
+                return TypeExpression(target)
+            case ParameterValues.SORTED_SEQUENCE:
+                return SortedSequenceAnnotation.of(
+                    TypeExpression(target), Symbol.qualified
+                )
+
+    def modules(self) -> frozenset[ModulePath]:
+        """The modules `value_annotation` and the ID type refer to."""
+        match self.values:
+            case ParameterValues.ENTITY:
+                annotation: frozenset[ModulePath] = frozenset()
+            case ParameterValues.SORTED_SEQUENCE:
+                annotation = frozenset(
+                    symbol.module for symbol in SortedSequenceAnnotation.symbols
+                )
+        return annotation | {self.target.module, self.id_type.module}
 
     @staticmethod
     def name_for(entity: type[pydantic.BaseModel], keyed_by: FieldName) -> Identifier:
@@ -542,8 +617,11 @@ class MappingFunctionPlan(pydantic.BaseModel, frozen=True):
         return frozenset(
             {
                 self.from_model.module,
-                *(parameter.target.module for parameter in self.lookups),
-                *(parameter.id_type.module for parameter in self.lookups),
+                *(
+                    module
+                    for parameter in self.lookups
+                    for module in parameter.modules()
+                ),
                 *((FunctionPlan.mapping,) if self.lookups else ()),
             }
         )
@@ -622,6 +700,7 @@ class FunctionPlan(MappingFunctionPlan, frozen=True):
                         keyed_by=lookup.keyed_by(),
                         target=symbols[lookup.target],
                         id_type=symbols[lookup.id_type],
+                        values=ParameterValues.of(lookup),
                     )
                     for lookup in lookups
                 ),
@@ -667,18 +746,18 @@ class FunctionPlan(MappingFunctionPlan, frozen=True):
         """
         return self.literals[literal_type]
 
-    def parameter_of(self, lookup: ir.EntityLookup) -> Identifier:
+    def parameter_of(self, lookup: ir.Finder) -> LookupParameter:
         """The parameter holding the Entities `lookup` finds.
 
         The plan has a parameter for every lookup of the View's Relation.
         """
-        (name,) = (
-            parameter.name
+        (found,) = (
+            parameter
             for parameter in self.lookups
             if parameter.entity is lookup.target
             and parameter.keyed_by == lookup.keyed_by()
         )
-        return name
+        return found
 
     def imports(self) -> frozenset[ModulePath]:
         """The modules the function refers to, each imported whole."""
@@ -1072,15 +1151,22 @@ class _ModelPlanner:
                         field.annotation(), field.info.metadata
                     )
                 case ir.NestedField(value=found, relation=nested_relation):
-                    self.used.use(found.lookups()[-1].target)
+                    self.used.use(found.entity())
                     model = self.plan(
                         names.nested_in(field), nested_relation, pydantic.BaseModel
                     )
                     nested[field.name] = model
                     uses.add(model.symbol)
-                    rendered = field.optionality().annotate_text(
-                        model.symbol.reference()
-                    )
+                    match found:
+                        case ir.CollectionLookup():
+                            uses |= SortedSequenceAnnotation.symbols
+                            rendered = SortedSequenceAnnotation.of(
+                                model.symbol.reference(), Symbol.reference
+                            )
+                        case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
+                            rendered = field.optionality().annotate_text(
+                                model.symbol.reference()
+                            )
             fields.append(
                 ModelField(
                     field=field,

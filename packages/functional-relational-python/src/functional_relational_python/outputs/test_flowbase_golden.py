@@ -383,13 +383,12 @@ class LinkedInCampaign(pydantic.BaseModel, frozen=True):
 
 
 def campaign_view() -> View:
-    without_base = steps.omit(FieldName("channel_campaign_id"))
     return View(
         name=ViewName("ChannelCampaignDetails"),
         query=steps.from_(
             ChannelCampaign,
-            steps.reverse(MetaCampaign, without_base),
-            steps.reverse(LinkedInCampaign, without_base),
+            steps.reverse(MetaCampaign),
+            steps.reverse(LinkedInCampaign),
         ),
     )
 
@@ -594,12 +593,7 @@ def with_detail(entity: type[pydantic.BaseModel], *then: steps.Step) -> steps.St
     the base table's `id` stays the campaign's."""
     field = FieldName(PascalCase(entity.__name__).snake_case().root)
     return steps.pipeline(
-        steps.reverse(
-            entity,
-            steps.omit(FieldName("id")),
-            steps.omit(FieldName("channel_campaign_id")),
-            *then,
-        ),
+        steps.reverse(entity, steps.omit(FieldName("id")), *then),
         steps.require(field),
         steps.flatten(field),
     )

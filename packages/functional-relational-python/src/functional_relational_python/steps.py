@@ -4,6 +4,7 @@ from functional_relational_python.pipeline.ir import (
     FieldPredicate,
     FieldRenaming,
     TypeTransform,
+    ViaField,
 )
 from functional_relational_python.pipeline.steps import (
     Query,
@@ -34,6 +35,7 @@ __all__ = [
     "Query",
     "Step",
     "TypeTransform",
+    "ViaField",
     "add",
     "default",
     "flatten",

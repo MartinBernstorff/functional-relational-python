@@ -167,11 +167,11 @@ def require(fields: FieldName | ir.Select) -> Step:
     """Narrows the field named `fields`, or every field `fields` selects, from
     `X | None` to `X`, e.g. a submitted campaign's `name`.
 
-    A required Reference, resolved or reversed, holds its Entity rather than
-    `None`. Requiring drops no row: a View result whose field is `None` is an
-    unmet requirement, which the InMemoryViewEngine reports and a mapping function
-    raises. Requiring a field that is not optional, or in a WriteModel, is a
-    diagnostic.
+    A required Reference, resolved or reversed one-to-one, holds its Entity
+    rather than `None`. Requiring drops no row: a View result whose field is
+    `None` is an unmet requirement, which the InMemoryViewEngine reports and a
+    mapping function raises. Requiring a field that is not optional, such as a
+    reversed many-to-one Reference, or in a WriteModel, is a diagnostic.
     """
 
     def step(node: ir.Node) -> ir.Node:
@@ -228,36 +228,73 @@ def resolve(fields: ir.Select | ir.References, *then: Step) -> Step:
     return step
 
 
-def reverse(entity: type[pydantic.BaseModel], *then: Step) -> Step:
-    """Adds a field holding the `entity` that references the subject, or `None`
-    when none does.
+def reverse(
+    entity: type[pydantic.BaseModel],
+    *then: Step,
+    name: FieldName | None = None,
+    via_field: ir.ViaField = ir.ViaField.OMIT,
+) -> Step:
+    """Adds a field holding what references the subject by `entity`'s one
+    Reference to it.
 
-    `entity` must have exactly one one-to-one Reference (see `OneToOneMarker`) to the
-    subject; with several, choose one with `reverse_via`. The field is named after
-    `entity` in snake_case, e.g. `meta_campaign` for `MetaCampaign`. The steps in
-    `then` form a pipeline applied to `entity`; without them, the field holds the
-    Entity itself.
+    `entity` must have exactly one Reference to the subject, of either
+    Cardinality; with several, choose one with `reverse_via`. For a one-to-one
+    Reference (see `OneToOneMarker`) the field holds the `entity`, or `None` when
+    none references the subject, and is named after `entity` in snake_case, e.g.
+    `meta_campaign` for `MetaCampaign`. For a many-to-one Reference it holds every
+    `entity` referencing the subject, in a `SortedSequence` ascending by the
+    `entity`'s `id`, empty when there is none, and is named in the plural, e.g.
+    `ads` for `Ad`. `name` names the field instead.
+
+    The Reference followed holds the subject's own `id`, so by default
+    (`via_field=ViaField.OMIT`) it is dropped from each `entity` before the steps
+    in `then` run, and the field holds a generated nested model, even with no
+    steps. `via_field=ViaField.KEEP` keeps it; then without steps the field
+    holds the Entities themselves.
+
+    The steps in `then` form a pipeline applied to `entity`, or for a many-to-one
+    Reference to each `entity`, which may resolve and reverse in turn but not
+    filter with `where`.
     """
-    return _reversing(entity, ir.SoleReference(), then)
+    # `name` and `via_field` are optional, unlike TY-k8 asks, so that the common
+    # call stays short.
+    return _reversing(entity, ir.SoleReference(), then, name, via_field)
 
 
-def reverse_via(entity: type[pydantic.BaseModel], via: FieldName, *then: Step) -> Step:
-    """Like `reverse`, following `entity`'s one-to-one Reference `via` backwards.
+def reverse_via(
+    entity: type[pydantic.BaseModel],
+    via: FieldName,
+    *then: Step,
+    name: FieldName | None = None,
+    via_field: ir.ViaField = ir.ViaField.OMIT,
+) -> Step:
+    """Like `reverse`, following `entity`'s Reference `via` backwards.
 
-    For an `entity` with several one-to-one References to the subject.
+    For an `entity` with several References to the subject. By default `via` is
+    dropped from each `entity`, as for `reverse`.
     """
-    return _reversing(entity, via, then)
+    return _reversing(entity, via, then, name, via_field)
 
 
 def _reversing(
     entity: type[pydantic.BaseModel],
     via: FieldName | ir.SoleReference,
     then: Iterable[Step],
+    name: FieldName | None,
+    via_field: ir.ViaField,
 ) -> Step:
     nested = pipeline(*then)
+    field_name = ir.DefaultName() if name is None else name
 
     def step(node: ir.Node) -> ir.Node:
-        return ir.Reverse(input=node, entity=entity, via=via, then=nested)
+        return ir.Reverse(
+            input=node,
+            entity=entity,
+            via=via,
+            then=nested,
+            name=field_name,
+            via_field=via_field,
+        )
 
     return step
 
@@ -272,7 +309,8 @@ def flatten(fields: FieldName | ir.Select) -> Step:
     relation already has: rename or omit it in the resolve's nested pipeline. A
     field lifted out of an optional Reference is optional, `None` when the
     Reference is. A lifted Reference can be resolved, and a lifted resolved field
-    flattened, like any other.
+    flattened, like any other. A field holding a SortedSequence of Entities holds
+    no one Entity to lift fields out of, so it cannot be flattened, nor lifted.
     """
 
     def step(node: ir.Node) -> ir.Node:
