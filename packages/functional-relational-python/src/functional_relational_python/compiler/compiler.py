@@ -423,7 +423,7 @@ def _check_node(
             | ir.Rename()
             | ir.RenameSelected()
             | ir.Retype()
-            | ir.Project()
+            | ir.Pick()
             | ir.Resolve()
             | ir.Flatten()
             | ir.Reverse()
@@ -448,7 +448,7 @@ def _check_step(
     | ir.Rename
     | ir.RenameSelected
     | ir.Retype
-    | ir.Project
+    | ir.Pick
     | ir.Resolve
     | ir.Flatten
     | ir.Reverse
@@ -469,8 +469,8 @@ def _check_step(
             checked = _check_rename_selected(view, node, relation)
         case ir.Retype():
             checked = _check_retype(view, node, relation)
-        case ir.Project():
-            checked = _check_project(view, node, relation)
+        case ir.Pick():
+            checked = _check_pick(view, node, relation)
         case ir.Resolve():
             checked = _check_resolve(entity_graph, view, node, relation)
         case ir.Flatten():
@@ -652,8 +652,8 @@ def _check_retype(
     return Poisoned(recovered=checked, diagnostics=tuple(reported))
 
 
-def _check_project(
-    view: DefinitionName, node: ir.Project, relation: ir.Relation
+def _check_pick(
+    view: DefinitionName, node: ir.Pick, relation: ir.Relation
 ) -> ir.Relation | Poisoned:
     kept = relation.keeping(node.fields)
     unknown = tuple(

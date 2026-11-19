@@ -116,7 +116,8 @@ def invalid_field(
             View(
                 name=ViewName("EmployeeOverview"),
                 query=steps.from_(
-                    Employee, steps.hydrate(steps.omit(FieldName("name")))
+                    Employee,
+                    steps.resolve(steps.references(), steps.omit(FieldName("name"))),
                 ),
             ),
             ViewModelNames(
@@ -156,7 +157,7 @@ def invalid_field(
         (
             View(
                 name=ViewName.fake(),
-                query=steps.from_(Keyworded, steps.hydrate()),
+                query=steps.from_(Keyworded, steps.resolve(steps.references())),
             ),
             (invalid_field(Keyworded, FieldName("class")),),
         ),
@@ -164,7 +165,8 @@ def invalid_field(
             View(
                 name=ViewName.fake(),
                 query=steps.from_(
-                    Hyphenated, steps.hydrate(steps.omit(FieldName("name")))
+                    Hyphenated,
+                    steps.resolve(steps.references(), steps.omit(FieldName("name"))),
                 ),
             ),
             (

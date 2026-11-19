@@ -152,8 +152,8 @@ def test_selected_renamed_fields_keep_their_values_and_positions() -> None:
     ]
 
 
-def test_a_projected_view_returns_each_entity_with_only_the_listed_fields() -> None:
-    view = view_of(steps.project([FieldName("name")]))
+def test_a_picked_view_returns_each_entity_with_only_the_listed_fields() -> None:
+    view = view_of(steps.pick([FieldName("name")]))
     view_engine = make_engine(view)
     company = Company.fake(CompanyId.fake())
     view_engine.put(company).unwrap()
@@ -178,7 +178,7 @@ def test_an_added_field_holds_its_default_in_each_row(
     added = FieldName("kind")
     view = view_of(
         steps.pipeline(
-            steps.project([FieldName("name")]), steps.add(added, object, default)
+            steps.pick([FieldName("name")]), steps.add(added, object, default)
         )
     )
     view_engine = make_engine(view)
@@ -327,8 +327,8 @@ def named(*fields: FieldName) -> ir.Select:
     return steps.select(lambda field: field.name in fields)
 
 
-def test_hydrate_replaces_each_reference_with_its_entity() -> None:
-    view = employee_view(steps.hydrate())
+def test_resolving_references_replaces_each_reference_with_its_entity() -> None:
+    view = employee_view(steps.resolve(steps.references()))
     view_engine = hr_engine(view)
     department = Department.fake(DepartmentId(1), CompanyId.fake())
     mentor = Employee.fake(EmployeeId(1), department.id, None)
@@ -352,7 +352,7 @@ def test_a_nested_pipeline_runs_on_the_referenced_entity() -> None:
     view = employee_view(
         steps.resolve(
             named(FieldName("department_id")),
-            steps.hydrate(),
+            steps.resolve(steps.references()),
             steps.omit(FieldName("id")),
         )
     )
@@ -380,7 +380,7 @@ def test_every_dangling_reference_is_reported_with_every_missing_id() -> None:
     view = employee_view(
         steps.resolve(
             named(FieldName("department_id"), FieldName("mentor_id")),
-            steps.hydrate(),
+            steps.resolve(steps.references()),
         )
     )
     view_engine = hr_engine(view)
@@ -461,7 +461,7 @@ def profile_engine(*views: View) -> engine.InMemoryViewEngine:
 
 def test_reverse_gives_the_entity_referencing_each_row_or_none() -> None:
     view = employee_view(
-        steps.pipeline(steps.project([FieldName("id")]), steps.reverse(Profile))
+        steps.pipeline(steps.pick([FieldName("id")]), steps.reverse(Profile))
     )
     view_engine = profile_engine(view)
     department = DepartmentId(1)
@@ -480,8 +480,8 @@ def test_reverse_gives_the_entity_referencing_each_row_or_none() -> None:
 def test_flattening_a_reversed_entity_lifts_its_values_or_none() -> None:
     view = employee_view(
         steps.pipeline(
-            steps.project([FieldName("id")]),
-            steps.reverse(Profile, steps.project([FieldName("bio")])),
+            steps.pick([FieldName("id")]),
+            steps.reverse(Profile, steps.pick([FieldName("bio")])),
             steps.flatten(FieldName("profile")),
         )
     )
@@ -501,7 +501,7 @@ def test_flattening_a_reversed_entity_lifts_its_values_or_none() -> None:
 
 def test_a_reverse_sees_the_entities_put_since_the_last_read() -> None:
     view = employee_view(
-        steps.pipeline(steps.project([FieldName("id")]), steps.reverse(Profile))
+        steps.pipeline(steps.pick([FieldName("id")]), steps.reverse(Profile))
     )
     view_engine = profile_engine(view)
     employee = Employee.fake(EmployeeId(1), DepartmentId(1), None)
@@ -523,8 +523,8 @@ def test_a_reverse_sees_the_entities_put_since_the_last_read() -> None:
 def test_a_nested_pipeline_runs_on_the_reversed_entity() -> None:
     view = employee_view(
         steps.pipeline(
-            steps.project([FieldName("id")]),
-            steps.reverse(Profile, steps.project([FieldName("bio")])),
+            steps.pick([FieldName("id")]),
+            steps.reverse(Profile, steps.pick([FieldName("bio")])),
         )
     )
     view_engine = profile_engine(view)
@@ -593,7 +593,7 @@ def test_flatten_lifts_the_referenced_entitys_values_into_each_row() -> None:
             steps.resolve(
                 named(FieldName("department_id")),
                 steps.omit(FieldName("id")),
-                steps.hydrate(),
+                steps.resolve(steps.references()),
             ),
             steps.flatten(FieldName("department")),
         )
@@ -658,7 +658,7 @@ def test_fields_lifted_out_of_an_absent_reference_are_none() -> None:
 def mentor_flattened(*then: steps.Step) -> steps.Step:
     """Lifts the mentor's fields, prefixed `mentor_`; `then` runs on the mentor."""
     return steps.pipeline(
-        steps.project([FieldName("id"), FieldName("mentor_id")]),
+        steps.pick([FieldName("id"), FieldName("mentor_id")]),
         steps.resolve(
             named(FieldName("mentor_id")),
             steps.rename(
@@ -687,7 +687,7 @@ def mentor_flattened(*then: steps.Step) -> steps.Step:
                 mentor_flattened(
                     steps.resolve(
                         named(FieldName("mentor_department_id")),
-                        steps.project([FieldName("name")]),
+                        steps.pick([FieldName("name")]),
                     )
                 ),
                 steps.flatten(FieldName("mentor_department")),
@@ -726,7 +726,7 @@ def test_a_dangling_reference_lifted_out_is_reported_on_its_entity() -> None:
             steps.resolve(
                 named(FieldName("department_id")),
                 steps.omit(FieldName("id")),
-                steps.hydrate(),
+                steps.resolve(steps.references()),
             ),
             steps.flatten(FieldName("department")),
         )
@@ -1034,7 +1034,9 @@ def test_an_ordering_condition_keeps_the_rows_on_its_side(
 
 def test_an_excluded_row_is_no_view_result_even_with_a_dangling_reference() -> None:
     view = employee_view(
-        steps.pipeline(steps.where(conditions.is_null(mentor())), steps.hydrate())
+        steps.pipeline(
+            steps.where(conditions.is_null(mentor())), steps.resolve(steps.references())
+        )
     )
     view_engine = hr_engine(view)
     company = Company.fake(CompanyId.fake())
@@ -1146,7 +1148,7 @@ def test_a_required_reverse_that_finds_nothing_is_unmet() -> None:
 def test_a_met_requirement_gives_the_value() -> None:
     view = employee_view(
         steps.pipeline(
-            steps.project([FieldName("id"), FieldName("mentor_id")]),
+            steps.pick([FieldName("id"), FieldName("mentor_id")]),
             steps.require(FieldName("mentor_id")),
         )
     )
@@ -1211,8 +1213,8 @@ def test_an_unmet_requirement_names_the_entity_the_field_and_the_ids(
 def test_a_required_field_lifted_through_a_missing_entity_is_unmet() -> None:
     view = employee_view(
         steps.pipeline(
-            steps.project([FieldName("id")]),
-            steps.reverse(Profile, steps.project([FieldName("bio")])),
+            steps.pick([FieldName("id")]),
+            steps.reverse(Profile, steps.pick([FieldName("bio")])),
             steps.flatten(FieldName("profile")),
             steps.require(FieldName("bio")),
         )

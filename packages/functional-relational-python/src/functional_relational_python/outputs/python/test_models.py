@@ -174,14 +174,14 @@ def test_golden_write_model_model_next_to_a_view_model() -> None:
         [
             View(
                 name=ViewName("CompanySummary"),
-                query=steps.from_(Company, steps.project([FieldName("name")])),
+                query=steps.from_(Company, steps.pick([FieldName("name")])),
             )
         ],
         [
             WriteModel(
                 name=WriteModelName("CompanyCreate"),
                 query=steps.from_(
-                    Company, steps.project([FieldName("name"), FieldName("tags")])
+                    Company, steps.pick([FieldName("name"), FieldName("tags")])
                 ),
             )
         ],
@@ -216,7 +216,7 @@ def update_write_model() -> WriteModel:
         name=WriteModelName("CompanyPatch"),
         query=steps.from_(
             Company,
-            steps.project([FieldName("name"), FieldName("parent"), FieldName("tags")]),
+            steps.pick([FieldName("name"), FieldName("parent"), FieldName("tags")]),
             steps.retype(
                 steps.select(lambda _: True), lambda annotation: annotation | MISSING
             ),
@@ -260,14 +260,14 @@ def base_write_models() -> list[WriteModel]:
         WriteModel(
             name=WriteModelName("CompanyCreate"),
             query=steps.from_(
-                Company, steps.project([FieldName("name"), FieldName("tags")])
+                Company, steps.pick([FieldName("name"), FieldName("tags")])
             ),
             base=NamedBase,
         ),
         WriteModel(
             name=WriteModelName("CompanyUpdate"),
             query=steps.from_(
-                Company, steps.project([FieldName("id"), FieldName("kind")])
+                Company, steps.pick([FieldName("id"), FieldName("kind")])
             ),
             base=PutModel[CompanyId],
         ),
@@ -310,9 +310,7 @@ def test_a_field_the_base_declares_is_declared_again_to_set_its_default() -> Non
     parent = FieldName("parent")
     write_model = WriteModel(
         name=WriteModelName("CompanyCreate"),
-        query=steps.from_(
-            Company, steps.project([parent]), steps.default(parent, None)
-        ),
+        query=steps.from_(Company, steps.pick([parent]), steps.default(parent, None)),
         base=ParentBase,
     )
 
@@ -327,8 +325,8 @@ def test_nested_models_subclass_the_default_base() -> None:
         name=ViewName("CompanyTree"),
         query=steps.from_(
             Company,
-            steps.project([FieldName("name"), FieldName("parent")]),
-            steps.resolve(parent, steps.project([FieldName("tags")])),
+            steps.pick([FieldName("name"), FieldName("parent")]),
+            steps.resolve(parent, steps.pick([FieldName("tags")])),
         ),
         base=NamedBase,
     )
@@ -345,7 +343,7 @@ def tagged_view() -> View:
         name=ViewName("CompanyTagged"),
         query=steps.from_(
             Company,
-            steps.project([FieldName("name")]),
+            steps.pick([FieldName("name")]),
             steps.add(FieldName("type"), Literal["company"], default="company"),
         ),
     )
@@ -359,7 +357,7 @@ def test_golden_added_fields() -> None:
                 name=WriteModelName("CompanyCreate"),
                 query=steps.from_(
                     Company,
-                    steps.project([FieldName("name")]),
+                    steps.pick([FieldName("name")]),
                     steps.add(FieldName("note"), Text | None),
                 ),
             )
@@ -399,16 +397,16 @@ def hydrated_views() -> list[View]:
             name=ViewName("CompanyWithParent"),
             query=steps.from_(
                 Company,
-                steps.project([FieldName("id"), FieldName("parent")]),
-                steps.hydrate(),
+                steps.pick([FieldName("id"), FieldName("parent")]),
+                steps.resolve(steps.references()),
             ),
         ),
         View(
             name=ViewName("CompanyTree"),
             query=steps.from_(
                 Company,
-                steps.project([FieldName("id"), FieldName("parent")]),
-                steps.resolve(parent, steps.project([FieldName("name")])),
+                steps.pick([FieldName("id"), FieldName("parent")]),
+                steps.resolve(parent, steps.pick([FieldName("name")])),
             ),
         ),
     ]
@@ -624,7 +622,7 @@ def test_golden_default(case: DefaultCase) -> None:
                 name=ViewName("Defaulted"),
                 query=steps.from_(
                     Settings,
-                    steps.project([case.field]),
+                    steps.pick([case.field]),
                     steps.default(case.field, case.value),
                 ),
             )
@@ -893,7 +891,7 @@ def company_variant(name: ViewName, tag: Text) -> View:
         query=steps.from_(
             Company,
             steps.where(conditions.eq(conditions.field(FieldName("name")), tag)),
-            steps.project([FieldName("name")]),
+            steps.pick([FieldName("name")]),
             test_compiler.added_tag(FieldName("variant"), test_compiler.Tag(tag.root)),
         ),
     )
@@ -921,7 +919,7 @@ def nested_company_union() -> Union:
                                 conditions.field(FieldName("name")), Text("Named")
                             )
                         ),
-                        steps.project([]),
+                        steps.pick([]),
                         steps.add(FieldName("variant"), Literal["brand"], "brand"),
                         steps.add(FieldName("name"), Literal["named"], "named"),
                     ),
@@ -930,7 +928,7 @@ def nested_company_union() -> Union:
                     name=ViewName("UnnamedBrand"),
                     query=steps.from_(
                         Company,
-                        steps.project([]),
+                        steps.pick([]),
                         steps.add(FieldName("variant"), Literal["brand"], "brand"),
                         steps.add(FieldName("name"), Literal["unnamed"], "unnamed"),
                     ),

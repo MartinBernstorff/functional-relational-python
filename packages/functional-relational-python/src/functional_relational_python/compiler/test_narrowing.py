@@ -549,7 +549,7 @@ def detail_lookup() -> ir.ReverseLookup:
 def test_requiring_a_lifted_field_requires_the_entity_and_its_field() -> None:
     view = compile_campaign(
         steps.pipeline(
-            steps.reverse(Detail, steps.project([FieldName("objective")])),
+            steps.reverse(Detail, steps.pick([FieldName("objective")])),
             steps.flatten(FieldName("detail")),
             steps.require(FieldName("objective")),
         )
@@ -573,7 +573,7 @@ def test_requiring_a_field_lifted_through_an_optional_entity_requires_the_entity
         steps.pipeline(
             steps.reverse(
                 Detail,
-                steps.project([FieldName("id")]),
+                steps.pick([FieldName("id")]),
                 steps.rename(FieldName("id"), FieldName("detail_id")),
             ),
             steps.flatten(FieldName("detail")),
@@ -828,7 +828,7 @@ def test_requiring_a_lifted_field_typed_by_an_optional_alias_requires_it() -> No
                     query=steps.from_(
                         Campaign,
                         steps.reverse(
-                            AliasedDetail, steps.project([FieldName("objective")])
+                            AliasedDetail, steps.pick([FieldName("objective")])
                         ),
                         steps.flatten(FieldName("aliased_detail")),
                         steps.require(FieldName("objective")),

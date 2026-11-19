@@ -140,12 +140,12 @@ def add(
     return step
 
 
-def project(fields: Iterable[ir.FieldName]) -> Step:
+def pick(fields: Iterable[ir.FieldName]) -> Step:
     """Keeps only `fields`, in the from_model's field order."""
     kept = tuple(fields)
 
     def step(node: ir.Node) -> ir.Node:
-        return ir.Project(input=node, fields=kept)
+        return ir.Pick(input=node, fields=kept)
 
     return step
 
@@ -180,9 +180,28 @@ def require(fields: FieldName | ir.Select) -> Step:
     return step
 
 
-def select(predicate: ir.FieldPredicate) -> ir.Select:
-    """The fields `predicate` accepts, for a step that acts on several fields."""
-    return ir.Select(predicate=predicate)
+class Selecting:
+    """Builds a Select, for a step that acts on several fields.
+
+    >>> select(lambda field: field.name.root.endswith("_at"))
+    >>> select.all()
+    """
+
+    def __call__(self, predicate: ir.FieldPredicate) -> ir.Select:
+        """The fields `predicate` accepts."""
+        return ir.Select(predicate=predicate)
+
+    @staticmethod
+    def all() -> ir.Select:
+        """Every field."""
+        return ir.Select(predicate=_every_field)
+
+
+def _every_field(_field: ir.RelationField) -> bool:
+    return True
+
+
+select = Selecting()
 
 
 def references() -> ir.References:
@@ -273,11 +292,6 @@ def is_primary_key(field: ir.RelationField) -> bool:
             return read == EntityNode.primary_key
         case ir.Field() | ir.NestedField():
             return False
-
-
-def hydrate(*then: Step) -> Step:
-    """Resolves every Reference: `resolve(references(), *then)`."""
-    return resolve(references(), *then)
 
 
 def pipeline(*steps: Step) -> Step:

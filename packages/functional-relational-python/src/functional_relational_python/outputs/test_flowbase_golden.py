@@ -946,7 +946,7 @@ def update_meta_campaign_write_model() -> Union:
             query=steps.from_(
                 MetaCampaignEntity,
                 steps.pipeline(
-                    steps.project([FieldName("name"), FieldName("lifetime_budget")]),
+                    steps.pick([FieldName("name"), FieldName("lifetime_budget")]),
                     *retypes,
                     steps.default(every_field, MISSING),
                     steps.add(FieldName("submit_state"), tag),
