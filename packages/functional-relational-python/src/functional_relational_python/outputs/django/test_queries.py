@@ -397,7 +397,7 @@ def golden_views() -> list[View]:
         ),
         View(
             name=ViewName("EmployeeHydrated"),
-            query=steps.from_(Employee, steps.hydrate()),
+            query=steps.from_(Employee, steps.resolve(steps.references())),
         ),
         View(
             name=ViewName("EmployeeOverview"),
@@ -411,7 +411,7 @@ def golden_views() -> list[View]:
                 ),
                 steps.resolve(
                     named(FieldName("mentor_id")),
-                    steps.project([FieldName("name"), FieldName("department_id")]),
+                    steps.pick([FieldName("name"), FieldName("department_id")]),
                 ),
             ),
         ),
@@ -419,7 +419,7 @@ def golden_views() -> list[View]:
             name=ViewName("EmployeeTagged"),
             query=steps.from_(
                 Employee,
-                steps.project([FieldName("id")]),
+                steps.pick([FieldName("id")]),
                 steps.add(FieldName("kind"), str, default="employee"),
             ),
         ),
@@ -443,7 +443,7 @@ def flattened_employee() -> View:
                 steps.rename(FieldName("name"), FieldName("department_name")),
                 steps.resolve(
                     named(FieldName("company_id")),
-                    steps.project([FieldName("name")]),
+                    steps.pick([FieldName("name")]),
                     steps.rename(FieldName("name"), FieldName("company_name")),
                 ),
                 steps.flatten(FieldName("company")),
@@ -451,7 +451,7 @@ def flattened_employee() -> View:
             steps.flatten(FieldName("department")),
             steps.resolve(
                 named(FieldName("mentor_id")),
-                steps.project(
+                steps.pick(
                     [
                         FieldName("name"),
                         FieldName("department_id"),
@@ -461,7 +461,7 @@ def flattened_employee() -> View:
                 steps.resolve(named(FieldName("department_id"))),
                 steps.resolve(
                     named(FieldName("mentor_id")),
-                    steps.project([FieldName("name"), FieldName("nickname")]),
+                    steps.pick([FieldName("name"), FieldName("nickname")]),
                     steps.rename(
                         steps.select(lambda _field: True), prefixed(Text("grand"))
                     ),
@@ -932,21 +932,21 @@ def organisation_chart() -> View:
         name=ViewName("OrganisationChart"),
         query=steps.from_(
             Company,
-            steps.project([FieldName("id")]),
+            steps.pick([FieldName("id")]),
             steps.reverse(
                 Department,
-                steps.project([FieldName("id"), FieldName("company_id")]),
+                steps.pick([FieldName("id"), FieldName("company_id")]),
                 steps.resolve(
-                    named(FieldName("company_id")), steps.project([FieldName("name")])
+                    named(FieldName("company_id")), steps.pick([FieldName("name")])
                 ),
                 steps.reverse(
                     Employee,
-                    steps.project([FieldName("name"), FieldName("mentor_id")]),
+                    steps.pick([FieldName("name"), FieldName("mentor_id")]),
                     steps.resolve(
                         named(FieldName("mentor_id")),
-                        steps.project([FieldName("name")]),
+                        steps.pick([FieldName("name")]),
                     ),
-                    steps.reverse(Badge, steps.project([FieldName("level")])),
+                    steps.reverse(Badge, steps.pick([FieldName("level")])),
                 ),
                 via_field=ir.ViaField.KEEP,
             ),
@@ -1716,7 +1716,7 @@ def read_views() -> list[View]:
         ),
         View(
             name=ViewName("ReferenceWithoutIdSuffix"),
-            query=steps.from_(Company, steps.hydrate()),
+            query=steps.from_(Company, steps.resolve(steps.references())),
         ),
         View(
             name=ViewName("Chain"),
@@ -1734,7 +1734,11 @@ def read_views() -> list[View]:
         View(
             name=ViewName("SelfReference"),
             query=steps.from_(
-                Employee, steps.hydrate(steps.hydrate(steps.omit(FieldName("name"))))
+                Employee,
+                steps.resolve(
+                    steps.references(),
+                    steps.resolve(steps.references(), steps.omit(FieldName("name"))),
+                ),
             ),
         ),
         flattened_employee(),
@@ -1742,7 +1746,7 @@ def read_views() -> list[View]:
             name=ViewName("OnlyAdded"),
             query=steps.from_(
                 Employee,
-                steps.project([]),
+                steps.pick([]),
                 steps.add(FieldName("kind"), str, default="x"),
             ),
         ),
@@ -1753,7 +1757,7 @@ def read_views() -> list[View]:
         View(
             name=ViewName("ReversedNested"),
             query=steps.from_(
-                Employee, steps.reverse(Badge, steps.project([FieldName("label")]))
+                Employee, steps.reverse(Badge, steps.pick([FieldName("label")]))
             ),
         ),
         View(
@@ -1794,7 +1798,7 @@ def read_views() -> list[View]:
             name=ViewName("ReversedFlattened"),
             query=steps.from_(
                 Employee,
-                steps.reverse(Badge, steps.project([FieldName("level")])),
+                steps.reverse(Badge, steps.pick([FieldName("level")])),
                 steps.flatten(FieldName("badge")),
             ),
         ),
@@ -1805,7 +1809,7 @@ def read_views() -> list[View]:
             query=steps.from_(
                 Employee,
                 steps.reverse(
-                    Badge, steps.project([FieldName("rank"), FieldName("stars")])
+                    Badge, steps.pick([FieldName("rank"), FieldName("stars")])
                 ),
                 steps.flatten(FieldName("badge")),
             ),
@@ -2008,7 +2012,7 @@ def test_a_view_over_an_existing_model_reads_through_its_functions() -> None:
     application calls the View's functions."""
     view = View(
         name=ViewName("Hydrated"),
-        query=steps.from_(Company, steps.hydrate()),
+        query=steps.from_(Company, steps.resolve(steps.references())),
     )
     entities = organisation()
     config = ExistingCompany.config()
@@ -2150,7 +2154,10 @@ def test_reversing_a_reference_an_existing_model_declares_no_accessor_for_is_a_d
 
 
 def test_a_view_not_reversing_a_reference_needs_no_declared_accessor() -> None:
-    view = View(name=ViewName("Hydrated"), query=steps.from_(Company, steps.hydrate()))
+    view = View(
+        name=ViewName("Hydrated"),
+        query=steps.from_(Company, steps.resolve(steps.references())),
+    )
 
     assert isinstance(rendered_with(undeclaring_company(), view), Ok)
 
@@ -2305,7 +2312,7 @@ def test_a_view_reads_a_model_keyed_by_its_reference_like_the_engine(
 def test_a_view_reads_the_rows_the_manager_base_keeps() -> None:
     view = View(
         name=ViewName("Hydrated"),
-        query=steps.from_(Employee, steps.hydrate()),
+        query=steps.from_(Employee, steps.resolve(steps.references())),
     )
     entities = organisation()
     (compiled,) = compile_all([view]).views
@@ -2326,7 +2333,7 @@ def with_mentor_from_last(queryset: QuerySet[Model]) -> QuerySet[Model]:
 def test_a_view_reads_the_filtered_ordered_and_sliced_query_set() -> None:
     view = View(
         name=ViewName("Hydrated"),
-        query=steps.from_(Employee, steps.hydrate()),
+        query=steps.from_(Employee, steps.resolve(steps.references())),
     )
     entities = organisation()
     (compiled,) = compile_all([view]).views
@@ -2499,7 +2506,7 @@ def test_each_variant_of_the_union_keeps_rows() -> None:
 def hydrated() -> View:
     return View(
         name=ViewName("Hydrated"),
-        query=steps.from_(Employee, steps.hydrate()),
+        query=steps.from_(Employee, steps.resolve(steps.references())),
     )
 
 
@@ -2556,7 +2563,7 @@ class StrictBase(pydantic.BaseModel, strict=True, frozen=True):
 def test_a_view_with_a_strict_base_reads_an_enum_field() -> None:
     view = View(
         name=ViewName("StrictEmployee"),
-        query=steps.from_(Employee, steps.hydrate()),
+        query=steps.from_(Employee, steps.resolve(steps.references())),
         base=StrictBase,
     )
     entities = organisation()
@@ -2855,7 +2862,7 @@ def test_an_unimportable_class_a_field_is_read_through_names_the_field() -> None
         name=ViewName("CompanyScore"),
         query=steps.from_(
             Company,
-            steps.reverse(plaque_entity, steps.project([FieldName("score")])),
+            steps.reverse(plaque_entity, steps.pick([FieldName("score")])),
             steps.flatten(FieldName("plaque")),
         ),
     )
@@ -3473,7 +3480,7 @@ def test_an_unmet_required_field_fails_the_view_models_validation(
                 steps.require(FieldName("mentor_id")),
                 steps.resolve(
                     named(FieldName("mentor_id")),
-                    steps.project([FieldName("mentor_id")]),
+                    steps.pick([FieldName("mentor_id")]),
                     steps.rename(FieldName("mentor_id"), FieldName("grand_mentor_id")),
                 ),
                 steps.flatten(FieldName("mentor")),
@@ -3485,10 +3492,10 @@ def test_an_unmet_required_field_fails_the_view_models_validation(
                 named(FieldName("department_id")),
                 steps.reverse(
                     Employee,
-                    steps.project([FieldName("mentor_id")]),
+                    steps.pick([FieldName("mentor_id")]),
                     steps.resolve(
                         named(FieldName("mentor_id")),
-                        steps.project([FieldName("name")]),
+                        steps.pick([FieldName("name")]),
                     ),
                     steps.require(FieldName("mentor")),
                 ),
@@ -3500,8 +3507,8 @@ def test_an_unmet_required_field_fails_the_view_models_validation(
                 named(FieldName("department_id")),
                 steps.reverse(
                     Employee,
-                    steps.project([FieldName("mentor_id")]),
-                    steps.resolve(named(FieldName("mentor_id")), steps.project([])),
+                    steps.pick([FieldName("mentor_id")]),
+                    steps.resolve(named(FieldName("mentor_id")), steps.pick([])),
                     steps.require(FieldName("mentor")),
                 ),
             ),

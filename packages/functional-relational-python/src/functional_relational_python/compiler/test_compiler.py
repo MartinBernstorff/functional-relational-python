@@ -92,17 +92,17 @@ def test_omit_removes_the_field_from_the_from_model() -> None:
     assert field_names(view) == names(Text("name"), Text("revenue"))
 
 
-def test_project_keeps_only_the_listed_fields_in_from_model_order() -> None:
-    view = compile_one(steps.project([FieldName("revenue"), FieldName("name")]))
+def test_pick_keeps_only_the_listed_fields_in_from_model_order() -> None:
+    view = compile_one(steps.pick([FieldName("revenue"), FieldName("name")]))
 
     assert field_names(view) == names(Text("name"), Text("revenue"))
 
 
-def test_each_unknown_projected_field_is_a_diagnostic() -> None:
+def test_each_unknown_picked_field_is_a_diagnostic() -> None:
     unknown = [FieldName("revnue"), FieldName("nme")]
     view = View(
         name=ViewName.fake(),
-        query=steps.from_(Company, steps.project([FieldName("secret"), *unknown])),
+        query=steps.from_(Company, steps.pick([FieldName("secret"), *unknown])),
     )
 
     assert diagnostics_of([view]) == tuple(
@@ -116,13 +116,13 @@ def test_each_unknown_projected_field_is_a_diagnostic() -> None:
     )
 
 
-def test_steps_after_a_defective_project_are_checked_against_its_known_fields() -> None:
+def test_steps_after_a_defective_pick_are_checked_against_its_known_fields() -> None:
     unknown = FieldName("revnue")
     view = View(
         name=ViewName.fake(),
         query=steps.from_(
             Company,
-            steps.project([FieldName("name"), unknown]),
+            steps.pick([FieldName("name"), unknown]),
             steps.omit(FieldName("secret")),
         ),
     )
@@ -887,7 +887,7 @@ def projections(draw: st.DrawFn) -> Projection:
 
 
 @given(projections())
-def test_project_equals_omitting_every_other_field(case: Projection) -> None:
+def test_pick_equals_omitting_every_other_field(case: Projection) -> None:
     def compile_relation(step: steps.Step) -> ir.Relation:
         view = View(
             name=ViewName.fake(),
@@ -905,7 +905,7 @@ def test_project_equals_omitting_every_other_field(case: Projection) -> None:
         if FieldName(name) not in case.kept
     ]
 
-    assert compile_relation(steps.project(case.kept)) == compile_relation(
+    assert compile_relation(steps.pick(case.kept)) == compile_relation(
         steps.pipeline(*map(steps.omit, others))
     )
 
@@ -1016,8 +1016,10 @@ def values(view: compiler.CompiledView) -> dict[FieldName, ir.Value]:
     return {field.name: field.value for field in view.relation.fields}
 
 
-def test_hydrate_resolves_every_reference_and_drops_the_id_suffix() -> None:
-    view = compile_resolving(Employee, steps.hydrate())
+def test_resolving_references_resolves_every_reference_and_drops_the_id_suffix() -> (
+    None
+):
+    view = compile_resolving(Employee, steps.resolve(steps.references()))
 
     assert [
         (field.name, field.info.annotation)
@@ -1053,7 +1055,7 @@ class Member(pydantic.BaseModel):
     department_id: DepartmentId
 
 
-def test_hydrate_resolves_the_references_the_id_base_decides() -> None:
+def test_resolving_references_resolves_the_references_the_id_base_decides() -> None:
     graph = EntityGraph.build(
         [Team, Member], IdBase(AppId), OneToOneMarker.fake()
     ).unwrap()
@@ -1063,7 +1065,7 @@ def test_hydrate_resolves_the_references_the_id_base_decides() -> None:
         [
             View(
                 name=ViewName.fake(),
-                query=steps.from_(Member, steps.hydrate()),
+                query=steps.from_(Member, steps.resolve(steps.references())),
             )
         ],
     ):
@@ -1105,7 +1107,7 @@ def test_resolve_leaves_unselected_references_alone() -> None:
 
 
 @pytest.mark.parametrize(
-    "then", [(), (steps.project([FieldName("name")]),)], ids=["entity", "nested"]
+    "then", [(), (steps.pick([FieldName("name")]),)], ids=["entity", "nested"]
 )
 def test_a_resolved_reference_loses_its_default(then: tuple[steps.Step, ...]) -> None:
     view = compile_resolving(
@@ -1129,13 +1131,13 @@ def department_lookup() -> ir.Lookup:
     )
 
 
-def test_hydrate_leaves_a_renamed_primary_key_alone() -> None:
+def test_resolving_references_leaves_a_renamed_primary_key_alone() -> None:
     view = compile_resolving(
         Employee,
         steps.pipeline(
-            steps.project([FieldName("id"), FieldName("department_id")]),
+            steps.pick([FieldName("id"), FieldName("department_id")]),
             steps.rename(FieldName("id"), FieldName("key")),
-            steps.hydrate(),
+            steps.resolve(steps.references()),
         ),
     )
 
@@ -1145,13 +1147,13 @@ def test_hydrate_leaves_a_renamed_primary_key_alone() -> None:
     }
 
 
-def test_hydrate_resolves_a_reference_renamed_to_id() -> None:
+def test_resolving_references_resolves_a_reference_renamed_to_id() -> None:
     view = compile_resolving(
         Employee,
         steps.pipeline(
-            steps.project([FieldName("department_id")]),
+            steps.pick([FieldName("department_id")]),
             steps.rename(FieldName("department_id"), FieldName("id")),
-            steps.hydrate(),
+            steps.resolve(steps.references()),
         ),
     )
 
@@ -1194,7 +1196,7 @@ def test_an_empty_nested_pipeline_resolves_to_the_entity_itself() -> None:
 def test_resolving_onto_an_existing_field_names_the_from_model_and_both_fields() -> (
     None
 ):
-    assert resolve_diagnostics(Clash, steps.hydrate()) == (
+    assert resolve_diagnostics(Clash, steps.resolve(steps.references())) == (
         diagnostics.ResolvedNameCollision(
             view=ViewName.fake(),
             from_model=ir.FromModelName("Clash"),
@@ -1231,7 +1233,9 @@ def test_a_reference_to_no_entity_is_a_diagnostic_and_others_still_resolve() -> 
             View(
                 name=ViewName.fake(),
                 query=steps.from_(
-                    Memo, steps.hydrate(), steps.omit(FieldName("department"))
+                    Memo,
+                    steps.resolve(steps.references()),
+                    steps.omit(FieldName("department")),
                 ),
             )
         ],
@@ -1573,7 +1577,7 @@ def test_flattening_a_reversed_entity_lifts_its_fields_as_optional() -> None:
     view = compile_reversing(
         ChannelCampaign,
         steps.pipeline(
-            steps.reverse(MetaCampaign, steps.project([FieldName("ad_account")])),
+            steps.reverse(MetaCampaign, steps.pick([FieldName("ad_account")])),
             steps.flatten(FieldName("meta_campaign")),
         ),
     )
@@ -2244,7 +2248,7 @@ def test_flatten_with_a_select_passes_over_fields_that_are_not_resolved() -> Non
         steps.pipeline(
             steps.resolve(
                 named(FieldName("department_id")),
-                steps.project([FieldName("name")]),
+                steps.pick([FieldName("name")]),
                 steps.rename(FieldName("name"), FieldName("department_name")),
             ),
             steps.flatten(named(FieldName("name"), FieldName("department"))),
@@ -2331,7 +2335,7 @@ def department_name() -> steps.Step:
     """Resolves the mentor's department to its name, `department_name`."""
     return steps.resolve(
         named(FieldName("mentor_department_id")),
-        steps.project([FieldName("name")]),
+        steps.pick([FieldName("name")]),
         steps.rename(FieldName("name"), FieldName("department_name")),
     )
 
@@ -2365,8 +2369,11 @@ def test_a_resolved_field_can_be_flattened_before_or_after_it_is_lifted(
 
 @pytest.mark.parametrize(
     "resolving",
-    [steps.resolve(named(FieldName("mentor_department_id"))), steps.hydrate()],
-    ids=["named", "hydrate"],
+    [
+        steps.resolve(named(FieldName("mentor_department_id"))),
+        steps.resolve(steps.references()),
+    ],
+    ids=["named", "references"],
 )
 def test_a_lifted_reference_resolves_through_the_flattened_entity(
     resolving: steps.Step,
@@ -2438,7 +2445,7 @@ def test_two_flattened_fields_lifting_one_name_report_the_second() -> None:
         ),
         steps.resolve(
             named(FieldName("mentor_id")),
-            steps.project([]),
+            steps.pick([]),
             steps.add(label, str, default="mentor"),
         ),
         steps.flatten(named(FieldName("department"), FieldName("mentor"))),
@@ -2760,7 +2767,7 @@ def pipelines(
     depth: Depth,
     collections: Collections,
 ) -> steps.Step:
-    """A valid pipeline of omits, renames, projects, adds, resolves, reverses
+    """A valid pipeline of omits, renames, picks, adds, resolves, reverses
     and flattens over `start`.
 
     Omits and renames name one field or select several. It may start by adding a
@@ -2834,7 +2841,7 @@ def pipelines(
                     "omit",
                     "rename",
                     "rename_selected",
-                    "project",
+                    "pick",
                     "resolve",
                     "flatten",
                     "reverse",
@@ -2872,10 +2879,10 @@ def pipelines(
                     for kept, target in references.items()
                 }
                 drawn.append(steps.rename(named(*renamed), renaming))
-            case "project":
+            case "pick":
                 projected = draw(st.lists(st.sampled_from(fields), unique=True))
                 fields = [kept for kept in fields if kept in projected]
-                drawn.append(steps.project(projected))
+                drawn.append(steps.pick(projected))
             # Without a Reference to flatten, this falls through.
             case "flatten" if depth.root > 0 and (
                 resolvable := [kept for kept in fields if kept in references]
@@ -2975,7 +2982,7 @@ def any_steps(draw: st.DrawFn, pool: Sequence[FieldName], depth: Depth) -> steps
     names = st.sampled_from(pool)
     match draw(
         st.sampled_from(
-            ["omit", "flatten", "rename", "rename_selected", "project", "resolve"]
+            ["omit", "flatten", "rename", "rename_selected", "pick", "resolve"]
         )
     ):
         case "omit" | "flatten" as action:
@@ -2989,8 +2996,8 @@ def any_steps(draw: st.DrawFn, pool: Sequence[FieldName], depth: Depth) -> steps
             return steps.rename(
                 named(*renames), lambda field: renames.get(field, field)
             )
-        case "project":
-            return steps.project(draw(st.lists(names, unique=True)))
+        case "pick":
+            return steps.pick(draw(st.lists(names, unique=True)))
         case _:
             selection = draw(
                 st.just(steps.references())
@@ -3431,6 +3438,23 @@ def annotations(relation: ir.Relation) -> dict[FieldName, ir.RuntimeAnnotation]:
     }
 
 
+def test_select_all_selects_every_field() -> None:
+    (compiled,) = (
+        compile_employee_write_model(
+            steps.retype(steps.select.all(), lambda annotation: annotation | MISSING),
+        )
+        .unwrap()
+        .write_models
+    )
+
+    assert set(annotations(compiled.relation).values()) == {
+        Text | MISSING,
+        EmployeeId | MISSING,
+        DepartmentId | MISSING,
+        EmployeeId | None | MISSING,
+    }
+
+
 def test_retype_maps_each_selected_fields_type_with_the_transform() -> None:
     (compiled,) = (
         compile_employee_write_model(
@@ -3644,7 +3668,7 @@ def test_a_nested_field_the_base_declares_is_a_diagnostic() -> None:
         query=steps.from_(
             Employee,
             steps.resolve(
-                named(FieldName("department_id")), steps.project([FieldName("name")])
+                named(FieldName("department_id")), steps.pick([FieldName("name")])
             ),
         ),
         base=DepartmentBase,
@@ -3994,7 +4018,7 @@ def test_a_condition_on_a_resolved_field_is_a_diagnostic() -> None:
     reported = resolve_diagnostics(
         Employee,
         steps.pipeline(
-            steps.hydrate(),
+            steps.resolve(steps.references()),
             steps.where(conditions.is_null(conditions.field(FieldName("mentor")))),
         ),
     )

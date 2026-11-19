@@ -111,7 +111,10 @@ def overview() -> View:
     return View(
         name=ViewName("EmployeeOverview"),
         query=steps.from_(
-            Employee, steps.resolve(named(FieldName("department_id")), steps.hydrate())
+            Employee,
+            steps.resolve(
+                named(FieldName("department_id")), steps.resolve(steps.references())
+            ),
         ),
     )
 
@@ -185,7 +188,7 @@ def test_whatever_cannot_be_imported_is_reported_once() -> None:
     team, team_id, player = local_entity_and_from_model()
     view = View(
         name=ViewName.fake(),
-        query=steps.from_(player, steps.hydrate()),
+        query=steps.from_(player, steps.resolve(steps.references())),
     )
     compiled = compiler.compile_views(
         EntityGraph.build([team], IdBase.fake(), OneToOneMarker.fake()).unwrap(), [view]
@@ -212,7 +215,7 @@ def test_a_models_only_layout_reports_only_what_the_models_cannot_import() -> No
     team, _, player = local_entity_and_from_model()
     view = View(
         name=ViewName.fake(),
-        query=steps.from_(player, steps.hydrate()),
+        query=steps.from_(player, steps.resolve(steps.references())),
     )
     compiled = compiler.compile_views(
         EntityGraph.build([team], IdBase.fake(), OneToOneMarker.fake()).unwrap(), [view]
@@ -305,7 +308,7 @@ def company_view(name: ViewName) -> View:
 def hydrated(from_model: type[pydantic.BaseModel]) -> View:
     return View(
         name=ViewName.fake(),
-        query=steps.from_(from_model, steps.hydrate()),
+        query=steps.from_(from_model, steps.resolve(steps.references())),
     )
 
 
@@ -465,7 +468,7 @@ def test_generating_into_a_module_that_defines_a_used_class_is_a_diagnostic(
 ) -> None:
     view = View(
         name=ViewName.fake(),
-        query=steps.from_(Company, steps.project([FieldName("name")])),
+        query=steps.from_(Company, steps.pick([FieldName("name")])),
     )
 
     assert [

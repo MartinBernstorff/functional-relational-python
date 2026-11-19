@@ -90,7 +90,7 @@ class Retype(pydantic.BaseModel, frozen=True):
     transform: TypeTransform
 
 
-class Project(pydantic.BaseModel, frozen=True):
+class Pick(pydantic.BaseModel, frozen=True):
     """Keeps only `fields`, in the input's field order: the complement of Omit."""
 
     input: Node
@@ -240,9 +240,76 @@ class Add(pydantic.BaseModel, frozen=True):
 
 class FieldRef(pydantic.BaseModel, frozen=True):
     """A Condition's reference to a top-level field, by its name at that point in
-    the pipeline."""
+    the pipeline.
+
+    Its methods build the Conditions on it, e.g. `field.eq(Status.ACTIVE)` or
+    `field.lt(other_field)`, named as in Python's `operator` module.
+    """
 
     name: FieldName
+
+    def eq(self, operand: FieldRef | UncheckedLiteral) -> Comparison:
+        """`self == operand`. `None == x` is false."""
+        return self._compare(ComparisonOperator.EQ, operand)
+
+    def ne(self, operand: FieldRef | UncheckedLiteral) -> Comparison:
+        """`self != operand`. `None != x` is true."""
+        return self._compare(ComparisonOperator.NE, operand)
+
+    def lt(self, operand: FieldRef | UncheckedLiteral) -> Comparison:
+        """`self < operand`. Neither may be optional."""
+        return self._compare(ComparisonOperator.LT, operand)
+
+    def le(self, operand: FieldRef | UncheckedLiteral) -> Comparison:
+        """`self <= operand`. Neither may be optional."""
+        return self._compare(ComparisonOperator.LE, operand)
+
+    def gt(self, operand: FieldRef | UncheckedLiteral) -> Comparison:
+        """`self > operand`. Neither may be optional."""
+        return self._compare(ComparisonOperator.GT, operand)
+
+    def ge(self, operand: FieldRef | UncheckedLiteral) -> Comparison:
+        """`self >= operand`. Neither may be optional."""
+        return self._compare(ComparisonOperator.GE, operand)
+
+    def is_null(self) -> IsNull:
+        """`self is None`."""
+        return IsNull(field=self)
+
+    def _compare(
+        self, operator: ComparisonOperator, operand: FieldRef | UncheckedLiteral
+    ) -> Comparison:
+        match operand:
+            case FieldRef():
+                compared: FieldRef | ConditionLiteral = operand
+            case _:
+                compared = ConditionLiteral(value=operand)
+        return Comparison(operator=operator, field=self, operand=compared)
+
+
+class Combinable:
+    """Combines Conditions with `&`, `|` and `~`, as `and_`, `or_` and `not_` do.
+
+    `a & b & c` nests: it is `And((And((a, b)), c))`, which holds exactly when
+    `and_(a, b, c)` does.
+    """
+
+    def __and__(self, other: Condition) -> And:
+        return And(terms=(self._condition(), other))
+
+    def __or__(self, other: Condition) -> Or:
+        return Or(terms=(self._condition(), other))
+
+    def __invert__(self) -> Not:
+        return Not(term=self._condition())
+
+    def _condition(self) -> Condition:
+        match self:
+            case Comparison() | IsNull() | And() | Or() | Not():
+                return self
+            case _:
+                msg = f"{type(self).__name__} is not a Condition"
+                raise TypeError(msg)
 
 
 type UncheckedLiteral = object
@@ -283,7 +350,7 @@ class ComparisonOperator(enum.StrEnum):
                 return True
 
 
-class Comparison(pydantic.BaseModel, frozen=True):
+class Comparison(Combinable, pydantic.BaseModel, frozen=True):
     """`field <operator> operand`, with Python's two-valued null semantics."""
 
     operator: ComparisonOperator
@@ -291,19 +358,19 @@ class Comparison(pydantic.BaseModel, frozen=True):
     operand: FieldRef | ConditionLiteral
 
 
-class IsNull(pydantic.BaseModel, frozen=True):
+class IsNull(Combinable, pydantic.BaseModel, frozen=True):
     field: FieldRef
 
 
-class And(pydantic.BaseModel, frozen=True):
+class And(Combinable, pydantic.BaseModel, frozen=True):
     terms: Annotated[tuple[Condition, ...], pydantic.Field(min_length=1)]
 
 
-class Or(pydantic.BaseModel, frozen=True):
+class Or(Combinable, pydantic.BaseModel, frozen=True):
     terms: Annotated[tuple[Condition, ...], pydantic.Field(min_length=1)]
 
 
-class Not(pydantic.BaseModel, frozen=True):
+class Not(Combinable, pydantic.BaseModel, frozen=True):
     term: Condition
 
 
@@ -338,7 +405,7 @@ type Node = (
     | Rename
     | RenameSelected
     | Retype
-    | Project
+    | Pick
     | Resolve
     | Flatten
     | Reverse
