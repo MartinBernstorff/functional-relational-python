@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 import types
-from collections.abc import Callable, Generator, Iterable, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Annotated, ClassVar, Self, override
 
@@ -59,6 +59,7 @@ from functional_relational_python.outputs.django.models import (
 from functional_relational_python.outputs.django.queries import (
     DjangoQueriesDiagnostic,
     DjangoQueriesRenderer,
+    Prefetched,
     QueriesIntoDjangoModelsModule,
     RelatedPath,
     ViewModelIntoDjangoModelsModule,
@@ -921,6 +922,160 @@ def colleagues() -> View:
     )
 
 
+def organisation_chart() -> View:
+    """A collection in a collection, whose elements resolve and reverse one-to-one
+    References, beside the same collection without a nested pipeline, which the
+    one prefetch of its path loads too."""
+    return View(
+        name=ViewName("OrganisationChart"),
+        query=steps.from_(
+            Company,
+            steps.project([FieldName("id")]),
+            steps.reverse(
+                Department,
+                steps.project([FieldName("id"), FieldName("company_id")]),
+                steps.resolve(
+                    named(FieldName("company_id")), steps.project([FieldName("name")])
+                ),
+                steps.reverse(
+                    Employee,
+                    steps.project([FieldName("name"), FieldName("mentor_id")]),
+                    steps.resolve(
+                        named(FieldName("mentor_id")),
+                        steps.project([FieldName("name")]),
+                    ),
+                    steps.reverse(Badge, steps.project([FieldName("level")])),
+                ),
+            ),
+            steps.reverse(Department, name=FieldName("all_departments")),
+        ),
+    )
+
+
+def test_golden_queries_of_nested_pipelines_on_sorted_sequences() -> None:
+    """A nested pipeline's Entities are loaded by its prefetch's own queryset,
+    and a collection in it by a Prefetch nested in that queryset."""
+    assert (
+        """\
+def organisation_chart_queryset(
+    queryset: "django.db.models.QuerySet[frp_generated_django.Company]",
+) -> "django.db.models.QuerySet[frp_generated_django.Company]":
+    import frp_generated_django
+
+    return queryset.defer(None).prefetch_related(
+        django.db.models.Prefetch(
+            "department_by_company",
+            queryset=(
+                frp_generated_django.Department._default_manager.order_by("pk")
+                .select_related(
+                    "company",
+                )
+                .prefetch_related(
+                    django.db.models.Prefetch(
+                        "employee_by_department",
+                        queryset=(
+                            frp_generated_django.Employee._default_manager.order_by(
+                                "pk"
+                            ).select_related(
+                                "mentor",
+                                "badge_by_employee",
+                            )
+                        ),
+                    ),
+                )
+            ),
+        ),
+    )
+
+
+def organisation_chart_from_row(
+    row: "frp_generated_django.Company",
+) -> frp_generated_models.OrganisationChart:
+    return frp_generated_models.OrganisationChart.model_validate(
+        {
+            "id": row.id,
+            "departments": [
+                {
+                    "id": _department.id,
+                    "company": {
+                        "name": _department.company.name,
+                    },
+                    "employees": [
+                        {
+                            "name": _employee.name,
+                            "mentor": (
+                                None
+                                if _employee.mentor is None
+                                else {
+                                    "name": _employee.mentor.name,
+                                }
+                            ),
+                            "badge": (
+                                None
+                                if not hasattr(_employee, "badge_by_employee")
+                                else {
+                                    "level": typing.cast(
+                                        "frp_generated_django.Badge",
+                                        getattr(_employee, "badge_by_employee"),
+                                    ).level,
+                                }
+                            ),
+                        }
+                        for _employee in typing.cast(
+                            "django.db.models.Manager[frp_generated_django.Employee]",
+                            getattr(_department, "employee_by_department"),
+                        ).all()
+                    ],
+                }
+                for _department in typing.cast(
+                    "django.db.models.Manager[frp_generated_django.Department]",
+                    getattr(row, "department_by_company"),
+                ).all()
+            ],
+            "all_departments": [
+                {
+                    "id": _department.id,
+                    "name": _department.name,
+                    "company_id": _department.company_id,
+                }
+                for _department in typing.cast(
+                    "django.db.models.Manager[frp_generated_django.Department]",
+                    getattr(row, "department_by_company"),
+                ).all()
+            ],
+        },
+        strict=False,
+    )
+"""
+        in queries_of([organisation_chart()]).root
+    )
+
+
+def test_a_collection_in_a_collection_of_one_entity_binds_another_variable() -> None:
+    view = View(
+        name=ViewName("Mentorships"),
+        query=steps.from_(
+            Department,
+            steps.reverse(
+                Employee,
+                steps.reverse_via(
+                    Employee, FieldName("mentor_id"), name=FieldName("mentees")
+                ),
+            ),
+        ),
+    )
+
+    assert (
+        """\
+                        for _employee_2 in typing.cast(
+                            "django.db.models.Manager[frp_generated_django.Employee]",
+                            getattr(_employee, "employee_by_mentor"),
+                        ).all()
+"""
+        in queries_of([view]).root
+    )
+
+
 def test_golden_queries_of_sorted_sequences() -> None:
     """Prefetched through the reverse accessor, ordered by primary key, by a
     queryset of the Django model imported when the function runs."""
@@ -1400,15 +1555,25 @@ class Database:
     @staticmethod
     def prefetches(
         views: Iterable[compiler.CompiledView], config: DjangoModels
-    ) -> frozenset[RelatedPath]:
-        """The prefetches the query code of `views` makes, each once. Each takes
-        at most one database query more, however many rows there are: none when
-        there is no row to prefetch for."""
+    ) -> frozenset[tuple[RelatedPath, ...]]:
+        """The prefetches the query code of `views` makes, each once, nested ones
+        included, each by the paths of the prefetches to it. Each takes at most
+        one database query more, however many rows there are: none when there is
+        no row to prefetch for."""
+
+        def chains(
+            found: Iterable[Prefetched], before: tuple[RelatedPath, ...]
+        ) -> Iterator[tuple[RelatedPath, ...]]:
+            for prefetch in found:
+                chain = (*before, prefetch.path)
+                yield chain
+                yield from chains(prefetch.prefetches, chain)
+
         return frozenset(
-            found.path
+            chain
             for view in views
-            for found in ViewQueries.of(view, config, Generated.models).prefetches(
-                config
+            for chain in chains(
+                ViewQueries.of(view, config, Generated.models).prefetches(config), ()
             )
         )
 
@@ -1765,6 +1930,7 @@ def read_views() -> list[View]:
                 steps.require(FieldName("badge")),
             ),
         ),
+        organisation_chart(),
     ]
 
 
@@ -1794,8 +1960,12 @@ def test_a_view_reads_in_one_query_like_the_engine(view: View) -> None:
             colleagues(),
             3,
         ),
+        (
+            organisation_chart(),
+            3,
+        ),
     ],
-    ids=["top-level", "nested-and-top-level"],
+    ids=["top-level", "nested-and-top-level", "collection-in-collection"],
 )
 def test_a_list_reads_each_sorted_sequence_in_one_query_more(
     view: View, queries: int
@@ -3197,8 +3367,35 @@ def test_an_unmet_required_field_fails_the_view_models_validation(
             ),
             "mentor_id is required, but there is none for Employee",
         ),
+        (
+            steps.resolve(
+                named(FieldName("department_id")),
+                steps.reverse(
+                    Employee,
+                    steps.project([FieldName("mentor_id")]),
+                    steps.resolve(
+                        named(FieldName("mentor_id")),
+                        steps.project([FieldName("name")]),
+                    ),
+                    steps.require(FieldName("mentor")),
+                ),
+            ),
+            "mentor_id is required, but there is none for Employee",
+        ),
+        (
+            steps.resolve(
+                named(FieldName("department_id")),
+                steps.reverse(
+                    Employee,
+                    steps.project([FieldName("mentor_id")]),
+                    steps.resolve(named(FieldName("mentor_id")), steps.project([])),
+                    steps.require(FieldName("mentor")),
+                ),
+            ),
+            "mentor_id is required, but there is none for Employee",
+        ),
     ],
-    ids=["reference", "reverse", "lifted"],
+    ids=["reference", "reverse", "lifted", "in-collection", "unread-in-collection"],
 )
 def test_an_unmet_required_entity_raises(step: steps.Step, message: str) -> None:
     """As the mapping functions do, through the module's `_required`."""

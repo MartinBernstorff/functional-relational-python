@@ -179,25 +179,6 @@ class NotAReferenceToSubject(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class NestedPipelineOnCollection(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`reverse` gave a nested pipeline to a many-to-one Reference, whose field
-    holds a SortedSequence of Entities, which takes none yet."""
-
-    view: DefinitionName
-    from_model: ir.FromModelName
-    entity: type[pydantic.BaseModel]
-    via: FieldName
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.view.root}: cannot apply a nested pipeline to the "
-            f"{self.entity.__qualname__} entities referencing {self.from_model.root} "
-            f"by the many-to-one Reference {self.entity.__qualname__}."
-            f"{self.via.root}. Reverse it without steps; it holds the entities "
-            "themselves."
-        )
-
-
 class ReverseOntoExistingField(pydantic.BaseModel, Diagnostic, frozen=True):
     """A reversed field's name is a field the relation already has."""
 
@@ -418,15 +399,17 @@ class WhereInWriteModel(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class WhereInNestedPipeline(pydantic.BaseModel, Diagnostic, frozen=True):
-    """A nested `resolve` pipeline filters. Each looked-up Entity is one field of
-    a View result, so there is no row to drop."""
+    """A nested pipeline of `resolve` or `reverse` filters. Each looked-up Entity
+    is one field, or one element of a field, of a View result, so there is no row
+    to drop."""
 
     view: DefinitionName
     from_model: ir.FromModelName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.view.root}: cannot filter the resolved {self.from_model.root} with "
+            f"{self.view.root}: cannot filter the resolved or reversed "
+            f"{self.from_model.root} with "
             "`where`, because only a View's own pipeline can filter its rows."
         )
 
@@ -818,7 +801,6 @@ type CompileDiagnostic = (
     | NoReferenceToSubject
     | AmbiguousReverse
     | NotAReferenceToSubject
-    | NestedPipelineOnCollection
     | ReverseOntoExistingField
     | NotAResolvedField
     | FlattenCollection

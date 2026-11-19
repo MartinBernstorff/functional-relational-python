@@ -36,7 +36,8 @@ class ViewRow(pydantic.RootModel[Mapping[FieldName, object]], frozen=True):
     Values are the Entity's own field values, so their types are the user's. A
     resolved field holds the referenced Entity, or a ViewRow if it has a nested
     pipeline. A reversed many-to-one Reference holds a SortedSequence of the
-    Entities referencing the subject.
+    Entities referencing the subject, or of a ViewRow per Entity if it has a
+    nested pipeline.
     """
 
     @staticmethod
@@ -182,7 +183,7 @@ type ReadDiagnostic = (
 
 type FieldValue = object
 """A View result's field value: the Entity's own value, an Entity, a ViewRow, or
-a SortedSequence of Entities."""
+a SortedSequence of Entities or of ViewRows."""
 
 
 class _IdsFound:
@@ -412,9 +413,21 @@ class InMemoryViewEngine:
         match field:
             case ir.Field(value=value):
                 pass
-            case ir.NestedField(value=found, relation=relation):
-                entity = self._follow(found.lookups(), subject, run)
-                return None if entity is None else self._row(relation, entity, run)
+            case ir.NestedField(value=found, relation=nested):
+                nested_value: FieldValue
+                match found:
+                    case ir.CollectionLookup():
+                        subject_id = getattr(subject, EntityNode.primary_key.root)
+                        nested_value = SortedSequence(
+                            self._row(nested, entity, run)
+                            for entity in run.collection(found, subject_id)
+                        )
+                    case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
+                        entity = self._follow(found.lookups(), subject, run)
+                        nested_value = (
+                            None if entity is None else self._row(nested, entity, run)
+                        )
+                return nested_value
         match value:
             case ir.SubjectField() | ir.RequiredField():
                 InMemoryViewEngine._check_required(value, subject, run)

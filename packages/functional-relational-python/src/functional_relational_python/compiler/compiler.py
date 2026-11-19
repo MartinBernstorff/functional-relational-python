@@ -1031,7 +1031,7 @@ def _check_reverse(
     if not reported:
         match _chosen_reference(entity_graph, view, node, relation, subject):
             case Reference() as reference:
-                checked = _reversed(entity_graph, view, node, from_model, reference)
+                checked = _reversed(entity_graph, view, node, reference)
                 field = checked.field
                 reported.extend(checked.diagnostics)
             case unchosen:
@@ -1120,47 +1120,26 @@ def _reversed(
     entity_graph: EntityGraph,
     view: DefinitionName,
     node: ir.Reverse,
-    from_model: ir.FromModelName,
     reference: Reference,
 ) -> _CheckedField:
-    """The field holding what references the subject by `reference`, after
-    `node.then` if it does anything."""
+    """The field holding what references the subject by `reference`: by a
+    one-to-one Reference the Entity, by a many-to-one Reference every such
+    Entity; after `node.then` if it does anything."""
     name = _reversed_name(node, reference.cardinality)
+    found: ir.FoundValue
     match reference.cardinality:
         case Cardinality.ONE_TO_ONE:
-            lookup = ir.ReverseLookup(
+            found = ir.ReverseLookup(
                 optionality=Optionality.OPTIONAL,
                 target=node.entity,
                 via=reference.field,
                 id_type=reference.id_type,
             )
-            return _resolved(entity_graph, view, node.then, name, lookup)
         case Cardinality.MANY_TO_ONE:
-            pass
-    collection = ir.CollectionLookup(
-        target=node.entity, via=reference.field, id_type=reference.id_type
-    )
-    field = ir.Field(
-        name=name,
-        info=FieldInfo.from_annotation(collection.annotation()),
-        value=collection,
-        default=ir.NoDefault(),
-    )
-    root = ir.FromModel(from_model=node.entity)
-    if node.then(root) == root:
-        return _CheckedField(field=field, diagnostics=())
-    # The nested pipeline is left out, so later steps find the Entities.
-    return _CheckedField(
-        field=field,
-        diagnostics=(
-            diagnostics.NestedPipelineOnCollection(
-                view=view,
-                from_model=from_model,
-                entity=node.entity,
-                via=reference.field,
-            ),
-        ),
-    )
+            found = ir.CollectionLookup(
+                target=node.entity, via=reference.field, id_type=reference.id_type
+            )
+    return _resolved(entity_graph, view, node.then, name, found)
 
 
 def _resolved(
@@ -1168,16 +1147,17 @@ def _resolved(
     view: DefinitionName,
     then: Callable[[ir.Node], ir.Node],
     name: FieldName,
-    found: ir.EntityValue,
+    found: ir.FoundValue,
 ) -> _CheckedField:
-    """The field holding the looked-up Entity, after `then` if it does anything.
+    """The field holding the looked-up Entity, or each of the Entities a
+    CollectionLookup finds, after `then` if it does anything.
 
     Without a nested pipeline the field is typed by the Entity class itself. The
     field is new, so it has no default: a resolved Reference's default was for an
     ID, and need not fit the Entity.
     """
     default = ir.NoDefault()
-    root = ir.FromModel(from_model=found.lookups()[-1].target)
+    root = ir.FromModel(from_model=found.entity())
     nested = then(root)
     if nested == root:
         return _CheckedField(
@@ -1214,8 +1194,9 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
     relation: ir.Relation
 
     @staticmethod
-    def of(field: ir.RelationField) -> _HeldEntity | ir.Field:
-        """The Entity `field` holds, or `field` itself when it is not resolved."""
+    def of(field: ir.RelationField) -> _HeldEntity | ir.RelationField:
+        """The Entity `field` holds, or `field` itself when it holds no one
+        Entity: it is not resolved, or holds a SortedSequence of Entities."""
         match field:
             case ir.Field(
                 value=ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() as found
@@ -1225,9 +1206,12 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
                     chain=chain,
                     relation=ir.Relation.of(ir.FromModel(from_model=chain[-1].target)),
                 )
-            case ir.NestedField(value=found, relation=relation):
+            case ir.NestedField(
+                value=ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() as found,
+                relation=relation,
+            ):
                 return _HeldEntity(chain=found.lookups(), relation=relation)
-            case ir.Field():
+            case ir.Field() | ir.NestedField():
                 return field
 
     def lifted(self, field: ir.RelationField) -> ir.RelationField | _Unliftable:
@@ -1239,11 +1223,14 @@ class _HeldEntity(pydantic.BaseModel, frozen=True):
         """
         match field:
             case ir.NestedField(value=found):
-                return field.model_copy(
-                    update={
-                        "value": ir.ChainedLookup(chain=(*self.chain, *found.lookups()))
-                    }
-                )
+                nested: ir.RelationField | _Unliftable
+                match found:
+                    case ir.CollectionLookup():
+                        nested = _Unliftable()
+                    case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
+                        chain = ir.ChainedLookup(chain=(*self.chain, *found.lookups()))
+                        nested = field.model_copy(update={"value": chain})
+                return nested
             case ir.Field(value=value):
                 pass
         lifted_value: ir.Value
@@ -1284,7 +1271,7 @@ def _check_flatten(
         match _HeldEntity.of(field):
             case _HeldEntity() as entity:
                 held[field.name] = entity
-            case ir.Field():
+            case ir.Field() | ir.NestedField():
                 pass
     match node.fields:
         case ir.Select() as selected:
@@ -1349,7 +1336,11 @@ def _unflattenable(
     field."""
     named = [field for field in relation.fields if field.name == name]
     match named:
-        case [ir.Field(value=ir.CollectionLookup()), *_]:
+        case [
+            ir.Field(value=ir.CollectionLookup())
+            | ir.NestedField(value=ir.CollectionLookup()),
+            *_,
+        ]:
             return diagnostics.FlattenCollection(
                 view=view, from_model=relation.from_model, field=name
             )

@@ -148,8 +148,8 @@ def required(
         case Optionality.OPTIONAL:
             pass
     match field:
-        case ir.NestedField(value=lookup):
-            return field.model_copy(update={"value": lookup.required()})
+        case ir.NestedField():
+            return field.required()
         case ir.Field(value=value):
             pass
     value_required: ir.Value

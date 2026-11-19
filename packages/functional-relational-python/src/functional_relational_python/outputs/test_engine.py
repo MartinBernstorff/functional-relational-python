@@ -611,6 +611,80 @@ def test_a_sorted_sequence_in_a_nested_pipeline_is_of_the_resolved_entity() -> N
     )
 
 
+def test_a_nested_pipeline_runs_on_each_entity_of_a_collection() -> None:
+    view = View(
+        name=ViewName.fake(),
+        query=steps.from_(
+            Department,
+            steps.project([FieldName("id")]),
+            steps.reverse(Employee, steps.project([FieldName("mentor_id")])),
+        ),
+    )
+    view_engine = hr_engine(view)
+    department = Department.fake(DepartmentId(1), CompanyId.fake())
+    later, earlier = (
+        Employee.fake(EmployeeId(index), department.id, None) for index in (2, 1)
+    )
+    for entity in (department, later, earlier):
+        view_engine.put(entity).unwrap()
+
+    (row,) = read(view_engine, view.name)
+
+    employees = row.root[FieldName("employees")]
+    assert (row, type(employees)) == (
+        engine.ViewRow(
+            {
+                FieldName("id"): department.id,
+                FieldName("employees"): tuple(
+                    engine.ViewRow({FieldName("mentor_id"): employee.mentor_id})
+                    for employee in (earlier, later)
+                ),
+            }
+        ),
+        SortedSequence,
+    )
+
+
+def test_a_collection_in_a_collection_holds_each_elements_entities() -> None:
+    view = View(
+        name=ViewName.fake(),
+        query=steps.from_(
+            Company,
+            steps.project([FieldName("id")]),
+            steps.reverse(
+                Department, steps.project([FieldName("id")]), steps.reverse(Employee)
+            ),
+        ),
+    )
+    view_engine = hr_engine(view)
+    company = Company.fake(CompanyId.fake())
+    staffed, empty = (
+        Department.fake(DepartmentId(index), company.id) for index in (1, 2)
+    )
+    employee = Employee.fake(EmployeeId(1), staffed.id, None)
+    for entity in (company, staffed, empty, employee):
+        view_engine.put(entity).unwrap()
+
+    assert read(view_engine, view.name) == (
+        engine.ViewRow(
+            {
+                FieldName("id"): company.id,
+                FieldName("departments"): (
+                    engine.ViewRow(
+                        {
+                            FieldName("id"): staffed.id,
+                            FieldName("employees"): (employee,),
+                        }
+                    ),
+                    engine.ViewRow(
+                        {FieldName("id"): empty.id, FieldName("employees"): ()}
+                    ),
+                ),
+            }
+        ),
+    )
+
+
 def test_every_id_several_entities_share_in_a_one_to_one_reference_is_reported() -> (
     None
 ):
@@ -1166,6 +1240,27 @@ def test_a_requirement_in_a_nested_pipeline_names_the_referenced_entity() -> Non
     assert unmet(view_engine, view.name) == (
         engine.UnmetRequirement(
             entity=Employee, field=FieldName("mentor_id"), ids=(mentor.id,)
+        ),
+    )
+
+
+def test_a_requirement_in_a_collections_pipeline_names_each_unmet_entity() -> None:
+    view = View(
+        name=ViewName.fake(),
+        query=steps.from_(
+            Department, steps.reverse(Employee, steps.require(FieldName("mentor_id")))
+        ),
+    )
+    view_engine = hr_engine(view)
+    department = Department.fake(DepartmentId(1), CompanyId.fake())
+    unmentored = Employee.fake(EmployeeId(1), department.id, None)
+    mentored = Employee.fake(EmployeeId(2), department.id, unmentored.id)
+    for entity in (department, unmentored, mentored):
+        view_engine.put(entity).unwrap()
+
+    assert unmet(view_engine, view.name) == (
+        engine.UnmetRequirement(
+            entity=Employee, field=FieldName("mentor_id"), ids=(unmentored.id,)
         ),
     )
 

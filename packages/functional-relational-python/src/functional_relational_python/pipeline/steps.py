@@ -226,8 +226,9 @@ def reverse(
     `entity`'s `id`, empty when there is none, and is named in the plural, e.g.
     `ads` for `Ad`. `name` names the field instead.
 
-    The steps in `then` form a pipeline applied to `entity`; without them, the
-    field holds the Entity itself. A many-to-one Reference takes no pipeline yet.
+    The steps in `then` form a pipeline applied to `entity`, or for a many-to-one
+    Reference to each `entity`, which may resolve and reverse in turn but not
+    filter with `where`; without them, the field holds the Entities themselves.
     """
     # `name` is optional, unlike TY-k8 asks, so that the common call stays short.
     return _reversing(entity, ir.SoleReference(), then, name)

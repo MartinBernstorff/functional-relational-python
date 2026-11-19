@@ -1372,6 +1372,18 @@ class CampaignNote(pydantic.BaseModel):
     campaign_id: ChannelCampaignId
 
 
+class NoteReplyId(Id[int]):
+    pass
+
+
+class NoteReply(pydantic.BaseModel):
+    """A many-to-one Reference to CampaignNote: reversed inside a reversed
+    CampaignNote, a SortedSequence in a SortedSequence."""
+
+    id: NoteReplyId
+    note_id: CampaignNoteId
+
+
 class CampaignLinkId(Id[int]):
     pass
 
@@ -1398,7 +1410,15 @@ class Copy(pydantic.BaseModel):
 
 def campaign_graph() -> EntityGraph:
     return EntityGraph.build(
-        [ChannelCampaign, MetaCampaign, Relaunch, CampaignNote, CampaignLink, Copy],
+        [
+            ChannelCampaign,
+            MetaCampaign,
+            Relaunch,
+            CampaignNote,
+            NoteReply,
+            CampaignLink,
+            Copy,
+        ],
         IdBase.fake(),
         OneToOneMarker.fake(),
     ).unwrap()
@@ -1590,6 +1610,42 @@ def test_a_reversed_nested_pipeline_types_the_field_by_its_relation() -> None:
             pytest.fail(f"expected a nested field, got {field}")
 
 
+def test_a_nested_pipeline_on_a_collection_types_the_field_by_its_relation() -> None:
+    view = compile_reversing(
+        ChannelCampaign,
+        steps.reverse(CampaignNote, steps.omit(FieldName("campaign_id"))),
+    )
+
+    match view.relation.fields[-1]:
+        case ir.NestedField(name=name, value=lookup, relation=relation) as field:
+            assert (name, lookup, field.optionality(), relation.field_names()) == (
+                FieldName("campaign_notes"),
+                campaign_notes_lookup(),
+                Optionality.REQUIRED,
+                (FieldName("id"),),
+            )
+        case field:
+            pytest.fail(f"expected a nested field, got {field}")
+
+
+def test_a_collection_in_a_collection_is_looked_up_from_each_element() -> None:
+    replies = ir.CollectionLookup(
+        target=NoteReply, via=FieldName("note_id"), id_type=CampaignNoteId
+    )
+    view = compile_reversing(
+        ChannelCampaign, steps.reverse(CampaignNote, steps.reverse(NoteReply))
+    )
+
+    match view.relation.fields[-1]:
+        case ir.NestedField(relation=relation):
+            assert (relation.fields[-1].value, view.relation.lookups()) == (
+                replies,
+                (campaign_notes_lookup(), replies),
+            )
+        case field:
+            pytest.fail(f"expected a nested field, got {field}")
+
+
 def test_reverse_via_follows_the_chosen_one_to_one_reference() -> None:
     view = compile_reversing(
         ChannelCampaign, steps.reverse_via(Relaunch, FieldName("new_campaign_id"))
@@ -1699,12 +1755,53 @@ def test_reverse_starts_from_the_from_model_however_its_fields_changed() -> None
         ),
         (
             ChannelCampaign,
-            steps.reverse(CampaignNote, steps.omit(FieldName("id"))),
-            diagnostics.NestedPipelineOnCollection(
+            steps.reverse(
+                CampaignNote,
+                steps.where(conditions.is_null(conditions.field(FieldName("id")))),
+            ),
+            diagnostics.WhereInNestedPipeline(
+                view=ViewName.fake(), from_model=ir.FromModelName("CampaignNote")
+            ),
+        ),
+        (
+            ChannelCampaign,
+            steps.pipeline(
+                steps.reverse(CampaignNote, steps.omit(FieldName("id"))),
+                steps.require(FieldName("campaign_notes")),
+            ),
+            diagnostics.RequireOnRequiredField(
                 view=ViewName.fake(),
                 from_model=ir.FromModelName("ChannelCampaign"),
-                entity=CampaignNote,
-                via=FieldName("campaign_id"),
+                field=FieldName("campaign_notes"),
+                annotation=SortedSequence[CampaignNote, Literal["id"]],
+            ),
+        ),
+        (
+            ChannelCampaign,
+            steps.pipeline(
+                steps.reverse(CampaignNote, steps.omit(FieldName("id"))),
+                steps.flatten(FieldName("campaign_notes")),
+            ),
+            diagnostics.FlattenCollection(
+                view=ViewName.fake(),
+                from_model=ir.FromModelName("ChannelCampaign"),
+                field=FieldName("campaign_notes"),
+            ),
+        ),
+        (
+            MetaCampaign,
+            steps.pipeline(
+                steps.resolve(
+                    named(FieldName("channel_campaign_id")),
+                    steps.omit(FieldName("id")),
+                    steps.reverse(CampaignNote, steps.omit(FieldName("id"))),
+                ),
+                steps.flatten(FieldName("channel_campaign")),
+            ),
+            diagnostics.LiftedCollection(
+                view=ViewName.fake(),
+                flattened=FieldName("channel_campaign"),
+                field=FieldName("campaign_notes"),
             ),
         ),
         (
@@ -1814,7 +1911,10 @@ def test_reverse_starts_from_the_from_model_however_its_fields_changed() -> None
         "ambiguous",
         "ambiguous-across-cardinalities",
         "via-non-reference",
-        "pipeline-on-collection",
+        "where-in-collection-pipeline",
+        "require-nested-collection",
+        "flatten-nested-collection",
+        "lift-nested-collection",
         "require-collection",
         "flatten-collection",
         "where-on-collection",
@@ -1975,20 +2075,6 @@ def test_a_reverse_keeps_the_name_given(step: steps.Step) -> None:
             ),
         ),
         (
-            diagnostics.NestedPipelineOnCollection(
-                view=ViewName("CampaignView"),
-                from_model=ir.FromModelName("ChannelCampaign"),
-                entity=CampaignNote,
-                via=FieldName("campaign_id"),
-            ),
-            (
-                "CampaignView: cannot apply a nested pipeline to the CampaignNote "
-                "entities referencing ChannelCampaign by the many-to-one Reference "
-                "CampaignNote.campaign_id. Reverse it without steps; it holds the "
-                "entities themselves."
-            ),
-        ),
-        (
             diagnostics.FlattenCollection(
                 view=ViewName("CampaignView"),
                 from_model=ir.FromModelName("ChannelCampaign"),
@@ -2031,7 +2117,6 @@ def test_a_reverse_keeps_the_name_given(step: steps.Step) -> None:
         "no-reference",
         "ambiguous",
         "via",
-        "pipeline-on-collection",
         "flatten-collection",
         "lift-collection",
         "onto-existing-field",
@@ -2746,9 +2831,8 @@ def pipelines(
                     )
                 )
             # A reverse_flatten lifts the reversed field's fields, each renamed to a
-            # name no other field has; a many-to-one Reference has none to lift,
-            # and takes no nested pipeline. Without a reverse to draw, this falls
-            # through to a resolve.
+            # name no other field has; a many-to-one Reference has none to lift.
+            # Without a reverse to draw, this falls through to a resolve.
             case "reverse" | "reverse_flatten" as action if depth.root > 0 and (
                 unused := [
                     reversal
@@ -2757,20 +2841,16 @@ def pipelines(
                     and (action == "reverse" or reversal[3] == Cardinality.ONE_TO_ONE)
                 ]
             ):
-                name, model, via, cardinality = draw(st.sampled_from(unused))
-                nested = (
-                    draw(
-                        pipelines(
-                            graph,
-                            model,
-                            Depth(depth.root - 1),
-                            Collections.NONE
-                            if action == "reverse_flatten"
-                            else collections,
-                        )
+                name, model, via, _ = draw(st.sampled_from(unused))
+                nested = draw(
+                    pipelines(
+                        graph,
+                        model,
+                        Depth(depth.root - 1),
+                        Collections.NONE
+                        if action == "reverse_flatten"
+                        else collections,
                     )
-                    if cardinality == Cardinality.ONE_TO_ONE
-                    else steps.pipeline()
                 )
                 drawn.append(
                     steps.pipeline(
@@ -2903,7 +2983,7 @@ class PlainShape(pydantic.BaseModel, frozen=True):
 
 class NestedShape(pydantic.BaseModel, frozen=True):
     name: FieldName
-    value: ir.EntityValue
+    value: ir.FoundValue
     relation: RelationShape
 
 
@@ -3076,8 +3156,13 @@ def resolved_fields(
                 value=ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() as value
             ):
                 found.append((field, value))
-            case ir.NestedField(value=value, relation=nested):
+            case ir.NestedField(
+                value=ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup() as value,
+                relation=nested,
+            ):
                 found.extend(((field, value), *resolved_fields(nested)))
+            case ir.NestedField(relation=nested):
+                found.extend(resolved_fields(nested))
             case ir.Field():
                 pass
     return tuple(found)
@@ -3123,6 +3208,8 @@ def collection_lookups(relation: ir.Relation) -> tuple[ir.CollectionLookup, ...]
         match field:
             case ir.Field(value=ir.CollectionLookup() as value):
                 found.append(value)
+            case ir.NestedField(value=ir.CollectionLookup() as value, relation=nested):
+                found.extend((value, *collection_lookups(nested)))
             case ir.NestedField(relation=nested):
                 found.extend(collection_lookups(nested))
             case ir.Field():
@@ -4042,7 +4129,8 @@ def test_building_a_where_checks_nothing() -> None:
                 view=ViewName("EmployeeView"), from_model=ir.FromModelName("Employee")
             ),
             (
-                "EmployeeView: cannot filter the resolved Employee with `where`, "
+                "EmployeeView: cannot filter the resolved or reversed Employee with "
+                "`where`, "
                 "because only a View's own pipeline can filter its rows."
             ),
         ),

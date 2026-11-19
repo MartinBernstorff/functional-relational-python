@@ -405,6 +405,10 @@ class _FindsEntity(pydantic.BaseModel, frozen=True):
         is."""
         return self.optionality.annotate(self.target)
 
+    def entity(self) -> type[pydantic.BaseModel]:
+        """The Entity it finds: its target."""
+        return self.target
+
     @staticmethod
     def optionality_of(lookups: Iterable[EntityLookup]) -> Optionality:
         """Whether following `lookups` in turn may find no Entity: whether any of
@@ -494,6 +498,14 @@ class CollectionLookup(pydantic.BaseModel, frozen=True):
         """The target's field the subject's ID is matched against: `via`."""
         return self.via
 
+    def entity(self) -> type[pydantic.BaseModel]:
+        """The Entity each element is: its target."""
+        return self.target
+
+    def optionality(self) -> Optionality:
+        """A SortedSequence is never `None`, only empty."""
+        return Optionality.REQUIRED
+
     def annotation(self) -> type[SortedSequence[pydantic.BaseModel, LiteralString]]:
         """`SortedSequence[<target>, Literal["id"]]`."""
         key = typing.cast("SpecialForm", typing.Literal)[EntityNode.primary_key.root]
@@ -526,11 +538,19 @@ class ChainedLookup(pydantic.BaseModel, frozen=True):
     def annotation(self) -> type[pydantic.BaseModel | None]:
         """The found value's type: the last target Entity, optional if any
         Reference on the way is."""
-        return Lookup.optionality_of(self.chain).annotate(self.chain[-1].target)
+        return Lookup.optionality_of(self.chain).annotate(self.entity())
+
+    def entity(self) -> type[pydantic.BaseModel]:
+        """The Entity it finds: the last target."""
+        return self.chain[-1].target
 
 
 type EntityValue = EntityLookup | ChainedLookup
 """The Entity a resolved field holds."""
+
+type FoundValue = EntityValue | CollectionLookup
+"""What a resolved or reversed field holds: one Entity, or a SortedSequence of
+them."""
 
 
 class Added(pydantic.BaseModel, frozen=True):
@@ -679,9 +699,9 @@ class Field(pydantic.BaseModel, frozen=True):
 
     @staticmethod
     def looked_up(
-        name: FieldName, value: EntityValue, default: DefaultValue | NoDefault
+        name: FieldName, value: FoundValue, default: DefaultValue | NoDefault
     ) -> Field:
-        """The field holding the Entity `value` finds, typed by
+        """The field holding the Entity or Entities `value` finds, typed by
         `value.annotation()`."""
         return Field(
             name=name,
@@ -784,19 +804,34 @@ class Field(pydantic.BaseModel, frozen=True):
 
 
 class NestedField(pydantic.BaseModel, frozen=True):
-    """A resolved or reversed field whose Entity went through a nested pipeline.
+    """A resolved or reversed field whose Entity, or each of whose Entities, went
+    through a nested pipeline.
 
     Its type is a View model generated from `relation`, built from the Entity
-    `value` finds.
+    `value` finds; or for a CollectionLookup a SortedSequence of such models, one
+    per Entity it finds, in its order.
     """
 
     name: FieldName
-    value: EntityValue
+    value: FoundValue
     relation: Relation
     default: DefaultValue | NoDefault
 
     def optionality(self) -> Optionality:
-        return Lookup.optionality_of(self.value.lookups())
+        match self.value:
+            case CollectionLookup():
+                return self.value.optionality()
+            case Lookup() | ReverseLookup() | ChainedLookup():
+                return Lookup.optionality_of(self.value.lookups())
+
+    def required(self) -> NestedField:
+        """This field, required by the View: each lookup on the way must find an
+        Entity. A SortedSequence is never `None`, so one is left as it is."""
+        match self.value:
+            case CollectionLookup():
+                return self
+            case Lookup() | ReverseLookup() | ChainedLookup():
+                return self.model_copy(update={"value": self.value.required()})
 
 
 type RelationField = Field | NestedField
@@ -845,15 +880,16 @@ class Relation(pydantic.BaseModel, frozen=True):
         """
         used: list[Finder] = []
         for field in self.fields:
+            match field.value:
+                case CollectionLookup() as collection:
+                    used.append(collection)
+                case other:
+                    used.extend(other.lookups())
             match field:
-                case Field(value=value):
-                    match value:
-                        case CollectionLookup():
-                            used.append(value)
-                        case other:
-                            used.extend(other.lookups())
-                case NestedField(value=value, relation=nested):
-                    used.extend((*value.lookups(), *nested.lookups()))
+                case Field():
+                    pass
+                case NestedField(relation=nested):
+                    used.extend(nested.lookups())
         first: dict[tuple[type[pydantic.BaseModel], FieldName], Finder] = {}
         for lookup in used:
             _ = first.setdefault((lookup.target, lookup.keyed_by()), lookup)

@@ -871,6 +871,15 @@ class _AnnotationRenderer:
         arguments = ", ".join(self.render(arg).root for arg in generic["args"])
         return TypeExpression(f"{self._named(origin).root}[{arguments}]")
 
+    def render_sorted_sequence(self, element: TypeExpression) -> TypeExpression:
+        """`SortedSequence[<element>, Literal["id"]]`: a SortedSequence of a
+        generated model, ascending by the `id` of the Entity each is built from."""
+        sequence = self._named(SortedSequence)
+        self.symbols.add(_AnnotationRenderer.literal)
+        literal = _AnnotationRenderer.literal.reference().root
+        key = PythonString(EntityNode.primary_key.root).literal().root
+        return TypeExpression(f"{sequence.root}[{element.root}, {literal}[{key}]]")
+
     def render(self, annotation: ir.RuntimeAnnotation) -> TypeExpression:
         origin = typing.get_origin(annotation)
         if origin is None:
@@ -1134,15 +1143,21 @@ class _ModelPlanner:
                         field.annotation(), field.info.metadata
                     )
                 case ir.NestedField(value=found, relation=nested_relation):
-                    self.used.use(found.lookups()[-1].target)
+                    self.used.use(found.entity())
                     model = self.plan(
                         names.nested_in(field), nested_relation, pydantic.BaseModel
                     )
                     nested[field.name] = model
                     uses.add(model.symbol)
-                    rendered = field.optionality().annotate_text(
-                        model.symbol.reference()
-                    )
+                    match found:
+                        case ir.CollectionLookup():
+                            rendered = renderer.render_sorted_sequence(
+                                model.symbol.reference()
+                            )
+                        case ir.Lookup() | ir.ReverseLookup() | ir.ChainedLookup():
+                            rendered = field.optionality().annotate_text(
+                                model.symbol.reference()
+                            )
             fields.append(
                 ModelField(
                     field=field,
