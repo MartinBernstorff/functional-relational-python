@@ -692,7 +692,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             for query in queries
             for lookup in query.view.relation.lookups()
             if isinstance(lookup, ir.CollectionLookup)
-            and (existing := config.existing.get(lookup.target)) is not None
+            and (existing := config.existing().get(lookup.target)) is not None
             and lookup.via not in existing.reverse_accessors
         )
         return DiagnosticsError.or_ok(
@@ -742,7 +742,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
             *(query.model.module for query in self._read()),
             *(symbol.module for symbol in self.classes.values()),
             *(
-                base.origin.module
+                base.symbol().module
                 for entity in self.graph.entities
                 if self.config.generates(entity)
                 for base in (
@@ -760,7 +760,7 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
                 self.config.module,
                 *(
                     existing.module
-                    for entity, existing in self.config.existing.items()
+                    for entity, existing in self.config.existing().items()
                     if entity in self.graph.entities
                 ),
             )
@@ -1299,11 +1299,11 @@ class DjangoQueriesRenderer(pydantic.BaseModel, frozen=True):
         subscripted with `entity`'s, quoted, split over lines like ruff format
         does."""
         match base:
-            case ModelGenericBase(origin=origin):
+            case ModelGenericBase():
                 model = self.config.model_of(entity).qualified().root
-                written = Expression(f'{origin.qualified().root}["{model}"]')
-            case PlainBase(origin=origin):
-                written = Expression(origin.qualified().root)
+                written = Expression(f'{base.symbol().qualified().root}["{model}"]')
+            case PlainBase():
+                written = Expression(base.symbol().qualified().root)
         statement = f"class {name.root}({written.root}):\n"
         if len(statement) - 1 <= LineLength.default().root:
             return FileText(statement)

@@ -289,12 +289,42 @@ subclasses. Defaults to `pydantic.BaseModel`.
 ### Django
 
 `functional_relational_python.django` holds its configuration. `DjangoModels` generates a Django model per Entity into `module`, and a QuerySet
-and Manager per Entity into `queries`, with a query for each View. It also
-configures field types, `on_delete` per Reference, model bases, decorators and
-`Meta`, Entities that already have a Django model (`existing`), and database
-constraints per Entity: `Check(name, condition)` and
-`Unique(name, fields, where)`. Migrations are yours to
-make, e.g. with `makemigrations`.
+and Manager per Entity into `queries`, with a query for each View. Only `module`,
+`queries` and `app_label` are required:
+
+```python
+from django.db import models
+from functional_relational_python import django as dj
+
+django = dj.DjangoModels(
+    module=frp.ModulePath("myapp.models"),
+    queries=frp.ModulePath("myapp.queries"),
+    app_label=dj.AppLabel("myapp"),
+    every_model=dj.ModelOptions(ordering=(dj.OrderingTerm("-id"),)),
+    entity_configs={
+        Employee: dj.GeneratedModel(
+            fields={
+                frp.FieldName("department_id"): dj.FieldConfig(
+                    on_delete=dj.OnDelete.CASCADE,
+                    related_name=dj.RelatedName("employees"),
+                ),
+            },
+            constraints=(dj.Unique(...),),
+        ),
+    },
+)
+```
+
+`every_model` sets what every generated model shares: bases, decorators,
+ordering, per-field options, and QuerySet and Manager bases. `entity_configs`
+holds an Entity's own: a `GeneratedModel`, whose settings replace those of
+`every_model` and whose `fields` combine with its, or an `ExistingDjangoModel`
+for an Entity the application already has a Django model for. A `FieldConfig`
+holds a field's `default`, and for a Reference its `on_delete` and
+`related_name`. Bases, decorators and field classes are the objects themselves,
+e.g. `models.Model`, or a `Symbol` for one the Catalog cannot import. Database
+constraints are `Check(name, condition)` and `Unique(name, fields, where)`.
+Migrations are yours to make, e.g. with `makemigrations`.
 
 ## Testing with the InMemoryViewEngine
 
