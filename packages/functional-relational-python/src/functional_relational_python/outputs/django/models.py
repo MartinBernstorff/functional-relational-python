@@ -7,14 +7,14 @@ A one-to-one Reference is a `OneToOneField`, a many-to-one one a `ForeignKey`.
 Either has a reverse accessor on the referenced Entity's model,
 `<model>_by_<foreign key>`, e.g. `company_profile_by_company` for
 `CompanyProfile.company_id`, so that a query can follow it backwards. A related
-name in the Entity's `EntityModelOptions` names it instead.
+name in the Reference's `FieldConfig` names it instead.
 
-`CatalogModelOptions`, and an Entity's `EntityModelOptions` over them, also
-give a model its base classes, class decorators, `Meta` options, field
-defaults, whether the database enforces its foreign keys, and the bases of its
-QuerySet and Manager. A model is named like its Entity, unless its
-`EntityModelOptions` give it a `DjangoModelName`; that name is the one other
-models, queries, its table and the names frp derives from it use.
+`DjangoModels.every_model`, and an Entity's `GeneratedModel` over it, give a
+model its base classes, class decorators, `Meta` options, per-field options,
+whether the database enforces its foreign keys, and the bases of its QuerySet
+and Manager. A model is named like its Entity, unless its `GeneratedModel` gives
+it a `DjangoModelName`; that name is the one other models, queries, its table
+and the names frp derives from it use.
 
 An Entity's constraints, see `pipeline.constraints`, are in its model's
 `Meta.constraints`, with a check per numeric bound its fields' types set, e.g.
@@ -34,9 +34,10 @@ import enum
 import keyword
 import math
 import operator
+import sys
 import typing
 import uuid
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
 import annotated_types
 import pydantic
@@ -68,6 +69,7 @@ from functional_relational_python.outputs.python.symbols import (
     PythonString,
     Symbol,
     TypeExpression,
+    UnimportableError,
     ValueExpression,
 )
 from functional_relational_python.pipeline import ir
@@ -90,6 +92,55 @@ from functional_relational_python.support.generated_files import (
 )
 from functional_relational_python.support.identifier import Identifier
 
+type Importable = Symbol | Callable[..., object]
+"""A class or function generated source imports: the object itself, e.g.
+`models.Model` or `uuid.uuid4`, or its Symbol, for one the Catalog cannot import,
+e.g. an abstract Django model, whose module needs Django set up."""
+
+
+def importable_symbol(value: Importable) -> Result[Symbol, UnimportableError]:
+    """How generated source imports `value`: one `django.db.models` exports, e.g.
+    `models.CharField`, from there, so the generated module refers to it as
+    `models.CharField`; any other by its module and qualified name."""
+    match value:
+        case Symbol():
+            return Ok(value)
+        case _:
+            pass
+    name = getattr(value, "__name__", "")
+    exporting = sys.modules.get(DjangoField.models_module.root)
+    if name.isidentifier() and getattr(exporting, name, None) is value:
+        return Ok(DjangoField.models_symbol(Identifier(name)))
+    return Symbol.of(value)
+
+
+def imported_symbol(value: Importable) -> Symbol:
+    """The Symbol of a validated `Imported` value, which is always one."""
+    return importable_symbol(value).unwrap()
+
+
+def _validated_importable(value: Importable) -> Symbol:
+    match importable_symbol(value):
+        case Ok(symbol):
+            return symbol
+        case Err(error):
+            raise ValueError(str(error))
+
+
+def resolved_value(value: DjangoValue) -> Symbol | ValueExpression:
+    """A validated `DjangoValue`, its object as the Symbol it is held as."""
+    match value:
+        case ValueExpression():
+            return value
+        case _:
+            return imported_symbol(value)
+
+
+type Imported = typing.Annotated[
+    Importable, pydantic.AfterValidator(_validated_importable)
+]
+"""An `Importable`, held as its Symbol once validated."""
+
 
 class DjangoField(pydantic.BaseModel, frozen=True):
     """A Django model field: its class and keyword arguments, e.g.
@@ -104,8 +155,12 @@ class DjangoField(pydantic.BaseModel, frozen=True):
 
     models_module: typing.ClassVar[ModulePath] = ModulePath("django.db.models")
 
-    field_class: Symbol
-    arguments: Mapping[Identifier, ValueExpression | Symbol | DjangoField]
+    field_class: Imported
+    arguments: Mapping[Identifier, ValueExpression | Symbol | DjangoField] = {}
+
+    def field_symbol(self) -> Symbol:
+        """The field class, e.g. `models.CharField`."""
+        return imported_symbol(self.field_class)
 
     @staticmethod
     def models_symbol(name: Identifier) -> Symbol:
@@ -142,8 +197,8 @@ class DjangoField(pydantic.BaseModel, frozen=True):
     def is_auto_increment(self) -> bool:
         """Whether this is one of Django's auto-incrementing fields, which only a
         primary key may be."""
-        match self.field_class.qualname:
-            case (name,) if DjangoField.is_in_models_module(self.field_class):
+        match self.field_symbol().qualname:
+            case (name,) if DjangoField.is_in_models_module(self.field_symbol()):
                 return name in DjangoField.auto_increment
             case _:
                 return False
@@ -167,8 +222,8 @@ class DjangoField(pydantic.BaseModel, frozen=True):
     def is_numeric(self) -> bool:
         """Whether this is one of Django's non-auto-incrementing numeric fields,
         whose column compares with a number."""
-        match self.field_class.qualname:
-            case (name,) if DjangoField.is_in_models_module(self.field_class):
+        match self.field_symbol().qualname:
+            case (name,) if DjangoField.is_in_models_module(self.field_symbol()):
                 return name in DjangoField.numeric
             case _:
                 return False
@@ -203,13 +258,13 @@ class DjangoField(pydantic.BaseModel, frozen=True):
             ]
         )
         return ValueExpression(
-            f"{DjangoField.referred(self.field_class).root}({arguments})"
+            f"{DjangoField.referred(self.field_symbol()).root}({arguments})"
         )
 
     def imports(self) -> Iterator[Symbol]:
         """What the generated module imports by name to construct the field: its
         class and the Symbols its arguments refer to, outside `django.db.models`."""
-        yield from DjangoField._imported(self.field_class)
+        yield from DjangoField._imported(self.field_symbol())
         for argument in self.arguments.values():
             match argument:
                 case ValueExpression():
@@ -314,11 +369,11 @@ class ForeignKeyConstraint(enum.StrEnum):
     NOT_ENFORCED = "not enforced"
 
 
-type DjangoValue = Symbol | ValueExpression
-"""A value in generated source: a Symbol is imported and referred to by name,
-e.g. `uuid.uuid4` or the enum member `Kind.INSTANCE`, and an expression is
-written as it is: for the module to be as ruff formats it, write it so too, e.g.
-`["channel_campaign"]`, not `['channel_campaign']`."""
+type DjangoValue = Imported | ValueExpression
+"""A value in generated source: an object or Symbol is imported and referred to
+by name, e.g. `uuid.uuid4` or the enum member `Symbol` `Kind.INSTANCE`, and an
+expression is written as it is: for the module to be as ruff formats it, write
+it so too, e.g. `["channel_campaign"]`, not `['channel_campaign']`."""
 
 
 class Default(pydantic.BaseModel, frozen=True):
@@ -349,15 +404,21 @@ type FieldDefault = Default | DatabaseDefault | AutoNow | AutoNowAdd
 class BareDecorator(pydantic.BaseModel, frozen=True):
     """`@<function>` on a model class."""
 
-    function: Symbol
+    function: Imported
+
+    def symbol(self) -> Symbol:
+        return imported_symbol(self.function)
 
 
 class CalledDecorator(pydantic.BaseModel, frozen=True):
     """`@<function>(<arguments>)` on a model class, e.g.
     `@register(follow=["channel_campaign"])`."""
 
-    function: Symbol
+    function: Imported
     arguments: Mapping[Identifier, DjangoValue]
+
+    def symbol(self) -> Symbol:
+        return imported_symbol(self.function)
 
 
 type ClassDecorator = BareDecorator | CalledDecorator
@@ -374,10 +435,6 @@ class DbTable(pydantic.RootModel[str], frozen=True):
             msg = "a table name cannot be empty"
             raise ValueError(msg)
         return root
-
-
-class DefaultDbTable(pydantic.BaseModel, frozen=True):
-    """The table Django names, `<app label>_<model name>`."""
 
 
 class OrderingTerm(pydantic.RootModel[str], frozen=True):
@@ -428,11 +485,17 @@ class DjangoIndex(pydantic.BaseModel, frozen=True):
     name: IndexName
 
 
-class DjangoMeta(pydantic.BaseModel, frozen=True):
-    """A Django model's options, besides its app label. Index fields are not
-    checked against the Entity's fields, like ordering terms."""
+class Unset(pydantic.BaseModel, frozen=True):
+    """A setting left unset: an Entity's model takes the one of
+    `DjangoModels.every_model`, and that one frp's default, which is Django's."""
 
-    db_table: DbTable | DefaultDbTable
+
+class DjangoMeta(pydantic.BaseModel, frozen=True):
+    """A Django model's options, besides its app label: an unset `db_table` is
+    Django's. Index fields are not checked against the Entity's fields, like
+    ordering terms."""
+
+    db_table: DbTable | Unset
     ordering: tuple[OrderingTerm, ...]
     indexes: tuple[DjangoIndex, ...]
 
@@ -441,7 +504,10 @@ class ModelGenericBase(pydantic.BaseModel, frozen=True):
     """A base class generic in the Django model, subscripted with the Entity's,
     e.g. `SoftDeleteManager["app.models.Company"]`."""
 
-    origin: Symbol
+    origin: Imported
+
+    def symbol(self) -> Symbol:
+        return imported_symbol(self.origin)
 
 
 class PlainBase(pydantic.BaseModel, frozen=True):
@@ -449,7 +515,10 @@ class PlainBase(pydantic.BaseModel, frozen=True):
     not generic, or a type checker reports its missing type arguments: a base
     generic in the Django model is a `ModelGenericBase`."""
 
-    origin: Symbol
+    origin: Imported
+
+    def symbol(self) -> Symbol:
+        return imported_symbol(self.origin)
 
 
 type DjangoClassBase = ModelGenericBase | PlainBase
@@ -506,18 +575,44 @@ class DjangoModelName(pydantic.RootModel[str], frozen=True):
         return Identifier(self.root)
 
 
-class DefaultDjangoModelName(pydantic.BaseModel, frozen=True):
-    """The Django model is named like its Entity, e.g. `Company`."""
+class FieldConfig(pydantic.BaseModel, frozen=True):
+    """How one field of a Django model is declared: its `default`, and for a
+    Reference what deleting the referenced Entity does to it (`on_delete`) and
+    the `related_name` of its reverse accessor on the referenced Entity's model.
+
+    An unset option is `DjangoModels.every_model`'s for the field, else frp's: no
+    default, `PROTECT`, and the reverse accessor frp names, see
+    `DjangoModels.reverse_accessor_of`.
+    """
+
+    default: FieldDefault | Unset = Unset()
+    on_delete: OnDelete | Unset = Unset()
+    related_name: RelatedName | Unset = Unset()
+
+    @staticmethod
+    def fake() -> FieldConfig:
+        return FieldConfig()
+
+    def over(self, other: FieldConfig) -> FieldConfig:
+        """This config, with `other`'s options where this one's are unset."""
+        return FieldConfig(
+            default=_set_or(self.default, other.default),
+            on_delete=_set_or(self.on_delete, other.on_delete),
+            related_name=_set_or(self.related_name, other.related_name),
+        )
 
 
-class Inherited(pydantic.BaseModel, frozen=True):
-    """An Entity's model takes the catalog-wide setting, see
-    `CatalogModelOptions`."""
+def _set_or[T](own: T | Unset, inherited: T) -> T:
+    if isinstance(own, Unset):
+        return inherited
+    return own
 
 
-class CatalogModelOptions(pydantic.BaseModel, frozen=True):
-    """How every Entity's Django model is declared, unless its
-    `EntityModelOptions` set otherwise: only what suits every model.
+class ModelOptions(pydantic.BaseModel, frozen=True):
+    """How every generated Django model is declared, unless an Entity's
+    `GeneratedModel` sets otherwise: only what suits every model. Each setting
+    defaults to Django's: a plain `models.Model`, with Django's QuerySet and
+    Manager.
 
     `bases` are the model's base classes, e.g. abstract models and mixins, in
     order. `decorators` decorate the model class, outermost first. The model's
@@ -526,7 +621,7 @@ class CatalogModelOptions(pydantic.BaseModel, frozen=True):
     fields, since a base class may declare more; Django's system checks report
     one the model lacks.
 
-    `defaults` are by field name, and apply to each Entity having that field.
+    `fields` are by field name, and apply to each Entity having that field.
     `foreign_key_constraint` applies to every Reference.
 
     An Entity's QuerySet subclasses `query_set_base`, and its Manager
@@ -535,98 +630,73 @@ class CatalogModelOptions(pydantic.BaseModel, frozen=True):
     `super().get_queryset()`, so that it is the Entity's QuerySet.
     """
 
-    bases: typing.Annotated[tuple[Symbol, ...], pydantic.Field(min_length=1)]
-    decorators: tuple[ClassDecorator, ...]
-    ordering: tuple[OrderingTerm, ...]
-    defaults: Mapping[FieldName, FieldDefault]
-    foreign_key_constraint: ForeignKeyConstraint
-    query_set_base: DjangoClassBase
-    manager_base: DjangoClassBase
-
-    @staticmethod
-    def default() -> CatalogModelOptions:
-        """Django's: a plain `models.Model`, with Django's QuerySet and Manager."""
-        return CatalogModelOptions(
-            bases=(DjangoField.models_symbol(Identifier("Model")),),
-            decorators=(),
-            ordering=(),
-            defaults={},
-            foreign_key_constraint=ForeignKeyConstraint.ENFORCED,
-            query_set_base=ModelGenericBase(
-                origin=DjangoField.models_symbol(Identifier("QuerySet"))
-            ),
-            manager_base=ModelGenericBase(
-                origin=DjangoField.models_symbol(Identifier("Manager"))
-            ),
+    bases: typing.Annotated[tuple[Imported, ...], pydantic.Field(min_length=1)] = (
+        Symbol(module=ModulePath("django.db.models"), qualname=(Identifier("Model"),)),
+    )
+    decorators: tuple[ClassDecorator, ...] = ()
+    ordering: tuple[OrderingTerm, ...] = ()
+    fields: Mapping[FieldName, FieldConfig] = {}
+    foreign_key_constraint: ForeignKeyConstraint = ForeignKeyConstraint.ENFORCED
+    query_set_base: DjangoClassBase = ModelGenericBase(
+        origin=Symbol(
+            module=ModulePath("django.db.models"), qualname=(Identifier("QuerySet"),)
         )
+    )
+    manager_base: DjangoClassBase = ModelGenericBase(
+        origin=Symbol(
+            module=ModulePath("django.db.models"), qualname=(Identifier("Manager"),)
+        )
+    )
 
     @staticmethod
-    def fake() -> CatalogModelOptions:
-        return CatalogModelOptions.default()
+    def fake() -> ModelOptions:
+        return ModelOptions()
 
 
-class EntityModelOptions(pydantic.BaseModel, frozen=True):
-    """How one Entity's Django model is declared, over `CatalogModelOptions`:
-    a setting `Inherited` is the catalog's, and `defaults` are added to the
-    catalog's, replacing one for the same field.
+class GeneratedModel(pydantic.BaseModel, frozen=True):
+    """How frp generates one Entity's Django model. A setting of
+    `ModelOptions` replaces the one of `DjangoModels.every_model`, unless
+    `Unset`; `fields` combine with its, field by field, see `FieldConfig`.
 
-    `defaults`, `related_names` and the fields of `indexes` are by the Entity's
-    field, a Reference by its own name, e.g. `company_id`. A Reference with a
-    related name gets a reverse accessor of that name on the referenced Entity's
-    model, and one frp names otherwise, see `DjangoModels.reverse_accessor_of`.
-    `primary_key` is the model's primary key, see `ReferencePrimaryKey`.
+    `fields` and the fields of `indexes` are by the Entity's field, a Reference
+    by its own name, e.g. `company_id`. `constraints` are the Entity's, which the
+    model's `Meta` lists with those its field types imply, see
+    `DjangoModelsRenderer`. `primary_key` is the model's primary key, see
+    `ReferencePrimaryKey`.
 
-    `model_name` is the model's class name, see `DjangoModels.model_name_of`. Its
+    `name` is the model's class name, see `DjangoModels.model_name_of`, and
+    `table` its table, Django's `<app label>_<model name>` unless set. Its
     QuerySet and Manager are named after the Entity regardless.
     """
 
-    bases: typing.Annotated[tuple[Symbol, ...], pydantic.Field(min_length=1)] | (
-        Inherited
-    )
-    decorators: tuple[ClassDecorator, ...] | Inherited
-    ordering: tuple[OrderingTerm, ...] | Inherited
-    defaults: Mapping[FieldName, FieldDefault]
-    foreign_key_constraint: ForeignKeyConstraint | Inherited
-    query_set_base: DjangoClassBase | Inherited
-    manager_base: DjangoClassBase | Inherited
-    db_table: DbTable | DefaultDbTable
-    indexes: tuple[DjangoIndex, ...]
-    related_names: Mapping[FieldName, RelatedName]
-    primary_key: PrimaryKey
-    model_name: DjangoModelName | DefaultDjangoModelName
+    name: DjangoModelName | Unset = Unset()
+    bases: (
+        typing.Annotated[tuple[Imported, ...], pydantic.Field(min_length=1)] | Unset
+    ) = Unset()
+    decorators: tuple[ClassDecorator, ...] | Unset = Unset()
+    ordering: tuple[OrderingTerm, ...] | Unset = Unset()
+    fields: Mapping[FieldName, FieldConfig] = {}
+    foreign_key_constraint: ForeignKeyConstraint | Unset = Unset()
+    query_set_base: DjangoClassBase | Unset = Unset()
+    manager_base: DjangoClassBase | Unset = Unset()
+    table: DbTable | Unset = Unset()
+    indexes: tuple[DjangoIndex, ...] = ()
+    constraints: Sequence[Constraint] = ()
+    primary_key: PrimaryKey = OwnPrimaryKey()
 
     @staticmethod
-    def inherited() -> EntityModelOptions:
-        """Every setting the catalog's, and none of its own."""
-        return EntityModelOptions(
-            bases=Inherited(),
-            decorators=Inherited(),
-            ordering=Inherited(),
-            defaults={},
-            foreign_key_constraint=Inherited(),
-            query_set_base=Inherited(),
-            manager_base=Inherited(),
-            db_table=DefaultDbTable(),
-            indexes=(),
-            related_names={},
-            primary_key=OwnPrimaryKey(),
-            model_name=DefaultDjangoModelName(),
-        )
-
-    @staticmethod
-    def fake() -> EntityModelOptions:
-        return EntityModelOptions.inherited()
+    def fake() -> GeneratedModel:
+        return GeneratedModel()
 
 
 class DjangoModelOptions(pydantic.BaseModel, frozen=True):
-    """How an Entity's Django model is declared: its `EntityModelOptions` over
-    the `CatalogModelOptions`. `defaults` are only for fields it has."""
+    """How an Entity's Django model is declared: its `GeneratedModel` over
+    `ModelOptions`. `fields` are only for fields it has."""
 
     bases: tuple[Symbol, ...]
     decorators: tuple[ClassDecorator, ...]
     meta: DjangoMeta
-    defaults: Mapping[FieldName, FieldDefault]
-    related_names: Mapping[FieldName, RelatedName]
+    fields: Mapping[FieldName, FieldConfig]
     foreign_key_constraint: ForeignKeyConstraint
     query_set_base: DjangoClassBase
     manager_base: DjangoClassBase
@@ -635,49 +705,46 @@ class DjangoModelOptions(pydantic.BaseModel, frozen=True):
     @staticmethod
     def of(
         entity: type[pydantic.BaseModel],
-        catalog: CatalogModelOptions,
-        own: EntityModelOptions,
+        every_model: ModelOptions,
+        own: GeneratedModel,
     ) -> DjangoModelOptions:
+        inherited = {
+            field: config
+            for field, config in every_model.fields.items()
+            if field.root in entity.model_fields
+        }
         return DjangoModelOptions(
-            bases=DjangoModelOptions._inherit(own.bases, catalog.bases),
-            decorators=DjangoModelOptions._inherit(own.decorators, catalog.decorators),
+            bases=tuple(map(imported_symbol, _set_or(own.bases, every_model.bases))),
+            decorators=_set_or(own.decorators, every_model.decorators),
             meta=DjangoMeta(
-                db_table=own.db_table,
-                ordering=DjangoModelOptions._inherit(own.ordering, catalog.ordering),
+                db_table=own.table,
+                ordering=_set_or(own.ordering, every_model.ordering),
                 indexes=own.indexes,
             ),
-            defaults={
+            fields={
+                **inherited,
                 **{
-                    field: default
-                    for field, default in catalog.defaults.items()
-                    if field.root in entity.model_fields
+                    field: config.over(inherited.get(field, FieldConfig()))
+                    for field, config in own.fields.items()
                 },
-                **own.defaults,
             },
-            related_names=own.related_names,
-            foreign_key_constraint=DjangoModelOptions._inherit(
-                own.foreign_key_constraint, catalog.foreign_key_constraint
+            foreign_key_constraint=_set_or(
+                own.foreign_key_constraint, every_model.foreign_key_constraint
             ),
-            query_set_base=DjangoModelOptions._inherit(
-                own.query_set_base, catalog.query_set_base
-            ),
-            manager_base=DjangoModelOptions._inherit(
-                own.manager_base, catalog.manager_base
-            ),
+            query_set_base=_set_or(own.query_set_base, every_model.query_set_base),
+            manager_base=_set_or(own.manager_base, every_model.manager_base),
             primary_key=own.primary_key,
         )
 
     @staticmethod
-    def _inherit[T](own: T | Inherited, catalog: T) -> T:
-        if isinstance(own, Inherited):
-            return catalog
-        return own
-
-    @staticmethod
     def fake() -> DjangoModelOptions:
         return DjangoModelOptions.of(
-            pydantic.BaseModel, CatalogModelOptions.fake(), EntityModelOptions.fake()
+            pydantic.BaseModel, ModelOptions.fake(), GeneratedModel.fake()
         )
+
+    def field(self, field: FieldName) -> FieldConfig:
+        """How `field` is declared: unset options are frp's."""
+        return self.fields.get(field, FieldConfig())
 
 
 class ExistingDjangoModel(pydantic.BaseModel, frozen=True):
@@ -701,7 +768,7 @@ class ExistingDjangoModel(pydantic.BaseModel, frozen=True):
 
     module: ModulePath
     name: Identifier
-    reverse_accessors: Mapping[FieldName, FieldName]
+    reverse_accessors: Mapping[FieldName, FieldName] = {}
 
     @staticmethod
     def fake() -> ExistingDjangoModel:
@@ -715,91 +782,91 @@ class ExistingDjangoModel(pydantic.BaseModel, frozen=True):
         return Symbol(module=self.module, qualname=(self.name,))
 
 
+type EntityConfig = GeneratedModel | ExistingDjangoModel
+
+
 class DjangoModels(pydantic.BaseModel, frozen=True):
     """Generate a Django model per Entity, all into `module` with `app_label`, and
     the Django queries for Views into `queries`.
 
     `field_types` overrides the built-in rule for a type, see `FieldTypes`.
-    `on_delete` sets what deleting the referenced Entity does, per Reference; a
-    Reference not in it is `PROTECT`. `queries` holds a QuerySet and a Manager per
-    Entity, which its model's manager is, see `DjangoQueriesRenderer`.
-    `constraints` are each Entity's constraints, which its model's `Meta` lists
-    with those its field types imply, see `DjangoModelsRenderer`.
-    Entity, which its model's manager is, see `DjangoQueriesRenderer`. `existing`
-    names the Django model the application already has for an Entity, which then
-    gets no generated model, QuerySet or Manager, see `ExistingDjangoModel`.
-    `model_options` declares every generated model, and `entity_model_options`
-    one Entity's over them.
+    `queries` holds a QuerySet and a Manager per Entity, which its model's
+    manager is, see `DjangoQueriesRenderer`. `every_model` declares every
+    generated model, see `ModelOptions`.
+
+    `entity_configs` configures one Entity of the Catalog's: a `GeneratedModel`
+    declares its model over `every_model`, and an `ExistingDjangoModel` names the
+    Django model the application already has for it, which then gets no
+    generated model, QuerySet or Manager. An Entity it does not name gets a
+    model as `every_model` declares.
     """
 
     module: ModulePath
-    app_label: AppLabel
-    field_types: Mapping[RuntimeAnnotation, DjangoField]
-    on_delete: Mapping[ReferenceKey, OnDelete]
     queries: ModulePath
-    model_options: CatalogModelOptions
-    entity_model_options: Mapping[type[pydantic.BaseModel], EntityModelOptions]
-    constraints: Mapping[type[pydantic.BaseModel], Sequence[Constraint]]
-    existing: Mapping[type[pydantic.BaseModel], ExistingDjangoModel]
+    app_label: AppLabel
+    field_types: Mapping[RuntimeAnnotation, DjangoField] = {}
+    every_model: ModelOptions = ModelOptions()
+    entity_configs: Mapping[type[pydantic.BaseModel], EntityConfig] = {}
 
     @staticmethod
     def fake() -> DjangoModels:
         return DjangoModels(
             module=ModulePath("app.models"),
-            app_label=AppLabel.fake(),
-            field_types={},
-            on_delete={},
             queries=ModulePath("app.queries"),
-            model_options=CatalogModelOptions.fake(),
-            entity_model_options={},
-            constraints={},
-            existing={},
+            app_label=AppLabel.fake(),
         )
+
+    def existing(self) -> Mapping[type[pydantic.BaseModel], ExistingDjangoModel]:
+        """The Entities the application has its own Django model for."""
+        return {
+            entity: config
+            for entity, config in self.entity_configs.items()
+            if isinstance(config, ExistingDjangoModel)
+        }
+
+    def generated_config_of(self, entity: type[pydantic.BaseModel]) -> GeneratedModel:
+        """How `entity`'s model is generated: as `every_model` declares, unless
+        `entity_configs` says otherwise."""
+        match self.entity_configs.get(entity):
+            case GeneratedModel() as own:
+                return own
+            case ExistingDjangoModel() | None:
+                return GeneratedModel()
 
     def options_of(self, entity: type[pydantic.BaseModel]) -> DjangoModelOptions:
         """How `entity`'s Django model is declared."""
         return DjangoModelOptions.of(
-            entity,
-            self.model_options,
-            self.entity_model_options.get(entity, EntityModelOptions.inherited()),
+            entity, self.every_model, self.generated_config_of(entity)
         )
 
     def table_of(self, entity: type[pydantic.BaseModel]) -> DbTable:
         """The table `entity`'s Django model is stored in: Django's
-        `<app label>_<model name>` unless its options name one."""
+        `<app label>_<model name>` unless its config names one."""
         match self.options_of(entity).meta.db_table:
             case DbTable() as table:
                 return table
-            case DefaultDbTable():
+            case Unset():
                 name = self.model_name_of(entity).root.lower()
                 return DbTable(f"{self.app_label.root}_{name}")
 
     def model_name_of(self, entity: type[pydantic.BaseModel]) -> Identifier:
         """The class name of `entity`'s Django model: the existing one's, else
-        the one its options give, else the Entity's."""
-        match self.existing.get(entity):
+        the one its config gives, else the Entity's."""
+        match self.entity_configs.get(entity):
             case ExistingDjangoModel(name=name):
                 return name
-            case None:
-                pass
-        match self.entity_model_options.get(entity):
-            case None:
-                return Identifier(entity.__name__)
-            case own:
-                pass
-        match own.model_name:
-            case DjangoModelName() as named:
+            case GeneratedModel(name=DjangoModelName() as named):
                 return named.identifier()
-            case DefaultDjangoModelName():
+            case GeneratedModel() | None:
                 return Identifier(entity.__name__)
 
     def model_of(self, entity: type[pydantic.BaseModel]) -> Symbol:
         """The Django model of `entity`: the existing one, or the generated one,
         see `model_name_of`."""
-        match self.existing.get(entity):
+        match self.entity_configs.get(entity):
             case ExistingDjangoModel() as existing:
                 return existing.symbol()
-            case None:
+            case GeneratedModel() | None:
                 return Symbol(
                     module=self.module, qualname=(self.model_name_of(entity),)
                 )
@@ -807,7 +874,7 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
     def generates(self, entity: type[pydantic.BaseModel]) -> bool:
         """Whether frp generates `entity`'s Django model, QuerySet and Manager:
         unless the application has its own model for it."""
-        return entity not in self.existing
+        return not isinstance(self.entity_configs.get(entity), ExistingDjangoModel)
 
     def reverse_accessor_of(
         self, entity: type[pydantic.BaseModel], reference: FieldName
@@ -815,11 +882,11 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
         """The attribute of the referenced Entity's Django model holding the
         `entity` whose Reference `reference` points to it: the one an
         existing model declares, else the related name a generated model's
-        options give it, else the one frp generates, see
+        config gives it, else the one frp generates, see
         `DjangoModelsRenderer.reverse_accessor`. An existing model declaring none
         is a diagnostic: of the Django models for a one-to-one Reference, of the
         Django queries for a many-to-one one a View reverses."""
-        match self.existing.get(entity):
+        match self.entity_configs.get(entity):
             case ExistingDjangoModel(reverse_accessors=declared) if (
                 reference in declared
             ):
@@ -828,23 +895,33 @@ class DjangoModels(pydantic.BaseModel, frozen=True):
                 return DjangoModelsRenderer.reverse_accessor(
                     Identifier(entity.__name__), reference
                 )
-            case None:
+            case GeneratedModel() | None:
                 pass
-        match self.options_of(entity).related_names.get(reference):
+        match self.options_of(entity).field(reference).related_name:
             case RelatedName() as related_name:
                 return related_name.field_name()
-            case None:
+            case Unset():
                 return DjangoModelsRenderer.reverse_accessor(
                     self.model_name_of(entity), reference
                 )
+
+    def on_delete_of(
+        self, entity: type[pydantic.BaseModel], reference: FieldName
+    ) -> OnDelete:
+        """What deleting the Entity `reference` points to does to `entity`:
+        `PROTECT` unless its config says otherwise."""
+        match self.options_of(entity).field(reference).on_delete:
+            case OnDelete() as on_delete:
+                return on_delete
+            case Unset():
+                return OnDelete.PROTECT
 
     def column_field_of(
         self, entity: type[pydantic.BaseModel], field: FieldName
     ) -> FieldName:
         """The field of `entity` whose column holds its `field`: for the `id` of
         a model keyed by a Reference, that Reference, else `field`."""
-        own = self.entity_model_options.get(entity, EntityModelOptions.inherited())
-        match own.primary_key:
+        match self.generated_config_of(entity).primary_key:
             case ReferencePrimaryKey(reference=reference) if (
                 field == EntityNode.primary_key
             ):
@@ -871,34 +948,21 @@ class WithoutDjangoModels(pydantic.BaseModel, frozen=True):
     """Generate no Django models."""
 
 
-class ModelOptionsForNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`entity_model_options` names a class that is not an Entity."""
+class EntityConfigForNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
+    """`entity_configs` names a class that is not an Entity."""
 
     entity: type[pydantic.BaseModel]
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.entity.__qualname__}: DjangoModels.entity_model_options names "
-            "it, but it is not an Entity."
+            f"{self.entity.__qualname__}: DjangoModels.entity_configs names it, "
+            "but it is not an Entity of the Catalog."
         )
 
 
-class ModelOptionsForExistingModel(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`entity_model_options` names an Entity whose Django model exists, which
-    frp does not generate."""
-
-    entity: type[pydantic.BaseModel]
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.entity.__qualname__}: DjangoModels.entity_model_options names "
-            "it, but its Django model is in DjangoModels.existing."
-        )
-
-
-class DefaultForNonField(pydantic.BaseModel, Diagnostic, frozen=True):
-    """An Entity's own model options give a default to a field it does not
-    have. A catalog-wide default applies only to Entities having its field."""
+class FieldConfigForNonField(pydantic.BaseModel, Diagnostic, frozen=True):
+    """An Entity's `GeneratedModel.fields` names a field it does not have. One of
+    `ModelOptions.fields` applies only to Entities having its field."""
 
     entity: type[pydantic.BaseModel]
     field: FieldName
@@ -906,12 +970,12 @@ class DefaultForNonField(pydantic.BaseModel, Diagnostic, frozen=True):
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
             f"{self.entity.__qualname__}.{self.field.root}: its Django model "
-            "options give it a default, but the Entity has no such field."
+            "config names it, but the Entity has no such field."
         )
 
 
 class PrimaryKeyOfNonOneToOne(pydantic.BaseModel, Diagnostic, frozen=True):
-    """An Entity's model options key its model by a field that is not a
+    """An Entity's `GeneratedModel` keys its model by a field that is not a
     one-to-one Reference of it, so its values may repeat."""
 
     entity: type[pydantic.BaseModel]
@@ -920,12 +984,12 @@ class PrimaryKeyOfNonOneToOne(pydantic.BaseModel, Diagnostic, frozen=True):
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
             f"{self.entity.__qualname__}.{self.field.root}: its Django model "
-            "options make it the primary key, but it is not a one-to-one Reference."
+            "config makes it the primary key, but it is not a one-to-one Reference."
         )
 
 
 class OptionalPrimaryKeyReference(pydantic.BaseModel, Diagnostic, frozen=True):
-    """An Entity's model options key its model by an optional one-to-one
+    """An Entity's `GeneratedModel` keys its model by an optional one-to-one
     Reference, but a primary key cannot be NULL."""
 
     entity: type[pydantic.BaseModel]
@@ -934,12 +998,12 @@ class OptionalPrimaryKeyReference(pydantic.BaseModel, Diagnostic, frozen=True):
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
             f"{self.entity.__qualname__}.{self.field.root}: its Django model "
-            "options make it the primary key, but it may be None."
+            "config makes it the primary key, but it may be None."
         )
 
 
 class DefaultForReferencePrimaryKey(pydantic.BaseModel, Diagnostic, frozen=True):
-    """An Entity's own model options give its `id` a default, but its model is
+    """An Entity's `GeneratedModel` gives its `id` a default, but its model is
     keyed by `reference`, so the `id` has no column of its own."""
 
     entity: type[pydantic.BaseModel]
@@ -948,7 +1012,7 @@ class DefaultForReferencePrimaryKey(pydantic.BaseModel, Diagnostic, frozen=True)
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
             f"{self.entity.__qualname__}.{EntityNode.primary_key.root}: its Django "
-            "model options give it a default, but its column is that of the "
+            "model config gives it a default, but its column is that of the "
             f"primary key '{self.reference.root}'."
         )
 
@@ -984,8 +1048,8 @@ class SharedIndexName(pydantic.BaseModel, Diagnostic, frozen=True):
 
 
 class RelatedNameForNonReference(pydantic.BaseModel, Diagnostic, frozen=True):
-    """An Entity's model options give a related name to a field that is not a
-    Reference of it."""
+    """An Entity's `GeneratedModel.fields` gives a related name to a field that
+    is not a Reference of it."""
 
     entity: type[pydantic.BaseModel]
     field: FieldName
@@ -993,7 +1057,7 @@ class RelatedNameForNonReference(pydantic.BaseModel, Diagnostic, frozen=True):
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
             f"{self.entity.__qualname__}.{self.field.root}: its Django model "
-            "options give it a related name, but it is not a Reference."
+            "config gives it a related name, but it is not a Reference."
         )
 
 
@@ -1089,18 +1153,6 @@ class MixedDjangoChoiceTypes(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class ExistingModelOfNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`existing` names a Django model for a class that is not an Entity."""
-
-    model: type[pydantic.BaseModel]
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.model.__qualname__}: DjangoModels.existing names a Django model "
-            "for it, but it is not an Entity."
-        )
-
-
 class ExistingModelInGeneratedModule(pydantic.BaseModel, Diagnostic, frozen=True):
     """An existing Django model is in the module frp generates the Django models
     or queries into, which would overwrite it."""
@@ -1145,31 +1197,17 @@ class ReverseAccessorOfNonReference(pydantic.BaseModel, Diagnostic, frozen=True)
         )
 
 
-class OnDeleteOnExistingModel(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`on_delete` names a Reference of an Entity whose Django model exists, so
-    frp does not generate its foreign key."""
-
-    entity: type[pydantic.BaseModel]
-    field: FieldName
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.entity.__qualname__}.{self.field.root}: DjangoModels.on_delete "
-            "names it, but its Entity's Django model is in DjangoModels.existing, "
-            "so frp does not generate its foreign key."
-        )
-
-
 class OnDeleteForNonReference(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`on_delete` names a field that is not a Reference of an Entity."""
+    """An Entity's `GeneratedModel.fields` gives `on_delete` to a field that is
+    not a Reference of it."""
 
     entity: type[pydantic.BaseModel]
     field: FieldName
 
     def describe(self) -> DiagnosticMessage:
         return DiagnosticMessage(
-            f"{self.entity.__qualname__}.{self.field.root}: DjangoModels.on_delete "
-            "names it, but it is not a Reference of an Entity."
+            f"{self.entity.__qualname__}.{self.field.root}: its Django model "
+            "config gives it on_delete, but it is not a Reference."
         )
 
 
@@ -1207,7 +1245,7 @@ class DjangoFieldNameClash(pydantic.BaseModel, Diagnostic, frozen=True):
 class DjangoModelNameClash(pydantic.BaseModel, Diagnostic, frozen=True):
     """Several Django models, or a Django model and an import, have one name in
     the module the models are generated into. A model is named like its Entity
-    unless its options give it a `DjangoModelName`."""
+    unless its `GeneratedModel` gives it a `DjangoModelName`."""
 
     name: Identifier
 
@@ -1306,32 +1344,6 @@ class AutoIncrementOnNonPrimaryKey(pydantic.BaseModel, Diagnostic, frozen=True):
         )
 
 
-class ConstraintsForNonEntity(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`DjangoModels.constraints` has constraints for a model that is not an
-    Entity, so no Django model holds them."""
-
-    model: type[pydantic.BaseModel]
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.model.__qualname__}: DjangoModels.constraints has constraints "
-            "for it, but it is not an Entity."
-        )
-
-
-class ConstraintsOnExistingModel(pydantic.BaseModel, Diagnostic, frozen=True):
-    """`DjangoModels.constraints` has constraints for an Entity with an existing
-    Django model, which frp does not generate, so cannot add them to."""
-
-    entity: type[pydantic.BaseModel]
-
-    def describe(self) -> DiagnosticMessage:
-        return DiagnosticMessage(
-            f"{self.entity.__qualname__}: DjangoModels.constraints has constraints "
-            "for it, but its Django model is an existing one, not generated."
-        )
-
-
 class ConstraintNameClash(pydantic.BaseModel, Diagnostic, frozen=True):
     """Several constraints, declared or implied by a field's type, have one name.
     The database needs each name once. `entities` have those constraints."""
@@ -1371,11 +1383,7 @@ type _DeclarationDiagnostic = (
 
 
 type _ConstraintDiagnostic = (
-    diagnostics.CompileDiagnostic
-    | ConstraintsForNonEntity
-    | ConstraintsOnExistingModel
-    | ConstraintNameClash
-    | UnimportableConstraintEnum
+    diagnostics.CompileDiagnostic | ConstraintNameClash | UnimportableConstraintEnum
 )
 
 
@@ -1387,9 +1395,7 @@ type DjangoDiagnostic = (
     | InvalidDjangoFieldName
     | AutoIncrementOnNonPrimaryKey
     | OnDeleteForNonReference
-    | OnDeleteOnExistingModel
     | SetNullOnRequiredReference
-    | ExistingModelOfNonEntity
     | ExistingModelInGeneratedModule
     | UndeclaredReverseAccessor
     | ReverseAccessorOfNonReference
@@ -1398,9 +1404,8 @@ type DjangoDiagnostic = (
     | DjangoModelNameCaseClash
     | ReverseAccessorClash
     | InvalidReverseAccessorName
-    | ModelOptionsForNonEntity
-    | ModelOptionsForExistingModel
-    | DefaultForNonField
+    | EntityConfigForNonEntity
+    | FieldConfigForNonField
     | RelatedNameForNonReference
     | PrimaryKeyOfNonOneToOne
     | OptionalPrimaryKeyReference
@@ -1783,9 +1788,12 @@ class _Declaration(pydantic.BaseModel, frozen=True):
         """With `default` as a keyword argument."""
         match default:
             case Default(value=value):
-                argument, written = Identifier("default"), value
+                argument, written = Identifier("default"), resolved_value(value)
             case DatabaseDefault(value=value):
-                argument, written = Identifier("db_default"), value
+                argument, written = (
+                    Identifier("db_default"),
+                    resolved_value(value),
+                )
             case AutoNow():
                 argument, written = Identifier("auto_now"), ValueExpression("True")
             case AutoNowAdd():
@@ -1900,13 +1908,13 @@ class _PlannedModel(pydantic.BaseModel, frozen=True):
         yield DjangoModelsRenderer.class_var
         yield from self.options.bases
         for decorator in self.options.decorators:
-            yield decorator.function
+            yield decorator.symbol()
             match decorator:
                 case CalledDecorator(arguments=arguments):
                     yield from (
-                        value
+                        resolved
                         for value in arguments.values()
-                        if isinstance(value, Symbol)
+                        if isinstance(resolved := resolved_value(value), Symbol)
                     )
                 case BareDecorator():
                     pass
@@ -1931,7 +1939,7 @@ class _PlannedModel(pydantic.BaseModel, frozen=True):
         match meta.db_table:
             case DbTable(root=table):
                 options["db_table"] = PythonString(table).literal()
-            case DefaultDbTable():
+            case Unset():
                 pass
         if meta.ordering:
             options["ordering"] = _PlannedModel._listed(
@@ -2020,41 +2028,12 @@ class DjangoModelsRenderer:
         types = FieldTypes(overrides=config.field_types)
         reported: list[DjangoDiagnostic] = []
         planned: list[_PlannedModel] = []
-        references = {
-            ReferenceKey(entity=model, field=reference.field): reference
-            for model, node in graph.entities.items()
-            for reference in node.references
-        }
         reported.extend(DjangoModelsRenderer._existing_misconfigured(graph, config))
-        for key, on_delete in config.on_delete.items():
-            match references.get(key):
-                case None:
-                    reported.append(
-                        OnDeleteForNonReference(entity=key.entity, field=key.field)
-                    )
-                case Reference() if not config.generates(key.entity):
-                    reported.append(
-                        OnDeleteOnExistingModel(entity=key.entity, field=key.field)
-                    )
-                case Reference(optionality=Optionality.REQUIRED) if (
-                    on_delete == OnDelete.SET_NULL
-                ):
-                    reported.append(
-                        SetNullOnRequiredReference(entity=key.entity, field=key.field)
-                    )
-                case Reference():
-                    pass
         reported.extend(
-            ModelOptionsForNonEntity(entity=entity)
-            for entity in config.entity_model_options
+            EntityConfigForNonEntity(entity=entity)
+            for entity in config.entity_configs
             if entity not in graph.entities
         )
-        reported.extend(
-            ModelOptionsForExistingModel(entity=entity)
-            for entity in config.entity_model_options
-            if entity in graph.entities and not config.generates(entity)
-        )
-        reported.extend(DjangoModelsRenderer._misplaced_constraints(graph, config))
         for model, node in sorted(
             graph.entities.items(), key=lambda item: config.model_name_of(item[0]).root
         ):
@@ -2067,12 +2046,14 @@ class DjangoModelsRenderer:
             options = config.options_of(model)
             reported.extend(
                 DjangoModelsRenderer._misplaced_options(
-                    model,
-                    node,
-                    config.entity_model_options.get(
-                        model, EntityModelOptions.inherited()
-                    ),
+                    model, node, config.generated_config_of(model)
                 )
+            )
+            reported.extend(
+                SetNullOnRequiredReference(entity=model, field=reference.field)
+                for reference in node.references
+                if reference.optionality == Optionality.REQUIRED
+                and config.on_delete_of(model, reference.field) == OnDelete.SET_NULL
             )
             declarations: list[_Declaration] = []
             for declared in DjangoModelsRenderer._declarations(
@@ -2096,7 +2077,11 @@ class DjangoModelsRenderer:
                 )
             )
             constraints = DjangoModelsRenderer._constraints(
-                config, model, node, config.constraints.get(model, ()), types
+                config,
+                model,
+                node,
+                config.generated_config_of(model).constraints,
+                types,
             )
             reported.extend(constraints.diagnostics)
             planned.append(
@@ -2190,18 +2175,19 @@ class DjangoModelsRenderer:
     def _misplaced_options(
         model: type[pydantic.BaseModel],
         node: EntityNode,
-        options: EntityModelOptions,
+        own: GeneratedModel,
     ) -> Iterator[
-        DefaultForNonField
+        FieldConfigForNonField
+        | OnDeleteForNonReference
         | RelatedNameForNonReference
         | PrimaryKeyOfNonOneToOne
         | OptionalPrimaryKeyReference
         | DefaultForReferencePrimaryKey
     ]:
-        """Defaults for fields the Entity lacks, related names for fields that
-        are not its References, and a primary key Django cannot key by, in its
-        own options."""
-        match options.primary_key:
+        """Field configs for fields the Entity lacks, `on_delete` and related
+        names for fields that are not its References, and a primary key Django
+        cannot key by, in its own config."""
+        match own.primary_key:
             case ReferencePrimaryKey(reference=field):
                 match next(
                     (found for found in node.references if found.field == field),
@@ -2216,21 +2202,26 @@ class DjangoModelsRenderer:
                         yield OptionalPrimaryKeyReference(entity=model, field=field)
                     case Reference() | None:
                         yield PrimaryKeyOfNonOneToOne(entity=model, field=field)
-                if EntityNode.primary_key in options.defaults:
-                    yield DefaultForReferencePrimaryKey(entity=model, reference=field)
+                match own.fields.get(EntityNode.primary_key):
+                    case FieldConfig(default=Unset()) | None:
+                        pass
+                    case FieldConfig():
+                        yield DefaultForReferencePrimaryKey(
+                            entity=model, reference=field
+                        )
             case OwnPrimaryKey():
                 pass
-        yield from (
-            DefaultForNonField(entity=model, field=field)
-            for field in options.defaults
-            if field.root not in model.model_fields
-        )
         references = {reference.field for reference in node.references}
-        yield from (
-            RelatedNameForNonReference(entity=model, field=field)
-            for field in options.related_names
-            if field not in references
-        )
+        for field, config in own.fields.items():
+            if field.root not in model.model_fields:
+                yield FieldConfigForNonField(entity=model, field=field)
+                continue
+            if field in references:
+                continue
+            if not isinstance(config.on_delete, Unset):
+                yield OnDeleteForNonReference(entity=model, field=field)
+            if not isinstance(config.related_name, Unset):
+                yield RelatedNameForNonReference(entity=model, field=field)
 
     @staticmethod
     def _shared_names(
@@ -2265,7 +2256,7 @@ class DjangoModelsRenderer:
     @staticmethod
     def decorator(decorator: ClassDecorator) -> ValueExpression:
         """The expression after `@`."""
-        function = DjangoField.referred(decorator.function).root
+        function = DjangoField.referred(decorator.symbol()).root
         match decorator:
             case BareDecorator():
                 return ValueExpression(function)
@@ -2278,11 +2269,11 @@ class DjangoModelsRenderer:
 
     @staticmethod
     def value(value: DjangoValue) -> ValueExpression:
-        match value:
-            case Symbol():
-                return ValueExpression(DjangoField.referred(value).root)
-            case ValueExpression():
-                return value
+        match resolved_value(value):
+            case Symbol() as symbol:
+                return ValueExpression(DjangoField.referred(symbol).root)
+            case ValueExpression() as written:
+                return written
 
     @staticmethod
     def _declarations(
@@ -2293,7 +2284,7 @@ class DjangoModelsRenderer:
     ) -> Iterator[_Declaration | _DeclarationDiagnostic]:
         """Each field's, with its default. The `id` of a model keyed by a
         Reference has none."""
-        defaults = config.options_of(model).defaults
+        options = config.options_of(model)
         references = {reference.field: reference for reference in node.references}
         for name in model.model_fields:
             if config.column_field_of(model, FieldName(name)) != FieldName(name):
@@ -2301,11 +2292,13 @@ class DjangoModelsRenderer:
             declared = DjangoModelsRenderer._declaration(
                 model, references, types, config, FieldName(name)
             )
-            default = defaults.get(FieldName(name))
-            if isinstance(declared, _Declaration) and default is not None:
-                yield declared.defaulted(default)
-            else:
-                yield declared
+            match declared, options.field(FieldName(name)).default:
+                case _Declaration(), (
+                    Default() | DatabaseDefault() | AutoNow() | AutoNowAdd()
+                ) as default:
+                    yield declared.defaulted(default)
+                case _:
+                    yield declared
 
     @staticmethod
     def _declaration(
@@ -2652,17 +2645,6 @@ class DjangoModelsRenderer:
                         pass
 
     @staticmethod
-    def _misplaced_constraints(
-        graph: EntityGraph, config: DjangoModels
-    ) -> Iterator[ConstraintsForNonEntity | ConstraintsOnExistingModel]:
-        """Constraints for a model no generated Django model holds."""
-        for model in config.constraints:
-            if model not in graph.entities:
-                yield ConstraintsForNonEntity(model=model)
-            elif not config.generates(model):
-                yield ConstraintsOnExistingModel(entity=model)
-
-    @staticmethod
     def _constraint_name_clashes(
         planned: Iterable[_PlannedModel],
     ) -> Iterator[ConstraintNameClash]:
@@ -2791,24 +2773,22 @@ class DjangoModelsRenderer:
     def _existing_misconfigured(
         graph: EntityGraph, config: DjangoModels
     ) -> Iterator[
-        ExistingModelOfNonEntity
-        | ExistingModelInGeneratedModule
+        ExistingModelInGeneratedModule
         | UndeclaredReverseAccessor
         | ReverseAccessorOfNonReference
     ]:
-        """Existing Django models named for a non-Entity, or in a generated
-        module, or declaring a reverse accessor for a field that is no
+        """Existing Django models in a generated module, or declaring a reverse accessor for a field that is no
         Reference, or none for a one-to-one Reference. One for a many-to-one
         Reference is needed only by a View reversing it, which the Django
         queries report."""
-        for entity, existing in config.existing.items():
+        for entity, existing in config.existing().items():
             if existing.module in (config.module, config.queries):
                 yield ExistingModelInGeneratedModule(
                     entity=entity, module=existing.module
                 )
             match graph.entities.get(entity):
                 case None:
-                    yield ExistingModelOfNonEntity(model=entity)
+                    # `EntityConfigForNonEntity` reports it.
                     continue
                 case EntityNode() as node:
                     pass
@@ -2848,7 +2828,7 @@ class DjangoModelsRenderer:
         for entity, node in sorted(
             graph.entities.items(), key=lambda item: item[0].__name__
         ):
-            declared = config.existing.get(entity)
+            declared = config.existing().get(entity)
             for reference in node.references:
                 # frp does not know the name of a reverse accessor an existing
                 # model does not declare.
@@ -2881,12 +2861,12 @@ class DjangoModelsRenderer:
         config: DjangoModels, model: type[pydantic.BaseModel], reference: Reference
     ) -> RelatedName | FieldName:
         """The reverse accessor of `model`'s `reference`: the related name the
-        model's options give it, else the one frp names, see
+        model's config gives it, else the one frp names, see
         `DjangoModels.reverse_accessor_of`."""
-        match config.options_of(model).related_names.get(reference.field):
+        match config.options_of(model).field(reference.field).related_name:
             case RelatedName() as related_name:
                 return related_name
-            case None:
+            case Unset():
                 return config.reverse_accessor_of(model, reference.field)
 
     @staticmethod
@@ -2906,9 +2886,7 @@ class DjangoModelsRenderer:
             if config.generates(reference.target)
             else bound
         )
-        deleted = config.on_delete.get(
-            ReferenceKey(entity=model, field=reference.field), OnDelete.PROTECT
-        )
+        deleted = config.on_delete_of(model, reference.field)
         match reference.cardinality:
             case Cardinality.MANY_TO_ONE:
                 field_class = Identifier("ForeignKey")

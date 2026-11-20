@@ -7,7 +7,6 @@ import re
 import subprocess
 import sys
 import textwrap
-import types
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -40,15 +39,10 @@ from functional_relational_python.outputs.django.models import (
     AutoNowAdd,
     BareDecorator,
     CalledDecorator,
-    CatalogModelOptions,
     ConstraintNameClash,
-    ConstraintsForNonEntity,
-    ConstraintsOnExistingModel,
     DatabaseDefault,
     DbTable,
     Default,
-    DefaultDjangoModelName,
-    DefaultForNonField,
     DefaultForReferencePrimaryKey,
     DjangoDiagnostic,
     DjangoField,
@@ -59,28 +53,29 @@ from functional_relational_python.outputs.django.models import (
     DjangoModelNameClash,
     DjangoModels,
     DjangoModelsRenderer,
-    EntityModelOptions,
+    EntityConfig,
+    EntityConfigForNonEntity,
     ExistingDjangoModel,
     ExistingModelInGeneratedModule,
-    ExistingModelOfNonEntity,
+    FieldConfig,
+    FieldConfigForNonField,
     FieldDefault,
     FieldTypes,
     ForeignKeyConstraint,
+    GeneratedModel,
     IndexField,
     IndexName,
     InvalidDjangoFieldName,
     InvalidReverseAccessorName,
     MixedDjangoChoiceTypes,
     ModelGenericBase,
-    ModelOptionsForExistingModel,
-    ModelOptionsForNonEntity,
+    ModelOptions,
     NoDjangoFieldRule,
     OnDelete,
     OnDeleteForNonReference,
-    OnDeleteOnExistingModel,
     OptionalPrimaryKeyReference,
     OrderingTerm,
-    OwnPrimaryKey,
+    PlainBase,
     PrimaryKeyOfNonOneToOne,
     ReferenceKey,
     ReferencePrimaryKey,
@@ -217,22 +212,29 @@ class Thing(pydantic.BaseModel):
 
 def config(
     field_types: Mapping[RuntimeAnnotation, DjangoField],
-    on_delete: Mapping[ReferenceKey, OnDelete],
-    existing: Mapping[
-        type[pydantic.BaseModel], ExistingDjangoModel
-    ] = types.MappingProxyType({}),
+    entity_configs: Mapping[type[pydantic.BaseModel], EntityConfig],
+) -> DjangoModels:
+    return configured(field_types, entity_configs, ModelOptions())
+
+
+def configured(
+    field_types: Mapping[RuntimeAnnotation, DjangoField],
+    entity_configs: Mapping[type[pydantic.BaseModel], EntityConfig],
+    every_model: ModelOptions,
 ) -> DjangoModels:
     return DjangoModels(
         module=ModulePath("app.models"),
+        queries=ModulePath("app.queries"),
         app_label=AppLabel("app"),
         field_types=field_types,
-        on_delete=on_delete,
-        queries=ModulePath("app.queries"),
-        constraints={},
-        existing=existing,
-        model_options=CatalogModelOptions.default(),
-        entity_model_options={},
+        every_model=every_model,
+        entity_configs=entity_configs,
     )
+
+
+def deleting(field: FieldName, on_delete: OnDelete) -> GeneratedModel:
+    """A model whose Reference `field` is deleted with `on_delete`."""
+    return GeneratedModel(fields={field: FieldConfig(on_delete=on_delete)})
 
 
 def existing_company_model() -> ExistingDjangoModel:
@@ -244,9 +246,9 @@ def existing_company_model() -> ExistingDjangoModel:
     )
 
 
-def existing_company(on_delete: Mapping[ReferenceKey, OnDelete]) -> DjangoModels:
+def existing_company() -> DjangoModels:
     """`Company` has an existing Django model, see `existing_company_model`."""
-    return config({}, on_delete, {Company: existing_company_model()})
+    return config({}, {Company: existing_company_model()})
 
 
 def generated_by(models: DjangoModels) -> FirstParty:
@@ -704,19 +706,19 @@ def test_a_django_choices_enum_that_cannot_be_imported_is_a_diagnostic() -> None
 
 
 @pytest.mark.parametrize(
-    ("on_delete", "expected"),
+    ("entity_configs", "expected"),
     [
         ({}, 'company = models.ForeignKey(\n        "Company", on_delete=models.PROTECT, related_name="department_by_company"\n    )'),
         (
-            {ReferenceKey(entity=Department, field=FieldName("company_id")): OnDelete.CASCADE},
+            {Department: deleting(FieldName("company_id"), OnDelete.CASCADE)},
             'company = models.ForeignKey(\n        "Company", on_delete=models.CASCADE, related_name="department_by_company"\n    )',
         ),
     ],
 )  # fmt: skip
 def test_a_reference_is_a_foreign_key_with_a_reverse_accessor(
-    on_delete: Mapping[ReferenceKey, OnDelete], expected: str
+    entity_configs: Mapping[type[pydantic.BaseModel], EntityConfig], expected: str
 ) -> None:
-    text = render([Company, Department], config({}, on_delete)).root
+    text = render([Company, Department], config({}, entity_configs)).root
 
     assert f"    {expected}\n" in text
 
@@ -732,25 +734,24 @@ def test_an_optional_reference_is_a_nullable_foreign_key() -> None:
 
 
 @pytest.mark.parametrize(
-    ("related_names", "expected"),
+    ("fields", "expected"),
     [
         ({}, FieldName("department_by_company")),
         (
-            {FieldName("company_id"): RelatedName("departments")},
+            {
+                FieldName("company_id"): FieldConfig(
+                    related_name=RelatedName("departments")
+                )
+            },
             FieldName("departments"),
         ),
     ],
     ids=["generated", "related-name"],
 )
 def test_a_many_to_one_reference_has_a_reverse_accessor(
-    related_names: Mapping[FieldName, RelatedName], expected: FieldName
+    fields: Mapping[FieldName, FieldConfig], expected: FieldName
 ) -> None:
-    options = EntityModelOptions.inherited().model_copy(
-        update={"related_names": related_names}
-    )
-    models = config({}, {}).model_copy(
-        update={"entity_model_options": {Department: options}}
-    )
+    models = config({}, {Department: GeneratedModel(fields=fields)})
 
     text = render([Company, Department], models).root
 
@@ -794,36 +795,24 @@ def test_a_one_to_one_reference_is_a_one_to_one_field_with_a_reverse_accessor() 
     )
 
 
-def keyed_by(reference: FieldName) -> EntityModelOptions:
+def keyed_by(reference: FieldName) -> GeneratedModel:
     """The Entity's model has `reference` as its primary key."""
-    return EntityModelOptions.inherited().model_copy(
-        update={"primary_key": ReferencePrimaryKey(reference=reference)}
-    )
-
-
-def named(name: DjangoModelName, options: EntityModelOptions) -> EntityModelOptions:
-    """`options`, with the model named `name`."""
-    return options.model_copy(update={"model_name": name})
+    return GeneratedModel(primary_key=ReferencePrimaryKey(reference=reference))
 
 
 def prefixed(
     *entities: type[pydantic.BaseModel],
-) -> Mapping[type[pydantic.BaseModel], EntityModelOptions]:
+) -> Mapping[type[pydantic.BaseModel], GeneratedModel]:
     """Each Entity's model named `Django<Entity>`."""
     return {
-        entity: named(
-            DjangoModelName(f"Django{entity.__name__}"),
-            EntityModelOptions.inherited(),
-        )
+        entity: GeneratedModel(name=DjangoModelName(f"Django{entity.__name__}"))
         for entity in entities
     }
 
 
-def test_a_model_named_by_its_options_is_referred_to_by_that_name() -> None:
+def test_a_model_named_by_its_config_is_referred_to_by_that_name() -> None:
     """References to it, reverse accessors named after it, and its table."""
-    models = config({}, {}).model_copy(
-        update={"entity_model_options": prefixed(Company, CompanyDetails)}
-    )
+    models = config({}, prefixed(Company, CompanyDetails))
 
     text = render([Company, CompanyDetails], models).root
 
@@ -848,16 +837,13 @@ def test_a_model_named_by_its_options_is_referred_to_by_that_name() -> None:
     ) == FieldName("django_company_details_by_company")
 
 
-def test_models_named_alike_by_their_options_are_a_diagnostic() -> None:
-    models = config({}, {}).model_copy(
-        update={
-            "entity_model_options": {
-                Company: named(DjangoModelName("Firm"), EntityModelOptions.inherited()),
-                Department: named(
-                    DjangoModelName("Firm"), EntityModelOptions.inherited()
-                ),
-            }
-        }
+def test_models_named_alike_by_their_configs_are_a_diagnostic() -> None:
+    models = config(
+        {},
+        {
+            Company: GeneratedModel(name=DjangoModelName("Firm")),
+            Department: GeneratedModel(name=DjangoModelName("Firm")),
+        },
     )
 
     assert diagnostics([Company, Department], models) == (
@@ -867,15 +853,9 @@ def test_models_named_alike_by_their_options_are_a_diagnostic() -> None:
 
 def test_models_named_alike_but_for_case_are_a_diagnostic() -> None:
     """Django tells models apart by their lowercased names."""
-    models = config({}, {}).model_copy(
-        update={
-            "entity_model_options": {
-                Department: named(
-                    DjangoModelName(Company.__name__.upper()),
-                    EntityModelOptions.inherited(),
-                )
-            }
-        }
+    models = config(
+        {},
+        {Department: GeneratedModel(name=DjangoModelName(Company.__name__.upper()))},
     )
 
     assert diagnostics([Company, Department], models) == (
@@ -889,11 +869,7 @@ def test_models_named_alike_but_for_case_are_a_diagnostic() -> None:
 
 
 def test_a_one_to_one_reference_can_be_the_primary_key_in_place_of_the_id() -> None:
-    models = config({}, {}).model_copy(
-        update={
-            "entity_model_options": {CompanyDetails: keyed_by(FieldName("company_id"))}
-        }
-    )
+    models = config({}, {CompanyDetails: keyed_by(FieldName("company_id"))})
 
     text = render([Company, CompanyDetails], models).root
 
@@ -932,8 +908,9 @@ def test_a_one_to_one_reference_can_be_the_primary_key_in_place_of_the_id() -> N
         ),
         (
             CompanyDetails,
-            keyed_by(FieldName("company_id")).model_copy(
-                update={"defaults": {FieldName("id"): AutoNow()}}
+            GeneratedModel(
+                primary_key=ReferencePrimaryKey(reference=FieldName("company_id")),
+                fields={FieldName("id"): FieldConfig(default=AutoNow())},
             ),
             DefaultForReferencePrimaryKey(
                 entity=CompanyDetails, reference=FieldName("company_id")
@@ -944,12 +921,10 @@ def test_a_one_to_one_reference_can_be_the_primary_key_in_place_of_the_id() -> N
 )
 def test_a_primary_key_reference_django_cannot_key_by_is_a_diagnostic(
     entity: type[pydantic.BaseModel],
-    options: EntityModelOptions,
+    options: GeneratedModel,
     expected: DjangoDiagnostic,
 ) -> None:
-    models = config({}, {}).model_copy(
-        update={"entity_model_options": {entity: options}}
-    )
+    models = config({}, {entity: options})
 
     assert diagnostics([Company, Department, CompanyDetails], models) == (expected,)
 
@@ -966,11 +941,7 @@ class UnruledDetails(pydantic.BaseModel):
 def test_the_id_of_a_reference_keyed_model_is_held_by_the_reference_column() -> None:
     """The `id` needs no Django field rule, and its column is the Reference's,
     which is never NULL."""
-    models = config({}, {}).model_copy(
-        update={
-            "entity_model_options": {UnruledDetails: keyed_by(FieldName("company_id"))}
-        }
-    )
+    models = config({}, {UnruledDetails: keyed_by(FieldName("company_id"))})
     graph = EntityGraph.build(
         [Company, UnruledDetails], IdBase.fake(), OneToOneMarker.fake()
     ).unwrap()
@@ -989,13 +960,12 @@ def test_a_catalog_wide_default_for_the_id_of_a_reference_keyed_model_is_left_ou
     None
 ):
     """The `id` has no column of its own, so the default has no field to go on."""
-    models = config({}, {}).model_copy(
-        update={
-            "model_options": CatalogModelOptions.default().model_copy(
-                update={"defaults": {FieldName("id"): Default(value=uuid4())}}
-            ),
-            "entity_model_options": {CompanyDetails: keyed_by(FieldName("company_id"))},
-        }
+    models = configured(
+        {},
+        {CompanyDetails: keyed_by(FieldName("company_id"))},
+        ModelOptions(
+            fields={FieldName("id"): FieldConfig(default=Default(value=uuid.uuid4))}
+        ),
     )
 
     text = render([Company, CompanyDetails], models).root
@@ -1039,7 +1009,7 @@ def test_a_reverse_accessor_named_like_a_field_is_a_diagnostic() -> None:
 
 @pytest.mark.parametrize(
     "models",
-    [config({}, {}), existing_company({})],
+    [config({}, {}), existing_company()],
     ids=["generated", "existing"],
 )
 def test_reverse_accessors_named_alike_are_a_diagnostic(models: DjangoModels) -> None:
@@ -1140,12 +1110,8 @@ def test_golden_django_models() -> None:
     text = render(
         [Department, Company],
         config(
-            {CompanyId: DjangoField.builtin(Identifier("BigAutoField"), {})},
-            {
-                ReferenceKey(
-                    entity=Company, field=FieldName("parent")
-                ): OnDelete.SET_NULL
-            },
+            {CompanyId: DjangoField(field_class=django.db.models.BigAutoField)},
+            {Company: deleting(FieldName("parent"), OnDelete.SET_NULL)},
         ),
     )
 
@@ -1205,27 +1171,80 @@ def test_the_module_is_written_where_the_catalog_names() -> None:
     assert GeneratedFiles.is_generated(files.files[0].text)
 
 
-def test_on_delete_for_a_field_that_is_not_a_reference_is_a_diagnostic() -> None:
+def test_reference_options_for_a_field_that_is_not_a_reference_are_diagnostics() -> (
+    None
+):
     models = config(
         {},
         {
-            ReferenceKey(entity=Company, field=FieldName("name")): OnDelete.CASCADE,
-            ReferenceKey(entity=Department, field=FieldName("company_id")): (
-                OnDelete.CASCADE
-            ),
+            Company: GeneratedModel(
+                fields={
+                    FieldName("name"): FieldConfig(
+                        on_delete=OnDelete.CASCADE,
+                        related_name=RelatedName("named"),
+                    )
+                }
+            )
         },
     )
 
     assert diagnostics([Company], models) == (
+        RelatedNameForNonReference(entity=Company, field=FieldName("name")),
         OnDeleteForNonReference(entity=Company, field=FieldName("name")),
-        OnDeleteForNonReference(entity=Department, field=FieldName("company_id")),
     )
 
 
-def test_set_null_on_a_required_reference_is_a_diagnostic() -> None:
-    key = ReferenceKey(entity=Department, field=FieldName("company_id"))
+def test_a_config_for_a_field_the_entity_lacks_is_a_diagnostic() -> None:
+    models = config(
+        {},
+        {Company: GeneratedModel(fields={FieldName("missing"): FieldConfig()})},
+    )
 
-    assert diagnostics([Company, Department], config({}, {key: OnDelete.SET_NULL})) == (
+    assert diagnostics([Company], models) == (
+        FieldConfigForNonField(entity=Company, field=FieldName("missing")),
+    )
+
+
+def test_a_config_for_a_class_that_is_not_an_entity_is_a_diagnostic() -> None:
+    models = config(
+        {},
+        {
+            Department: GeneratedModel(),
+            Thing: ExistingDjangoModel.fake(),
+        },
+    )
+
+    assert set(diagnostics([Company], models)) == {
+        EntityConfigForNonEntity(entity=Department),
+        EntityConfigForNonEntity(entity=Thing),
+    }
+
+
+@pytest.mark.parametrize(
+    ("entity_configs", "every_model"),
+    [
+        (
+            {Department: deleting(FieldName("company_id"), OnDelete.SET_NULL)},
+            ModelOptions(),
+        ),
+        (
+            {},
+            ModelOptions(
+                fields={
+                    FieldName("company_id"): FieldConfig(on_delete=OnDelete.SET_NULL)
+                }
+            ),
+        ),
+    ],
+    ids=["entity", "every-model"],
+)
+def test_set_null_on_a_required_reference_is_a_diagnostic(
+    entity_configs: Mapping[type[pydantic.BaseModel], EntityConfig],
+    every_model: ModelOptions,
+) -> None:
+    models = configured({}, entity_configs, every_model)
+
+    assert diagnostics([Company, Department], models) == (
         SetNullOnRequiredReference(entity=Department, field=FieldName("company_id")),
     )
 
@@ -1272,7 +1291,7 @@ def test_entities_with_one_name_are_a_diagnostic() -> None:
 
 
 def test_an_entity_with_an_existing_model_gets_none_and_is_imported() -> None:
-    text = render([Company, Department, CompanyDetails], existing_company({}))
+    text = render([Company, Department, CompanyDetails], existing_company())
 
     assert text == FileText(
         textwrap.dedent(
@@ -1321,19 +1340,13 @@ def test_an_entity_with_an_existing_model_gets_none_and_is_imported() -> None:
     )
 
 
-def test_an_existing_model_of_a_non_entity_is_a_diagnostic() -> None:
-    models = config({}, {}, {Thing: ExistingDjangoModel.fake()})
-
-    assert diagnostics([Company], models) == (ExistingModelOfNonEntity(model=Thing),)
-
-
 @pytest.mark.parametrize("module", ["app.models", "app.queries"])
 def test_an_existing_model_in_a_generated_module_is_a_diagnostic(module: str) -> None:
-    existing = existing_company_model().model_copy(
-        update={"module": ModulePath(module)}
+    existing = ExistingDjangoModel(
+        module=ModulePath(module), name=Identifier("Company")
     )
 
-    assert diagnostics([Company], config({}, {}, {Company: existing})) == (
+    assert diagnostics([Company], config({}, {Company: existing})) == (
         ExistingModelInGeneratedModule(entity=Company, module=ModulePath(module)),
     )
 
@@ -1348,7 +1361,7 @@ def existing_details(
         name=Identifier("CompanyDetails"),
         reverse_accessors=reverse_accessors,
     )
-    return config({}, {}, {CompanyDetails: existing})
+    return config({}, {CompanyDetails: existing})
 
 
 def test_reverse_accessors_an_existing_model_declares_amiss_are_diagnostics() -> None:
@@ -1416,19 +1429,11 @@ def test_reverse_accessors_of_an_existing_model_are_checked_as_declared(
 
 def test_an_existing_model_may_declare_no_many_to_one_reverse_accessor() -> None:
     """Only a View reversing it needs it, which the Django queries report."""
-    models = config({}, {}, {Company: ExistingDjangoModel.fake()})
+    models = config({}, {Company: ExistingDjangoModel.fake()})
 
     text = render([Company, Department], models).root
 
     assert 'related_name="department_by_company"' in text
-
-
-def test_on_delete_for_a_reference_of_an_existing_model_is_a_diagnostic() -> None:
-    key = ReferenceKey(entity=Company, field=FieldName("parent"))
-
-    assert diagnostics([Company], existing_company({key: OnDelete.CASCADE})) == (
-        OnDeleteOnExistingModel(entity=Company, field=FieldName("parent")),
-    )
 
 
 def django_project_passes_checks(
@@ -1487,7 +1492,7 @@ def test_generated_models_referencing_an_existing_model_make_migrations(
 ) -> None:
     """The existing model is the application's own, in the app `crm`, which
     already has its migrations."""
-    models = existing_company({})
+    models = existing_company()
     graph = EntityGraph.build(
         [Company, Department, CompanyDetails], IdBase.fake(), OneToOneMarker.fake()
     ).unwrap()
@@ -1636,9 +1641,9 @@ class ProjectBases:
         return Symbol(module=ProjectBases.module, qualname=(name,))
 
 
-def person_options() -> EntityModelOptions:
+def person_options() -> GeneratedModel:
     """Every option, for the one Entity `Person`."""
-    return EntityModelOptions(
+    return GeneratedModel(
         bases=(
             ProjectBases.symbol(Identifier("Described")),
             ProjectBases.symbol(Identifier("Stamped")),
@@ -1651,9 +1656,15 @@ def person_options() -> EntityModelOptions:
             ),
         ),
         ordering=(OrderingTerm("-created_at"), OrderingTerm("email")),
-        defaults={
-            FieldName("nickname"): DatabaseDefault(value=ValueExpression('"anon"')),
-            FieldName("born"): AutoNowAdd(),
+        fields={
+            FieldName("nickname"): FieldConfig(
+                default=DatabaseDefault(value=ValueExpression('"anon"'))
+            ),
+            FieldName("born"): FieldConfig(default=AutoNowAdd()),
+            FieldName("employer_id"): FieldConfig(
+                related_name=RelatedName("employees")
+            ),
+            FieldName("heads_id"): FieldConfig(related_name=RelatedName("head")),
         },
         foreign_key_constraint=ForeignKeyConstraint.NOT_ENFORCED,
         query_set_base=ModelGenericBase(
@@ -1662,42 +1673,38 @@ def person_options() -> EntityModelOptions:
         manager_base=ModelGenericBase(
             origin=ProjectBases.symbol(Identifier("LiveManager"))
         ),
-        db_table=DbTable("people"),
+        table=DbTable("people"),
         indexes=(
             DjangoIndex(
                 fields=(IndexField("born"), IndexField("-email")),
                 name=IndexName("person_born"),
             ),
         ),
-        related_names={
-            FieldName("employer_id"): RelatedName("employees"),
-            FieldName("heads_id"): RelatedName("head"),
-        },
-        primary_key=OwnPrimaryKey(),
-        model_name=DefaultDjangoModelName(),
     )
 
 
-def uuid4() -> Symbol:
-    return Symbol(module=ModulePath("uuid"), qualname=(Identifier("uuid4"),))
-
-
-def uuid_default() -> EntityModelOptions:
-    return EntityModelOptions.inherited().model_copy(
-        update={"defaults": {FieldName("id"): Default(value=uuid4())}}
+def uuid_default() -> GeneratedModel:
+    """A model whose `id` defaults to `uuid.uuid4()`."""
+    return GeneratedModel(
+        fields={FieldName("id"): FieldConfig(default=Default(value=uuid.uuid4))}
     )
 
 
 @pytest.mark.parametrize(
-    "entity_model_options",
+    "entity_configs",
     [
         {},
         {
             Person: person_options(),
-            Department: named(DjangoModelName("Unit"), uuid_default()),
-            CompanyDetails: named(
-                DjangoModelName("DjangoCompanyDetails"),
-                keyed_by(FieldName("company_id")),
+            Department: GeneratedModel(
+                name=DjangoModelName("Unit"),
+                fields={
+                    FieldName("id"): FieldConfig(default=Default(value=uuid.uuid4))
+                },
+            ),
+            CompanyDetails: GeneratedModel(
+                name=DjangoModelName("DjangoCompanyDetails"),
+                primary_key=ReferencePrimaryKey(reference=FieldName("company_id")),
             ),
         },
     ],
@@ -1705,26 +1712,25 @@ def uuid_default() -> EntityModelOptions:
 )
 def test_generated_models_type_check_and_make_migrations(
     tmp_path: Path,
-    entity_model_options: Mapping[type[pydantic.BaseModel], EntityModelOptions],
+    entity_configs: Mapping[type[pydantic.BaseModel], EntityConfig],
 ) -> None:
     """A Django project with the generated models, and the QuerySets their managers
     use, as its one app: they pass the type checker, Django's system checks,
     `makemigrations` and `migrate`, and the database enforces their constraints.
     """
-    text = DjangoField.builtin(Identifier("TextField"), {})
+    text = DjangoField(field_class=django.db.models.TextField)
     models = config(
         {
-            CompanyId: DjangoField.builtin(Identifier("BigAutoField"), {}),
+            CompanyId: DjangoField(field_class=django.db.models.BigAutoField),
             Email: char_field(),
             Kind: text,
             SubmitState: text,
         },
-        {ReferenceKey(entity=Company, field=FieldName("parent")): OnDelete.SET_NULL},
-    ).model_copy(
-        update={
-            "entity_model_options": entity_model_options,
-            "constraints": {Campaign: campaign_constraints()},
-        }
+        {
+            **entity_configs,
+            Company: deleting(FieldName("parent"), OnDelete.SET_NULL),
+            Campaign: GeneratedModel(constraints=campaign_constraints()),
+        },
     )
     graph = EntityGraph.build(
         [Company, CompanyDetails, Department, Person, Ruled, Campaign],
@@ -1973,9 +1979,7 @@ def test_an_auto_increment_override_on_another_field_is_a_diagnostic() -> None:
 def test_golden_django_model_with_options() -> None:
     """`Person`'s options apply over the catalog's, which `Company` and
     `Department` get."""
-    models = config({}, {}).model_copy(
-        update={"entity_model_options": {Person: person_options()}}
-    )
+    models = config({}, {Person: person_options()})
 
     text = render([Company, Department, Person], models)
 
@@ -2121,25 +2125,24 @@ class AnEntityNamedSoLongThatEvenItsManagerUpToTheValueDoesNotFit(pydantic.BaseM
 
 
 @pytest.mark.parametrize(
-    "entity_model_options",
+    "entity_configs",
     [{}, {Person: person_options(), Department: uuid_default()}],
     ids=["django", "options"],
 )
 def test_generated_models_are_as_ruff_formats_and_sorts_them(
-    entity_model_options: Mapping[type[pydantic.BaseModel], EntityModelOptions],
+    entity_configs: Mapping[type[pydantic.BaseModel], EntityConfig],
 ) -> None:
     models = config(
         {
-            CompanyId: DjangoField.builtin(Identifier("BigAutoField"), {}),
-            Kind: DjangoField.builtin(Identifier("TextField"), {}),
-            SubmitState: DjangoField.builtin(Identifier("TextField"), {}),
+            CompanyId: DjangoField(field_class=django.db.models.BigAutoField),
+            Kind: DjangoField(field_class=django.db.models.TextField),
+            SubmitState: DjangoField(field_class=django.db.models.TextField),
         },
-        {ReferenceKey(entity=Company, field=FieldName("parent")): OnDelete.SET_NULL},
-    ).model_copy(
-        update={
-            "entity_model_options": entity_model_options,
-            "constraints": {Campaign: campaign_constraints()},
-        }
+        {
+            **entity_configs,
+            Company: deleting(FieldName("parent"), OnDelete.SET_NULL),
+            Campaign: GeneratedModel(constraints=campaign_constraints()),
+        },
     )
 
     texts = (
@@ -2180,45 +2183,51 @@ def ruff_format_diff(text: FileText) -> FileText:
     return FileText(result.stdout + result.stderr)
 
 
-def test_an_entitys_options_apply_over_the_catalogs() -> None:
-    """A setting the Entity inherits is the catalog's, one it sets its own;
-    defaults merge, the Entity's winning, and a catalog-wide default applies
-    only to an Entity having its field."""
-    catalog = CatalogModelOptions.default().model_copy(
-        update={
-            "ordering": (OrderingTerm("name"),),
-            "foreign_key_constraint": ForeignKeyConstraint.NOT_ENFORCED,
-            "defaults": {
-                FieldName("name"): Default(value=ValueExpression("'x'")),
-                FieldName("founded"): AutoNow(),
-            },
-        }
+def test_an_entitys_config_applies_over_every_models() -> None:
+    """A setting the Entity leaves unset is `every_model`'s, one it sets its
+    own; field configs combine option by option, the Entity's winning, and one
+    of `every_model` applies only to an Entity having its field."""
+    every_model = ModelOptions(
+        ordering=(OrderingTerm("name"),),
+        foreign_key_constraint=ForeignKeyConstraint.NOT_ENFORCED,
+        fields={
+            FieldName("name"): FieldConfig(
+                default=Default(value=ValueExpression("'x'"))
+            ),
+            FieldName("founded"): FieldConfig(default=AutoNow()),
+            FieldName("company_id"): FieldConfig(on_delete=OnDelete.CASCADE),
+        },
     )
-    own = EntityModelOptions.inherited().model_copy(
-        update={
-            "ordering": (OrderingTerm("-founded"),),
-            "defaults": {FieldName("founded"): AutoNowAdd()},
-        }
+    own = GeneratedModel(
+        ordering=(OrderingTerm("-founded"),),
+        fields={
+            FieldName("founded"): FieldConfig(default=AutoNowAdd()),
+            FieldName("company_id"): FieldConfig(related_name=RelatedName("units")),
+        },
     )
-    models = config({}, {}).model_copy(
-        update={"model_options": catalog, "entity_model_options": {Department: own}}
-    )
+    models = configured({}, {Department: own}, every_model)
 
     department = models.options_of(Department)
     company = models.options_of(Company)
 
     assert department.meta.ordering == own.ordering
-    assert department.defaults == own.defaults
-    assert department.foreign_key_constraint == catalog.foreign_key_constraint
-    assert company.meta.ordering == catalog.ordering
-    assert company.defaults == {FieldName("name"): catalog.defaults[FieldName("name")]}
+    assert department.fields == {
+        FieldName("founded"): FieldConfig(default=AutoNowAdd()),
+        FieldName("company_id"): FieldConfig(
+            on_delete=OnDelete.CASCADE, related_name=RelatedName("units")
+        ),
+    }
+    assert department.foreign_key_constraint == every_model.foreign_key_constraint
+    assert company.meta.ordering == every_model.ordering
+    assert company.fields == {FieldName("name"): every_model.fields[FieldName("name")]}
 
 
-def test_a_catalog_wide_default_for_a_field_an_entity_lacks_is_no_diagnostic() -> None:
-    catalog = CatalogModelOptions.default().model_copy(
-        update={"defaults": {FieldName("founded"): AutoNowAdd()}}
+def test_a_config_of_every_model_for_a_field_an_entity_lacks_is_no_diagnostic() -> None:
+    models = configured(
+        {},
+        {},
+        ModelOptions(fields={FieldName("founded"): FieldConfig(default=AutoNowAdd())}),
     )
-    models = config({}, {}).model_copy(update={"model_options": catalog})
 
     text = render([Company, Department], models).root
 
@@ -2226,9 +2235,7 @@ def test_a_catalog_wide_default_for_a_field_an_entity_lacks_is_no_diagnostic() -
 
 
 def test_a_default_symbol_is_imported() -> None:
-    models = config({}, {}).model_copy(
-        update={"entity_model_options": {Department: uuid_default()}}
-    )
+    models = config({}, {Department: uuid_default()})
 
     text = render([Company, Department], models).root
 
@@ -2244,9 +2251,7 @@ def test_a_field_shadowing_a_default_symbol_is_a_diagnostic() -> None:
         id: DepartmentId
         uuid4: Text
 
-    models = config({}, {}).model_copy(
-        update={"entity_model_options": {Shadowing: uuid_default()}}
-    )
+    models = config({}, {Shadowing: uuid_default()})
 
     assert diagnostics([Shadowing], models) == (
         InvalidDjangoFieldName(
@@ -2267,8 +2272,8 @@ def test_a_field_shadowing_a_default_symbol_is_a_diagnostic() -> None:
 def test_a_default_is_a_keyword_argument(default: FieldDefault, expected: str) -> None:
     models = all_rules_for_tags().model_copy(
         update={
-            "model_options": CatalogModelOptions.default().model_copy(
-                update={"defaults": {FieldName("text"): default}}
+            "every_model": ModelOptions(
+                fields={FieldName("text"): FieldConfig(default=default)}
             )
         }
     )
@@ -2281,12 +2286,10 @@ def test_a_default_is_a_keyword_argument(default: FieldDefault, expected: str) -
 def test_a_related_name_clashing_with_a_field_is_a_diagnostic() -> None:
     """`Company.name` is a field, so it cannot be the reverse accessor of
     `Department.company_id`."""
-    named = EntityModelOptions.inherited().model_copy(
-        update={"related_names": {FieldName("company_id"): RelatedName("name")}}
+    named = GeneratedModel(
+        fields={FieldName("company_id"): FieldConfig(related_name=RelatedName("name"))}
     )
-    models = config({}, {}).model_copy(
-        update={"entity_model_options": {Department: named}}
-    )
+    models = config({}, {Department: named})
 
     assert diagnostics([Company, Department], models) == (
         ReverseAccessorClash(
@@ -2299,45 +2302,15 @@ def test_a_related_name_clashing_with_a_field_is_a_diagnostic() -> None:
     )
 
 
-def test_options_naming_what_is_not_there_are_diagnostics() -> None:
-    misplaced = EntityModelOptions.inherited().model_copy(
-        update={
-            "defaults": {FieldName("missing"): AutoNow()},
-            "related_names": {FieldName("founded"): RelatedName.fake()},
-        }
-    )
-    models = config({}, {}, {Company: existing_company_model()}).model_copy(
-        update={
-            "entity_model_options": {
-                Department: misplaced,
-                Parent: misplaced,
-                Company: EntityModelOptions.inherited(),
-            }
-        }
-    )
-
-    assert set(diagnostics([Company, Department], models)) == {
-        ModelOptionsForNonEntity(entity=Parent),
-        ModelOptionsForExistingModel(entity=Company),
-        DefaultForNonField(entity=Department, field=FieldName("missing")),
-        RelatedNameForNonReference(entity=Department, field=FieldName("founded")),
-    }
-
-
 def test_models_sharing_a_table_or_an_index_name_are_diagnostics() -> None:
     """`Department`'s table is the one Django names `Company`'s."""
     index = DjangoIndex(fields=(IndexField("id"),), name=IndexName("by_id"))
-    models = config({}, {}).model_copy(
-        update={
-            "entity_model_options": {
-                Company: EntityModelOptions.inherited().model_copy(
-                    update={"indexes": (index,)}
-                ),
-                Department: EntityModelOptions.inherited().model_copy(
-                    update={"db_table": DbTable("app_company"), "indexes": (index,)}
-                ),
-            }
-        }
+    models = config(
+        {},
+        {
+            Company: GeneratedModel(indexes=(index,)),
+            Department: GeneratedModel(table=DbTable("app_company"), indexes=(index,)),
+        },
     )
 
     assert set(diagnostics([Company, Department], models)) == {
@@ -2429,9 +2402,10 @@ def campaign_constraints() -> tuple[Constraint, ...]:
 
 def campaign_config(constraints: Iterable[Constraint]) -> DjangoModels:
     """Enums have no built-in rule, so Kind and SubmitState get one."""
-    text = DjangoField.builtin(Identifier("TextField"), {})
-    return config({Kind: text, SubmitState: text}, {}).model_copy(
-        update={"constraints": {Campaign: tuple(constraints)}}
+    text = DjangoField(field_class=django.db.models.TextField)
+    return config(
+        {Kind: text, SubmitState: text},
+        {Campaign: GeneratedModel(constraints=tuple(constraints))},
     )
 
 
@@ -2595,9 +2569,7 @@ def test_numeric_bounds_of_a_fields_type_are_check_constraints() -> None:
 
 
 def test_an_implied_bound_is_named_after_the_model() -> None:
-    models = config({}, {}).model_copy(
-        update={"entity_model_options": prefixed(Bounded)}
-    )
+    models = config({}, prefixed(Bounded))
 
     text = render([Bounded], models).root
 
@@ -2616,22 +2588,6 @@ def test_a_bound_on_a_field_without_a_numeric_column_implies_no_constraint() -> 
     text = render([Company, Campaign], models).root
 
     assert "lifetime_budget__gt" not in text
-
-
-def test_constraints_for_an_entity_with_an_existing_model_are_a_diagnostic() -> None:
-    models = existing_company({}).model_copy(
-        update={"constraints": {Company: campaign_constraints()}}
-    )
-
-    assert ConstraintsOnExistingModel(entity=Company) in diagnostics(
-        [Company, Department], models
-    )
-
-
-def test_constraints_for_a_model_that_is_not_an_entity_are_a_diagnostic() -> None:
-    models = campaign_config(campaign_constraints())
-
-    assert diagnostics([Company], models) == (ConstraintsForNonEntity(model=Campaign),)
 
 
 def test_constraints_named_alike_are_a_diagnostic() -> None:
@@ -2692,8 +2648,9 @@ def test_a_condition_on_an_enum_the_models_cannot_import_is_a_diagnostic() -> No
         condition=conditions.eq(conditions.field(FieldName("local")), Local.ONLY),
     )
     models = config(
-        {Local: DjangoField.builtin(Identifier("TextField"), {})}, {}
-    ).model_copy(update={"constraints": {WithLocal: (check,)}})
+        {Local: DjangoField(field_class=django.db.models.TextField)},
+        {WithLocal: GeneratedModel(constraints=(check,))},
+    )
 
     assert diagnostics([WithLocal], models) == (
         UnimportableConstraintEnum(
@@ -2709,3 +2666,23 @@ def test_a_unique_naming_a_field_twice_is_rejected() -> None:
             fields=(FieldName("name"), FieldName("name")),
             where=EveryRow(),
         )
+
+
+def test_an_object_is_held_as_the_symbol_it_is_imported_by() -> None:
+    """One `django.db.models` exports is referred to through it, as
+    `models.<name>`, any other by its module and qualified name."""
+    assert DjangoField(field_class=django.db.models.CharField) == DjangoField(
+        field_class=DjangoField.models_symbol(Identifier("CharField"))
+    )
+    assert ModelOptions(bases=(django.db.models.Model,)) == ModelOptions()
+    assert BareDecorator(function=uuid.uuid4).symbol() == Symbol(
+        module=ModulePath("uuid"), qualname=(Identifier("uuid4"),)
+    )
+
+
+def test_an_object_that_cannot_be_imported_is_rejected() -> None:
+    class Local:
+        pass
+
+    with pytest.raises(pydantic.ValidationError):
+        _ = PlainBase(origin=Local)

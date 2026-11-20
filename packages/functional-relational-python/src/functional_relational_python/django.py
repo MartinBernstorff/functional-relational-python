@@ -1,7 +1,33 @@
 """Configuration for the Django output: `Catalog(django=DjangoModels(...))`.
 
-Generated source refers to an object by `Symbol`, e.g. a base class or a field
-class, and writes a value as a `ValueExpression`, e.g. `ValueExpression("254")`.
+>>> from django.db import models
+>>> from functional_relational_python import django as dj
+>>> dj.DjangoModels(
+...     module=ModulePath("app.models"),
+...     queries=ModulePath("app.queries"),
+...     app_label=dj.AppLabel("app"),
+...     every_model=dj.ModelOptions(ordering=(dj.OrderingTerm("-created_at"),)),
+...     entity_configs={
+...         Person: dj.GeneratedModel(
+...             bases=(Stamped,),
+...             fields={
+...                 FieldName("employer_id"): dj.FieldConfig(
+...                     on_delete=dj.OnDelete.CASCADE,
+...                     related_name=dj.RelatedName("employees"),
+...                 ),
+...             },
+...             constraints=(dj.Check(...),),
+...         ),
+...         Company: dj.ExistingDjangoModel(
+...             module=ModulePath("crm.models"), name=Identifier("Company")
+...         ),
+...     },
+... )
+
+Bases, decorators, field classes and default values are given as the objects
+themselves, e.g. `models.Model` or `uuid.uuid4`, or as a `Symbol` for one the
+Catalog cannot import, e.g. an abstract Django model. Other values in generated
+source are written as a `ValueExpression`, e.g. `ValueExpression("254")`.
 """
 
 from functional_relational_python.outputs.django.models import (
@@ -10,32 +36,28 @@ from functional_relational_python.outputs.django.models import (
     AutoNowAdd,
     BareDecorator,
     CalledDecorator,
-    CatalogModelOptions,
     DatabaseDefault,
     DbTable,
     Default,
-    DefaultDbTable,
-    DefaultDjangoModelName,
     DjangoField,
     DjangoIndex,
-    DjangoMeta,
     DjangoModelName,
     DjangoModels,
-    EntityModelOptions,
     ExistingDjangoModel,
+    FieldConfig,
     FieldTypes,
     ForeignKeyConstraint,
+    GeneratedModel,
     IndexField,
     IndexName,
-    Inherited,
     ModelGenericBase,
+    ModelOptions,
     OnDelete,
     OrderingTerm,
-    OwnPrimaryKey,
     PlainBase,
-    ReferenceKey,
     ReferencePrimaryKey,
     RelatedName,
+    Unset,
     WithoutDjangoModels,
 )
 from functional_relational_python.outputs.python.symbols import (
@@ -56,38 +78,34 @@ __all__ = [
     "AutoNowAdd",
     "BareDecorator",
     "CalledDecorator",
-    "CatalogModelOptions",
     "Check",
     "ConstraintName",
     "DatabaseDefault",
     "DbTable",
     "Default",
-    "DefaultDbTable",
-    "DefaultDjangoModelName",
     "DjangoField",
     "DjangoIndex",
-    "DjangoMeta",
     "DjangoModelName",
     "DjangoModels",
-    "EntityModelOptions",
     "EveryRow",
     "ExistingDjangoModel",
+    "FieldConfig",
     "FieldTypes",
     "ForeignKeyConstraint",
+    "GeneratedModel",
     "Identifier",
     "IndexField",
     "IndexName",
-    "Inherited",
     "ModelGenericBase",
+    "ModelOptions",
     "OnDelete",
     "OrderingTerm",
-    "OwnPrimaryKey",
     "PlainBase",
-    "ReferenceKey",
     "ReferencePrimaryKey",
     "RelatedName",
     "Symbol",
     "Unique",
+    "Unset",
     "ValueExpression",
     "WithoutDjangoModels",
 ]

@@ -5,7 +5,14 @@ import os
 import subprocess
 import sys
 import types
-from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
+from collections.abc import (
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from pathlib import Path
 from typing import Annotated, ClassVar, Self, override
 
@@ -44,18 +51,20 @@ from functional_relational_python.entity_graph.id import (
 from functional_relational_python.outputs import engine
 from functional_relational_python.outputs.django.models import (
     AppLabel,
-    CatalogModelOptions,
-    DefaultDjangoModelName,
     DjangoField,
     DjangoModelName,
     DjangoModels,
     DjangoModelsRenderer,
-    EntityModelOptions,
+    EntityConfig,
     ExistingDjangoModel,
+    FieldConfig,
+    GeneratedModel,
     ModelGenericBase,
+    ModelOptions,
     PlainBase,
     ReferencePrimaryKey,
     RelatedName,
+    Unset,
 )
 from functional_relational_python.outputs.django.queries import (
     DjangoQueriesDiagnostic,
@@ -93,6 +102,7 @@ from functional_relational_python.outputs.python.test_mappings import (
 from functional_relational_python.pipeline import conditions, ir, steps
 from functional_relational_python.pipeline.constraints import (
     Check,
+    Constraint,
     ConstraintName,
     Unique,
 )
@@ -247,55 +257,57 @@ class Modules:
     queries: ClassVar[ModulePath] = ModulePath("frp_generated_queries")
 
     @staticmethod
-    def with_options(options: CatalogModelOptions) -> DjangoModels:
-        """Every Entity's model declared by `options`, and a Badge the `badge`
-        of the Employee wearing it."""
-        return Modules.config().model_copy(
-            update={
-                "model_options": options,
-                "entity_model_options": {
-                    Badge: EntityModelOptions.inherited().model_copy(
-                        update={
-                            "related_names": {
-                                FieldName("employee_id"): RelatedName("badge")
-                            }
-                        }
-                    )
-                },
-            }
+    def with_options(every_model: ModelOptions) -> DjangoModels:
+        """Every Entity's model declared by `every_model`, and a Badge the
+        `badge` of the Employee wearing it."""
+        return Modules.configured(
+            {
+                Badge: GeneratedModel(
+                    fields={
+                        FieldName("employee_id"): FieldConfig(
+                            related_name=RelatedName("badge")
+                        )
+                    }
+                )
+            },
+            every_model,
         )
 
     @staticmethod
     def with_bases() -> DjangoModels:
         """Every Entity's QuerySet and Manager subclass this module's bases."""
         return Modules.with_options(
-            CatalogModelOptions.default().model_copy(
-                update={
-                    "query_set_base": ModelGenericBase(
-                        origin=Symbol.of(NewestFirstQuerySet).unwrap()
-                    ),
-                    "manager_base": ModelGenericBase(
-                        origin=Symbol.of(WithoutFirstManager).unwrap()
-                    ),
-                }
+            ModelOptions(
+                query_set_base=ModelGenericBase(origin=NewestFirstQuerySet),
+                manager_base=ModelGenericBase(origin=WithoutFirstManager),
             )
         )
 
     @staticmethod
-    def config() -> DjangoModels:
+    def config(
+        entity_configs: Mapping[type[pydantic.BaseModel], EntityConfig] = (
+            types.MappingProxyType({})
+        ),
+    ) -> DjangoModels:
+        """Every model as `ModelOptions` declare it by default, but
+        `entity_configs`."""
+        return Modules.configured(entity_configs, ModelOptions())
+
+    @staticmethod
+    def configured(
+        entity_configs: Mapping[type[pydantic.BaseModel], EntityConfig],
+        every_model: ModelOptions,
+    ) -> DjangoModels:
         return DjangoModels(
             module=Modules.django,
+            queries=Modules.queries,
             app_label=AppLabel("frp_generated"),
             field_types={
                 enum_class: DjangoField.builtin(Identifier("TextField"), {})
                 for enum_class in (Role, Level)
             },
-            on_delete={},
-            queries=Modules.queries,
-            model_options=CatalogModelOptions.default(),
-            entity_model_options={},
-            constraints={},
-            existing={},
+            every_model=every_model,
+            entity_configs=entity_configs,
         )
 
 
@@ -322,23 +334,14 @@ class ExistingCompany:
 
     @staticmethod
     def config() -> DjangoModels:
-        generated = Modules.config()
-        return DjangoModels(
-            module=generated.module,
-            app_label=generated.app_label,
-            field_types=generated.field_types,
-            on_delete=generated.on_delete,
-            queries=generated.queries,
-            model_options=CatalogModelOptions.default(),
-            entity_model_options={},
-            constraints={},
-            existing={
+        return Modules.config(
+            {
                 Company: ExistingDjangoModel(
                     module=ExistingCompany.module,
                     name=Identifier("Firm"),
                     reverse_accessors={FieldName("parent"): FieldName("subsidiaries")},
                 )
-            },
+            }
         )
 
     @staticmethod
@@ -1305,14 +1308,8 @@ class Firm:
 
 def test_entities_named_alike_are_a_clash_though_their_models_are_not() -> None:
     """Their QuerySets and Managers are named after the Entities."""
-    config = Modules.config().model_copy(
-        update={
-            "entity_model_options": {
-                Firm.Company: EntityModelOptions.inherited().model_copy(
-                    update={"model_name": DjangoModelName("Firm")}
-                )
-            }
-        }
+    config = Modules.config(
+        {Firm.Company: GeneratedModel(name=DjangoModelName("Firm"))}
     )
     graph = EntityGraph.build(
         [Company, Firm.Company], IdBase.fake(), OneToOneMarker.fake()
@@ -2066,23 +2063,14 @@ def test_an_existing_model_gets_no_query_set_and_is_imported_for_type_checking()
 def test_a_query_follows_the_reverse_accessor_an_existing_model_declares() -> None:
     """`Badge`'s existing model names its one-to-one Reference to the Employee
     `medal`, where a generated model would name it `badge_by_employee`."""
-    generated = Modules.config()
-    config = DjangoModels(
-        module=generated.module,
-        app_label=generated.app_label,
-        field_types=generated.field_types,
-        on_delete=generated.on_delete,
-        queries=generated.queries,
-        model_options=CatalogModelOptions.default(),
-        entity_model_options={},
-        constraints={},
-        existing={
+    config = Modules.config(
+        {
             Badge: ExistingDjangoModel(
                 module=ModulePath("frp_existing_badges"),
                 name=Identifier("Medal"),
                 reverse_accessors={FieldName("employee_id"): FieldName("medal")},
             )
-        },
+        }
     )
     view = View(
         name=ViewName("Decorated"),
@@ -2108,9 +2096,13 @@ def test_a_query_follows_the_reverse_accessor_an_existing_model_declares() -> No
 
 def undeclaring_company() -> DjangoModels:
     """`ExistingCompany`'s config, its model declaring no reverse accessor."""
-    config = ExistingCompany.config()
-    existing = config.existing[Company].model_copy(update={"reverse_accessors": {}})
-    return config.model_copy(update={"existing": {Company: existing}})
+    return Modules.config(
+        {
+            Company: ExistingDjangoModel(
+                module=ExistingCompany.module, name=Identifier("Firm")
+            )
+        }
+    )
 
 
 def rendered_with(
@@ -2224,7 +2216,7 @@ def test_a_view_reads_through_a_related_name_like_the_engine(view: View) -> None
     it."""
     entities = organisation()
     (compiled,) = compile_all([view]).views
-    config = Modules.with_options(CatalogModelOptions.default())
+    config = Modules.with_options(ModelOptions())
 
     with Database.of([view], (), config) as django_models:
         Database.put(entities, config)
@@ -2238,8 +2230,8 @@ def prefixed_model_name(entity: type[pydantic.BaseModel]) -> DjangoModelName:
     return DjangoModelName(f"Django{entity.__name__}")
 
 
-def entity_model_name(_: type[pydantic.BaseModel]) -> DefaultDjangoModelName:
-    return DefaultDjangoModelName()
+def entity_model_name(_: type[pydantic.BaseModel]) -> Unset:
+    return Unset()
 
 
 @pytest.mark.parametrize(
@@ -2267,9 +2259,7 @@ def entity_model_name(_: type[pydantic.BaseModel]) -> DefaultDjangoModelName:
 )
 def test_a_view_reads_a_model_keyed_by_its_reference_like_the_engine(
     view: View,
-    model_name_of: Callable[
-        [type[pydantic.BaseModel]], DjangoModelName | DefaultDjangoModelName
-    ],
+    model_name_of: Callable[[type[pydantic.BaseModel]], DjangoModelName | Unset],
 ) -> None:
     """A Badge's model has the Employee it is of as its primary key, so its `id`
     is read from that column. Each Badge's `id` is its Employee's. A model named
@@ -2281,24 +2271,16 @@ def test_a_view_reads_a_model_keyed_by_its_reference_like_the_engine(
         for entity in organisation()
     )
     (compiled,) = compile_all([view]).views
-    named = {
-        entity: EntityModelOptions.inherited().model_copy(
-            update={"model_name": model_name_of(entity)}
-        )
-        for entity in entity_graph().entities
-    }
-    config = Modules.config().model_copy(
-        update={
-            "entity_model_options": {
-                **named,
-                Badge: named[Badge].model_copy(
-                    update={
-                        "primary_key": ReferencePrimaryKey(
-                            reference=FieldName("employee_id")
-                        )
-                    }
-                ),
-            }
+    config = Modules.config(
+        {
+            **{
+                entity: GeneratedModel(name=model_name_of(entity))
+                for entity in entity_graph().entities
+            },
+            Badge: GeneratedModel(
+                name=model_name_of(Badge),
+                primary_key=ReferencePrimaryKey(reference=FieldName("employee_id")),
+            ),
         }
     )
 
@@ -2641,26 +2623,22 @@ class PlainBases:
 
     @staticmethod
     def config_in(module: ModulePath) -> DjangoModels:
-        return Modules.config().model_copy(
-            update={
-                "entity_model_options": {
-                    Employee: EntityModelOptions.inherited().model_copy(
-                        update={
-                            "query_set_base": PlainBase(
-                                origin=Symbol(
-                                    module=module,
-                                    qualname=(Identifier("EmployeeQuerySetBase"),),
-                                )
-                            ),
-                            "manager_base": PlainBase(
-                                origin=Symbol(
-                                    module=module,
-                                    qualname=(Identifier("EmployeeManagerBase"),),
-                                )
-                            ),
-                        }
-                    )
-                }
+        return Modules.config(
+            {
+                Employee: GeneratedModel(
+                    query_set_base=PlainBase(
+                        origin=Symbol(
+                            module=module,
+                            qualname=(Identifier("EmployeeQuerySetBase"),),
+                        )
+                    ),
+                    manager_base=PlainBase(
+                        origin=Symbol(
+                            module=module,
+                            qualname=(Identifier("EmployeeManagerBase"),),
+                        )
+                    ),
+                )
             }
         )
 
@@ -2691,15 +2669,13 @@ class DeclaredManager:
     @staticmethod
     def config() -> DjangoModels:
         return Modules.with_options(
-            CatalogModelOptions.default().model_copy(
-                update={
-                    "bases": (
-                        Symbol(
-                            module=DeclaredManager.module,
-                            qualname=(Identifier("DeclaredManagerModel"),),
-                        ),
-                    )
-                }
+            ModelOptions(
+                bases=(
+                    Symbol(
+                        module=DeclaredManager.module,
+                        qualname=(Identifier("DeclaredManagerModel"),),
+                    ),
+                )
             )
         )
 
@@ -3223,29 +3199,49 @@ def constrained(config: DjangoModels) -> DjangoModels:
     """`config` with constraints, one comparing with an enum member."""
     role = conditions.field(FieldName("role"))
     nickname = conditions.field(FieldName("nickname"))
-    return config.model_copy(
-        update={
-            "constraints": {
-                Employee: (
-                    Check(
-                        name=ConstraintName("employee_lead_has_nickname"),
-                        condition=conditions.or_(
-                            conditions.ne(role, Role.LEAD),
-                            conditions.not_(conditions.is_null(nickname)),
-                        ),
+    return with_constraints(
+        config,
+        {
+            Employee: (
+                Check(
+                    name=ConstraintName("employee_lead_has_nickname"),
+                    condition=conditions.or_(
+                        conditions.ne(role, Role.LEAD),
+                        conditions.not_(conditions.is_null(nickname)),
                     ),
                 ),
-                Department: (
-                    Unique(
-                        name=ConstraintName("department_unique_name"),
-                        fields=(FieldName("company_id"), FieldName("name")),
-                        where=conditions.ne(
-                            conditions.field(FieldName("name")), Text("")
-                        ),
-                    ),
+            ),
+            Department: (
+                Unique(
+                    name=ConstraintName("department_unique_name"),
+                    fields=(FieldName("company_id"), FieldName("name")),
+                    where=conditions.ne(conditions.field(FieldName("name")), Text("")),
                 ),
-            }
-        }
+            ),
+        },
+    )
+
+
+def with_constraints(
+    config: DjangoModels,
+    constraints: Mapping[type[pydantic.BaseModel], Sequence[Constraint]],
+) -> DjangoModels:
+    """`config` with each Entity's `constraints` added to its generated model."""
+    return DjangoModels(
+        module=config.module,
+        queries=config.queries,
+        app_label=config.app_label,
+        field_types=config.field_types,
+        every_model=config.every_model,
+        entity_configs={
+            **config.entity_configs,
+            **{
+                entity: config.generated_config_of(entity).model_copy(
+                    update={"constraints": tuple(added)}
+                )
+                for entity, added in constraints.items()
+            },
+        },
     )
 
 
@@ -3587,9 +3583,7 @@ def test_the_database_refuses_exactly_the_rows_a_check_is_false_for(
         for row in view_engine(compiled, case.entities).read(view.name).unwrap()
     }
     check = Check(name=ConstraintName("checked"), condition=case.condition)
-    config = Modules.config().model_copy(
-        update={"constraints": {case.from_model: (check,)}}
-    )
+    config = Modules.config({case.from_model: GeneratedModel(constraints=(check,))})
 
     with Database.of([view], (), config):
         refused = Database.rejected(case.entities, case.from_model, config)
@@ -3617,9 +3611,7 @@ def test_the_database_refuses_a_second_row_a_unique_keeps() -> None:
         fields=(FieldName("company_id"), FieldName("name")),
         where=conditions.ne(conditions.field(FieldName("name")), Text("dup")),
     )
-    config = Modules.config().model_copy(
-        update={"constraints": {Department: (unique,)}}
-    )
+    config = Modules.config({Department: GeneratedModel(constraints=(unique,))})
 
     # A View, so that there is a module of View models.
     view = View(
